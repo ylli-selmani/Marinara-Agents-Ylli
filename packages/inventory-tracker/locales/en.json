@@ -11,7 +11,13 @@
   "agents": {
     "inventory-tracker": {
       "name": "Inventory Tracker",
-      "description": "Tracks currencies, equipped gear, and carried items as separate structured lists with compact quantities. Add the Agent in Chat Settings → Agents → Tracker Agents for Roleplay mode."
+      "description": "Tracks currencies, equipped gear, and carried items as separate structured lists with compact quantities. Add the Agent in Chat Settings → Agents → Tracker Agents for Roleplay mode.",
+      "promptTemplates": {
+        "minimal": {
+          "name": "Minimal — carried items only",
+          "description": "Shorter prompt with no world row: an item the persona loses is removed with qty 0 instead of being tracked. For small models and replicates previous behaviour."
+        }
+      }
     }
   }
 }

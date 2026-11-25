@@ -1,0 +1,21 @@
+[
+  {
+    "id": "lorebook-manager",
+    "name": "Lorebook Manager",
+    "description": "Multi-lorebook visual graph workbench connecting lore entries, Character Cards, and Personas by explicit IDs and text mentions.",
+    "author": "Pasta Devs",
+    "phase": "pre_generation",
+    "enabledByDefault": false,
+    "category": "misc",
+    "runtimeDisabled": true,
+    "modeAllowlist": [
+      "conversation",
+      "roleplay",
+      "game"
+    ],
+    "defaultTools": [],
+    "defaultSettings": {},
+    "defaultPromptTemplate": "",
+    "execution": "feature"
+  }
+]

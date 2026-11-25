@@ -90,6 +90,7 @@ const PACKAGE_BUILT_AGAINST = Object.freeze({
 // Capability API 1.390 lets the Engine draw the agent page header (agentDetail.header: "engine"); 1.820 adds the
 // chat-activity slot, so an Engine without it refuses the manifest instead of dropping the Agent activity card.
 const LONG_TERM_MEMORY_CAPABILITY_API = Object.freeze({ major: 1, minor: 820 });
+const LOREBOOK_MANAGER_CAPABILITY_API = Object.freeze({ major: 1, minor: 390 });
 // Capability API 1.819 gives packages characters on api.runtime.resources and the `character-write` permission
 // (Pasta-Devs/Marinara-Engine#9043), so Calls, Noodle and Slurp stop bundling the Engine's characters storage
 // (Pasta-Devs/Marinara-Agents#2242). Built against the Engine commit that added it.
@@ -127,6 +128,12 @@ const longTermMemoryOwnedSourcePaths = [
   "packages/client/src/features/long-term-memory",
 ];
 const longTermMemorySourceRoot = join(packagesDir, "long-term-memory/src/engine");
+const lorebookManagerSourceRoot = join(packagesDir, "lorebook-manager/src/engine");
+const lorebookManagerOwnedSourcePaths = [
+  "packages/shared/src/features/agents/lorebook-manager",
+  "packages/server/src/services/lorebook-manager",
+  "packages/client/src/features/lorebook-manager",
+];
 // The archivist pictures for setup and the tour. The package ships every picture in the folder; the client names
 // them in features/long-term-memory/onboarding/assets.ts.
 const longTermMemoryServedAssetPaths = readdirSync(join(packagesDir, "long-term-memory/assets/onboarding"))
@@ -378,9 +385,10 @@ function featurePermissions(feature) {
 async function prepareFeatureBuildRoot(feature) {
   const ownRoot = feature.id === "hierarchical-maps" ? hierarchicalMapsSourceRoot : (feature.packageSourceRoot ?? null);
   if (ownRoot && !existsSync(ownRoot)) throw new Error(`Missing package-owned ${feature.name} source`);
-  // Long-Term Memory, Memory Nag, Saucelings and World Maps carry every Engine file they build from.
+  // Long-Term Memory, Lorebook Manager, Memory Nag, Saucelings and World Maps carry every Engine file they build from.
   const fromVendoredEngine =
     feature.id !== "long-term-memory" &&
+    feature.id !== "lorebook-manager" &&
     feature.id !== "memory-nag" &&
     feature.id !== "saucelings" &&
     feature.id !== "hierarchical-maps";
@@ -644,6 +652,30 @@ const features = [
       // The conversation surface only holds the pop-up for a branch's hand-hidden latest messages.
       slots: ["chat-settings", "conversation-surface", "chat-activity"],
       assets: { paths: longTermMemoryServedAssetPaths },
+    },
+  },
+  {
+    id: "lorebook-manager",
+    version: "0.1.0",
+    minEngineVersion: "2.5.2",
+    maxEngineExclusive: MAX_ENGINE_EXCLUSIVE,
+    name: "Lorebook Manager",
+    description:
+      "Multi-lorebook visual graph workbench connecting lore entries, Character Cards, and Personas by explicit IDs and text mentions.",
+    category: "misc",
+    kind: ["agent"],
+    modes: ["conversation", "roleplay", "game"],
+    permissions: ["chat-read", "routes", "storage", "ui"],
+    serverImport: "packages/server/src/services/lorebook-manager/server-entry.ts",
+    serverEntry: true,
+    clientImport: "packages/client/src/features/lorebook-manager/client-entry.tsx",
+    packageSourceRoot: lorebookManagerSourceRoot,
+    ownedSourcePaths: lorebookManagerOwnedSourcePaths,
+    engineBoundaryPath: join(packagesDir, "lorebook-manager/engine-boundary.json"),
+    boundaryDisplayName: "Lorebook Manager",
+    capabilityApi: LOREBOOK_MANAGER_CAPABILITY_API,
+    contributions: {
+      agentDetail: { agentIds: ["lorebook-manager"], header: "engine" },
     },
   },
   {
@@ -1012,6 +1044,14 @@ const longTermMemoryBoundary = selectedFeatures.some((feature) => feature.id ===
       capabilityApi: LONG_TERM_MEMORY_CAPABILITY_API,
     })
   : null;
+const lorebookManagerBoundary = selectedFeatures.some((feature) => feature.id === "lorebook-manager")
+  ? await assertPackagePrivateImportBoundary({
+      sourceRoot: lorebookManagerSourceRoot,
+      boundaryPath: join(packagesDir, "lorebook-manager/engine-boundary.json"),
+      displayName: "Lorebook Manager",
+      capabilityApi: LOREBOOK_MANAGER_CAPABILITY_API,
+    })
+  : null;
 const memoryNagBoundary = selectedFeatures.some((feature) => feature.id === "memory-nag")
   ? await assertPackagePrivateImportBoundary({
       sourceRoot: memoryNagSourceRoot,
@@ -1258,9 +1298,11 @@ async function bundleClientEntry(feature, entry, output, metafilePath, buildRoot
       ? hierarchicalMapsBoundary
       : feature.id === "long-term-memory"
         ? longTermMemoryBoundary
-        : feature.id === "memory-nag"
-          ? memoryNagBoundary
-          : null;
+        : feature.id === "lorebook-manager"
+          ? lorebookManagerBoundary
+          : feature.id === "memory-nag"
+            ? memoryNagBoundary
+            : null;
   const hostModules = hostModulesPlugin({
     engineRoot,
     // Boundary packages emit this same validated API in their manifest below; a feature override
@@ -2200,11 +2242,13 @@ for (const feature of selectedFeatures) {
       ? hierarchicalMapsBoundary
       : feature.id === "long-term-memory"
         ? longTermMemoryBoundary
-        : feature.id === "memory-nag"
-          ? memoryNagBoundary
-          : feature.id === "saucelings"
-            ? saucelingsBoundary
-            : null;
+        : feature.id === "lorebook-manager"
+          ? lorebookManagerBoundary
+          : feature.id === "memory-nag"
+            ? memoryNagBoundary
+            : feature.id === "saucelings"
+              ? saucelingsBoundary
+              : null;
   const manifest = {
     schemaVersion: boundary || feature.capabilityApi ? 2 : 1,
     ...(boundary

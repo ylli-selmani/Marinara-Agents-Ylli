@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 2,
+  "capabilityApi": {
+    "major": 1,
+    "minor": 390
+  },
+  "builtAgainst": {
+    "engineVersion": "2.5.2",
+    "engineCommit": "6086825a1e91c5301bb4da80d4f919597186efab"
+  },
+  "id": "lorebook-manager",
+  "name": "Lorebook Manager",
+  "version": "0.1.0",
+  "description": "Multi-lorebook visual graph workbench connecting lore entries, Character Cards, and Personas by explicit IDs and text mentions. Open Agents → Lorebook Manager to inspect and link your lorebooks, cards, and personas.",
+  "engine": {
+    "min": "2.5.2",
+    "maxExclusive": "4.0.0"
+  },
+  "kind": [
+    "agent"
+  ],
+  "entrypoints": {
+    "agents": "agents.json",
+    "server": "server.mjs",
+    "client": "client.js"
+  },
+  "contributions": {
+    "agentDetail": {
+      "agentIds": [
+        "lorebook-manager"
+      ],
+      "header": "engine"
+    }
+  },
+  "files": [
+    {
+      "path": "agents.json",
+      "sha256": "9f5be2a99a3a3fe5ebdf2e8592f1f6abb41b1700d1251f5b1798c4c4afcbdddf",
+      "bytes": 561
+    },
+    {
+      "path": "server.mjs",
+      "sha256": "3a1bc030367b98b267742f4714614eb0065bbb97a290812ced695e96287b043e",
+      "bytes": 5419
+    },
+    {
+      "path": "client.js",
+      "sha256": "bfd235983079bf04d87e9c30e3a87477284cd490bbe30823fc3359917e7ecfc8",
+      "bytes": 48800
+    }
+  ],
+  "permissions": [
+    "chat-read",
+    "routes",
+    "storage",
+    "ui"
+  ],
+  "restartRequired": true
+}

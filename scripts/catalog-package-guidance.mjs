@@ -51,6 +51,10 @@ export const OFFICIAL_PACKAGE_GUIDANCE = Object.freeze({
     modes: ["roleplay"],
     activation: "Add the Agent in Chat Settings → Agents → Tracker Agents for Roleplay mode.",
   },
+  "lorebook-manager": {
+    modes: ["conversation", "roleplay", "game"],
+    activation: "Open Agents → Lorebook Manager to inspect and link your lorebooks, cards, and personas.",
+  },
   "memory-nag": {
     modes: ["roleplay"],
     activation:

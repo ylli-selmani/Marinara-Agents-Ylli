@@ -1,0 +1,17 @@
+{
+  "$schema": "../../../schemas/package-localization.schema.json",
+  "_meta": {
+    "locale": "en",
+    "direction": "ltr"
+  },
+  "package": {
+    "name": "Lorebook Manager",
+    "description": "Multi-lorebook visual graph workbench connecting lore entries, Character Cards, and Personas by explicit IDs and text mentions. Open Agents → Lorebook Manager to inspect and link your lorebooks, cards, and personas."
+  },
+  "agents": {
+    "lorebook-manager": {
+      "name": "Lorebook Manager",
+      "description": "Multi-lorebook visual graph workbench connecting lore entries, Character Cards, and Personas by explicit IDs and text mentions."
+    }
+  }
+}

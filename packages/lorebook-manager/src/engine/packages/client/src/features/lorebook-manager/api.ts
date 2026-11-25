@@ -14,6 +14,7 @@ export const API_ROOT = "/api/lorebook-manager";
 
 export const lmQueryKeys = {
   root: ["lorebook-manager"] as const,
+  graphRoot: ["lorebook-manager", "graph"] as const,
   graph: (scopeKey: string) => ["lorebook-manager", "graph", scopeKey] as const,
   compendiums: ["lorebook-manager", "compendiums"] as const,
   chatBinding: (chatId: string) => ["lorebook-manager", "chat-binding", chatId] as const,

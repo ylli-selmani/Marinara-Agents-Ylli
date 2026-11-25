@@ -278,7 +278,7 @@ export function CompendiumModal({
               onToggle={(id) => setLorebookIds((prev) => toggleId(prev, id))}
               onAdd={(ids) => setLorebookIds((prev) => addUniqueIds(prev, ids))}
               onApplySet={(ids) => setLorebookIds([...new Set(ids)])}
-              triggerClassName="mari-chrome-field w-full justify-between"
+              triggerClassName="mari-chrome-field min-h-10 w-full min-w-0 rounded-lg px-3 py-2 text-base md:text-xs disabled:cursor-not-allowed disabled:opacity-60"
               ariaLabel="Compendium lorebooks"
               keepMissing
               disabled={saving}

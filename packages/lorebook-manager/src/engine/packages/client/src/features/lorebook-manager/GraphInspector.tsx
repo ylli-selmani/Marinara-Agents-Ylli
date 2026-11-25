@@ -323,7 +323,13 @@ export function GraphInspector({
   const loadedBookCount = useMemo(() => payload.lorebooks.filter((book) => book.loaded).length, [payload.lorebooks]);
 
   const linkableTargets = useMemo(() => {
-    if (activeNode.nodeType !== "lore") return [];
+    if (activeNode.nodeType === "lorebook") return [];
+    if (activeNode.nodeType === "character" || activeNode.nodeType === "persona") {
+      const existingIncomingRefs = new Set(explicitGroups.incoming.map((item) => item.sourceRef));
+      return payload.nodes
+        .filter((candidate) => candidate.nodeType === "lore" && !existingIncomingRefs.has(candidate.ref))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
     const existingRefs = new Set([
       ...explicitGroups.mutual.map((item) => item.otherRef),
       ...explicitGroups.outgoing.map((item) => item.targetRef),
@@ -337,7 +343,7 @@ export function GraphInspector({
   }, [activeNode, explicitGroups, payload.nodes]);
 
   const addTargetNode = addTargetRef ? allNodesByRef.get(addTargetRef) : undefined;
-  const canBidirectTarget = addTargetNode?.nodeType === "lore";
+  const canBidirectTarget = activeNode.nodeType === "lore" && addTargetNode?.nodeType === "lore";
 
   const isSectionOpen = (sectionKey: string, count: number) => {
     const stateKey = `${activeNode.ref}::${sectionKey}`;
@@ -423,7 +429,7 @@ export function GraphInspector({
 
   const handleAddExplicit = async () => {
     if (
-      activeNode.nodeType !== "lore" ||
+      activeNode.nodeType === "lorebook" ||
       !addTargetRef ||
       addTargetRef === activeNode.ref ||
       !linkableTargets.some((candidate) => candidate.ref === addTargetRef)
@@ -432,13 +438,26 @@ export function GraphInspector({
     }
     const rel = addRelation.trim() || "related_to";
     const targetNode = allNodesByRef.get(addTargetRef);
-    if (addBothWays && targetNode?.nodeType === "lore") {
+    if (!targetNode) return;
+
+    if (activeNode.nodeType === "character" || activeNode.nodeType === "persona") {
+      if (targetNode.nodeType !== "lore") return;
+      await onSaveRelationships(targetNode, {
+        ...targetNode.relationships,
+        [toRelationshipKey(activeNode.ref)]: rel,
+      });
+      await maybeAutoExcludeCardForRepresents(targetNode, activeNode.ref, rel);
+      setAddTargetRef("");
+      return;
+    }
+
+    if (addBothWays && targetNode.nodeType === "lore") {
       const reverseKey = findRawRelationshipKey(targetNode, activeNode.ref) ?? toRelationshipKey(activeNode.ref);
       await onBatchSaveRelationships([
         { entry: activeNode, relationships: { ...activeNode.relationships, [toRelationshipKey(addTargetRef)]: rel } },
         { entry: targetNode, relationships: { ...targetNode.relationships, [reverseKey]: rel } },
       ]);
-    } else if (addFlipped && targetNode?.nodeType === "lore") {
+    } else if (addFlipped && targetNode.nodeType === "lore") {
       if (findRawRelationshipKey(targetNode, activeNode.ref)) {
         toast.error(`${targetNode.name} already links to ${activeNode.name}. Edit it under "Linking to this".`);
         return;
@@ -1316,7 +1335,7 @@ export function GraphInspector({
       </div>
 
       {/* Add ID link directly beside ID links */}
-      {activeNode.nodeType === "lore" && linkableTargets.length > 0 ? (
+      {activeNode.nodeType !== "lorebook" && linkableTargets.length > 0 ? (
         <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
           <span className="block text-xs font-medium">Add ID link</span>
           <div className="flex gap-1.5">
@@ -1329,7 +1348,9 @@ export function GraphInspector({
               }}
               className="mari-chrome-field min-w-0 flex-1 rounded px-2 py-1 text-xs"
             >
-              <option value="">Pick entry, card, or persona…</option>
+              <option value="">
+                {activeNode.nodeType === "lore" ? "Pick entry, card, or persona…" : "Pick lorebook entry…"}
+              </option>
               {linkableTargets.map((target) => {
                 const suffix =
                   target.nodeType === "lore"
@@ -1367,15 +1388,15 @@ export function GraphInspector({
           {addTargetNode ? (
             <div className="flex flex-wrap items-center justify-between gap-1.5 rounded border border-[var(--border)] bg-[var(--background)]/40 px-2 py-1 text-[0.6875rem]">
               <span className="min-w-0 truncate text-[var(--muted-foreground)]">
-                {addBothWays && canBidirectTarget ? (
-                  <>
-                    <strong className="text-[var(--foreground)]">{activeNode.name}</strong> ↔ {addRelation} ↔{" "}
-                    <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong>
-                  </>
-                ) : addFlipped && canBidirectTarget ? (
+                {activeNode.nodeType !== "lore" || (addFlipped && canBidirectTarget) ? (
                   <>
                     <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong> — {addRelation} →{" "}
                     <strong className="text-[var(--foreground)]">{activeNode.name}</strong>
+                  </>
+                ) : addBothWays && canBidirectTarget ? (
+                  <>
+                    <strong className="text-[var(--foreground)]">{activeNode.name}</strong> ↔ {addRelation} ↔{" "}
+                    <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong>
                   </>
                 ) : (
                   <>
@@ -1410,7 +1431,9 @@ export function GraphInspector({
           ) : null}
           <button
             type="button"
-            disabled={!addTargetRef || savingRef === activeNode.ref}
+            disabled={
+              !addTargetRef || savingRef === activeNode.ref || (addTargetNode ? savingRef === addTargetNode.ref : false)
+            }
             onClick={() => void handleAddExplicit()}
             className="mari-chrome-control mari-chrome-control--small w-full justify-center disabled:opacity-50"
           >

@@ -688,25 +688,53 @@ export function LorebookGraph({
         edge.sourceRef < edge.targetRef ? `${edge.sourceRef}~${edge.targetRef}` : `${edge.targetRef}~${edge.sourceRef}`,
       );
     }
-    return `${sortedNodeRefsKey}::${[...edgePairs].sort().join("|")}::${layoutSpread}`;
-  }, [sortedNodeRefsKey, shown.edges, layoutSpread]);
+    return `${sortedNodeRefsKey}::${[...edgePairs].sort().join("|")}`;
+  }, [sortedNodeRefsKey, shown.edges]);
 
   const computedPositions = useMemo(() => {
     if (layoutCacheRef.current?.key === topologyKey) {
       return layoutCacheRef.current.positions;
     }
-    const positions = layoutGraph(shown, 1, LAYOUT_MAX_ITERATIONS, layoutSpread).positions;
+    const positions = layoutGraph(shown, 1, LAYOUT_MAX_ITERATIONS, 1).positions;
     layoutCacheRef.current = { key: topologyKey, positions };
     return positions;
-  }, [topologyKey, shown, layoutSpread]);
+  }, [topologyKey, shown]);
+
+  const scaledPositions = useMemo(() => {
+    if (layoutSpread === 1 || computedPositions.size <= 1) return computedPositions;
+    let sumX = 0;
+    let sumY = 0;
+    for (const p of computedPositions.values()) {
+      sumX += p.x;
+      sumY += p.y;
+    }
+    const cx = sumX / computedPositions.size;
+    const cy = sumY / computedPositions.size;
+    const radii: number[] = [];
+    for (const p of computedPositions.values()) {
+      radii.push(Math.hypot(p.x - cx, p.y - cy));
+    }
+    radii.sort((a, b) => a - b);
+    const innerRadius = Math.max(120, radii[Math.floor(radii.length / 2)] ?? 120);
+    const scaled = new Map<string, GraphPoint>();
+    for (const [ref, p] of computedPositions) {
+      const dx = p.x - cx;
+      const dy = p.y - cy;
+      const r = Math.hypot(dx, dy);
+      const damp = 1 / (1 + Math.pow(r / (innerRadius * 1.8), 1.5) * 0.45);
+      const scale = 1 + (layoutSpread - 1) * damp;
+      scaled.set(ref, { x: cx + dx * scale, y: cy + dy * scale });
+    }
+    return scaled;
+  }, [computedPositions, layoutSpread]);
 
   const effectivePositions = useMemo(() => {
-    const merged = new Map(computedPositions);
+    const merged = new Map(scaledPositions);
     for (const [ref, point] of Object.entries(pinnedPositions)) {
       if (merged.has(ref)) merged.set(ref, point);
     }
     return merged;
-  }, [computedPositions, pinnedPositions]);
+  }, [scaledPositions, pinnedPositions]);
 
   const adjacency = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -749,7 +777,7 @@ export function LorebookGraph({
 
   const fitRef = useRef(fit);
   fitRef.current = fit;
-  const fitTrigger = `${sortedNodeRefsKey}::${layoutSpread}`;
+  const fitTrigger = sortedNodeRefsKey;
   useEffect(() => {
     if (effectivePositions.size === 0 || size.w <= 0 || size.h <= 0) return;
     if (!hasFittedRef.current || lastFitTriggerRef.current !== fitTrigger) {
@@ -918,6 +946,7 @@ export function LorebookGraph({
         }
 
         const isExplicit = edge.kind === "explicit";
+        const isDoubleBond = isExplicit && edge.relation.split(" / ")[0]?.trim() === "represents";
         const isMutual = edge.bidirectional === true;
         const relArrow = isExplicit && lit ? relationMarkerId(edge.relation) : null;
         const arrowId = isExplicit
@@ -929,11 +958,13 @@ export function LorebookGraph({
           ? isExplicit
             ? relationStroke(edge.relation)
             : "var(--lm-graph-ink)"
-          : isExplicit
-            ? "var(--lm-graph-edge)"
-            : isMutual
-              ? "var(--lm-graph-mention-mutual)"
-              : "var(--lm-graph-mention)";
+          : isDoubleBond
+            ? "color-mix(in srgb, #06b6d4 58%, var(--lm-graph-edge))"
+            : isExplicit
+              ? "var(--lm-graph-edge)"
+              : isMutual
+                ? "var(--lm-graph-mention-mutual)"
+                : "var(--lm-graph-mention)";
         const strokeWidth = isExplicit
           ? isMutual
             ? lit
@@ -954,13 +985,52 @@ export function LorebookGraph({
           ? `${fromNode.name} ↔ ${toNode.name} (${edge.relation}${edge.matchedText ? `: "${edge.matchedText}" / "${edge.reverseMatchedText ?? edge.matchedText}"` : ""})`
           : `${fromNode.name} → ${toNode.name} (${edge.relation}${edge.matchedText ? `: "${edge.matchedText}"` : ""})`;
 
+        const x1 = from.x + (dx / length) * gapFrom;
+        const y1 = from.y + (dy / length) * gapFrom;
+        const x2 = to.x - (dx / length) * gapTo;
+        const y2 = to.y - (dy / length) * gapTo;
+
+        if (isDoubleBond) {
+          const nx = -dy / length;
+          const ny = dx / length;
+          const off = 2.4 * edgeScale;
+          const bondStroke = lit ? "#06b6d4" : stroke;
+          const bondWidth = lit ? 2 : 1.35;
+          return (
+            <g
+              key={`${edge.kind}|${edge.sourceRef}|${edge.targetRef}|${edge.relation}|${index}`}
+              opacity={dimmed ? 0.12 : 1}
+            >
+              <title>{tooltip}</title>
+              <line
+                x1={x1 + nx * off}
+                y1={y1 + ny * off}
+                x2={x2 + nx * off}
+                y2={y2 + ny * off}
+                stroke={bondStroke}
+                strokeWidth={bondWidth}
+                vectorEffect="non-scaling-stroke"
+              />
+              <line
+                x1={x1 - nx * off}
+                y1={y1 - ny * off}
+                x2={x2 - nx * off}
+                y2={y2 - ny * off}
+                stroke={bondStroke}
+                strokeWidth={bondWidth}
+                vectorEffect="non-scaling-stroke"
+              />
+            </g>
+          );
+        }
+
         return (
           <line
             key={`${edge.kind}|${edge.sourceRef}|${edge.targetRef}|${edge.relation}|${index}`}
-            x1={from.x + (dx / length) * gapFrom}
-            y1={from.y + (dy / length) * gapFrom}
-            x2={to.x - (dx / length) * gapTo}
-            y2={to.y - (dy / length) * gapTo}
+            x1={x1}
+            y1={y1}
+            x2={x2}
+            y2={y2}
             stroke={stroke}
             strokeWidth={strokeWidth}
             strokeDasharray={strokeDasharray}

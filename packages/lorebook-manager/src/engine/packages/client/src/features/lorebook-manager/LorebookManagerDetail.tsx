@@ -282,7 +282,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const totalLibraryEntries = payload?.lorebooks.reduce((sum, book) => sum + book.entryCount, 0) ?? 0;
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 p-4">
+    <div className="mx-auto flex w-full max-w-7xl flex-col gap-2 px-4 py-3">
       {!props.engineHeader ? (
         <div className="flex items-center justify-between gap-2">
           <div>

@@ -7,6 +7,7 @@ import {
   Focus,
   Ghost,
   Globe,
+  HelpCircle,
   Link2,
   LocateFixed,
   MapPin,
@@ -178,7 +179,7 @@ export const GRAPH_STYLE = `
   --lm-graph-overlay-shadow: 0 12px 32px -10px rgb(0 0 0 / 0.7), 0 2px 8px -2px rgb(0 0 0 / 0.5);
 }
 [data-lm-graph-canvas] {
-  height: clamp(26rem, 64vh, 42rem);
+  height: clamp(26rem, 66vh, 44rem);
   border: 1px solid var(--border);
   border-radius: 0.5rem;
   background-color: var(--lm-graph-canvas);
@@ -233,7 +234,7 @@ export const GRAPH_STYLE = `
 }
 [data-lm-graph-card][data-lm-graph-docked] {
   width: 100%;
-  max-height: clamp(24rem, 64vh, 42rem);
+  max-height: clamp(26rem, 66vh, 44rem);
 }
 @media (min-width: 64rem) {
   [data-lm-graph-card][data-lm-graph-docked] {
@@ -535,10 +536,12 @@ export function LorebookGraph({
   const [navHistory, setNavHistory] = useState<string[]>([]);
   const [navIndex, setNavIndex] = useState(-1);
   const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
+  const [showLegend, setShowLegend] = useState(false);
 
   const [wrap, setWrap] = useState<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const legendRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
   const pointers = useRef(new Map<number, GraphPoint>());
   const press = useRef({ start: { x: 0, y: 0 }, moved: false });
@@ -585,12 +588,15 @@ export function LorebookGraph({
   }, [selectedNodeRef, navIndex]);
 
   useEffect(() => {
-    if (!readerState && !expanded) return;
+    if (!readerState && !showLegend && !expanded) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (readerState) {
         event.preventDefault();
         setReaderState(null);
+      } else if (showLegend) {
+        event.preventDefault();
+        setShowLegend(false);
       } else if (expanded) {
         event.preventDefault();
         setExpanded(false);
@@ -598,7 +604,18 @@ export function LorebookGraph({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [readerState, expanded]);
+  }, [readerState, showLegend, expanded]);
+
+  useEffect(() => {
+    if (!showLegend) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (legendRef.current && !legendRef.current.contains(event.target as Node)) {
+        setShowLegend(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [showLegend]);
 
   const graph = useMemo(
     () =>
@@ -1014,6 +1031,15 @@ export function LorebookGraph({
   const focusNodeName = focusRef ? allNodesByRef.get(focusRef)?.name : null;
   const pinnedCount = Object.keys(pinnedPositions).length;
   const readerNode = readerState ? (allNodesByRef.get(readerState.ref) ?? null) : null;
+  const edgeCounts = useMemo(() => {
+    let explicit = 0;
+    let mention = 0;
+    for (const edge of shown.edges) {
+      if (edge.kind === "explicit") explicit += 1;
+      else if (edge.kind === "mention") mention += 1;
+    }
+    return { explicit, mention };
+  }, [shown.edges]);
 
   const inspectorCard = activeNode ? (
     <GraphInspector
@@ -1057,7 +1083,7 @@ export function LorebookGraph({
   const content = (
     <div
       ref={rootRef}
-      className="grid min-w-0 gap-3"
+      className="grid min-w-0 gap-2"
       data-lm-graph
       data-lm-graph-expanded={expanded || undefined}
       role={expanded ? "dialog" : undefined}
@@ -1067,18 +1093,6 @@ export function LorebookGraph({
       <style>{GRAPH_STYLE}</style>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <button
-          type="button"
-          className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
-          aria-pressed={!whole}
-          onClick={() => setWhole((value) => !value)}
-        >
-          <Focus aria-hidden="true" size="0.875rem" />
-          {whole ? "Whole graph" : "Focus (2-hop)"}
-        </button>
-
-        <span aria-hidden="true" data-lm-graph-divider />
-
         {ENTITY_FAMILIES.map((family) => {
           const meta = FAMILY_META[family];
           const hidden = hiddenFamilies.has(family);
@@ -1110,24 +1124,6 @@ export function LorebookGraph({
         <button
           type="button"
           className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
-          aria-pressed={showExplicit}
-          onClick={() => setShowExplicit((value) => !value)}
-        >
-          <Link2 aria-hidden="true" size="0.875rem" />
-          ID links
-        </button>
-        <button
-          type="button"
-          className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
-          aria-pressed={showMentions}
-          onClick={() => setShowMentions((value) => !value)}
-        >
-          <Sparkles aria-hidden="true" size="0.875rem" />
-          Mentions
-        </button>
-        <button
-          type="button"
-          className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
           aria-pressed={showCharacters}
           onClick={() => setShowCharacters((value) => !value)}
         >
@@ -1151,31 +1147,6 @@ export function LorebookGraph({
           />
           Personas
         </button>
-        <button
-          type="button"
-          className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
-          aria-pressed={hideOrphans}
-          onClick={() => setHideOrphans((value) => !value)}
-        >
-          <EyeOff aria-hidden="true" size="0.875rem" />
-          Hide unlinked
-        </button>
-
-        <span aria-hidden="true" data-lm-graph-divider />
-
-        <label className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2 py-1 text-xs text-[var(--muted-foreground)]">
-          <span>Spacing</span>
-          <input
-            type="range"
-            aria-label="Node spacing"
-            min={0.5}
-            max={2.4}
-            step={0.1}
-            value={layoutSpread}
-            onChange={(event) => setLayoutSpread(Number(event.target.value))}
-            className="h-1.5 w-20 accent-[var(--primary)]"
-          />
-        </label>
       </div>
 
       {shown.nodes.length === 0 ? (
@@ -1473,15 +1444,113 @@ export function LorebookGraph({
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-[var(--muted-foreground)]">
-        <span>
-          {shown.nodes.length} nodes · {shown.edges.filter((e) => e.kind === "explicit").length} ID links ·{" "}
-          {shown.edges.filter((e) => e.kind === "mention").length} mentions
-        </span>
-        <span>
-          Solid = ID link · Dashed = mention · Hatched = book-category hint · Drag nodes to pin · Double-click to
-          focus/expand
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--card)]/60 px-2.5 py-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
+            aria-pressed={!whole}
+            onClick={() => setWhole((value) => !value)}
+          >
+            <Focus aria-hidden="true" size="0.875rem" />
+            {whole ? "Whole graph" : "Focus (2-hop)"}
+          </button>
+
+          <span aria-hidden="true" data-lm-graph-divider />
+
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
+            aria-pressed={showExplicit}
+            onClick={() => setShowExplicit((value) => !value)}
+          >
+            <Link2 aria-hidden="true" size="0.875rem" />
+            ID links
+          </button>
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
+            aria-pressed={showMentions}
+            onClick={() => setShowMentions((value) => !value)}
+          >
+            <Sparkles aria-hidden="true" size="0.875rem" />
+            Mentions
+          </button>
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
+            aria-pressed={hideOrphans}
+            onClick={() => setHideOrphans((value) => !value)}
+          >
+            <EyeOff aria-hidden="true" size="0.875rem" />
+            Hide unlinked
+          </button>
+
+          <span aria-hidden="true" data-lm-graph-divider />
+
+          <label className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2 py-1 text-xs text-[var(--muted-foreground)]">
+            <span>Spacing</span>
+            <input
+              type="range"
+              aria-label="Node spacing"
+              min={0.5}
+              max={2.4}
+              step={0.1}
+              value={layoutSpread}
+              onChange={(event) => setLayoutSpread(Number(event.target.value))}
+              className="h-1.5 w-20 accent-[var(--primary)]"
+            />
+          </label>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+          <span>
+            {shown.nodes.length} nodes · {edgeCounts.explicit} ID links · {edgeCounts.mention} mentions
+          </span>
+          <div ref={legendRef} className="relative">
+            <button
+              type="button"
+              className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+              aria-label="Graph legend"
+              title="Graph legend & shortcuts"
+              aria-expanded={showLegend}
+              aria-controls="lm-graph-legend"
+              onClick={() => setShowLegend((value) => !value)}
+            >
+              <HelpCircle size="0.875rem" />
+            </button>
+            {showLegend ? (
+              <div
+                id="lm-graph-legend"
+                role="region"
+                aria-label="Graph legend"
+                style={{
+                  zIndex: 20,
+                  bottom: "calc(100% + 0.5rem)",
+                  boxShadow: "var(--lm-graph-overlay-shadow)",
+                }}
+                className="absolute right-0 w-72 space-y-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 text-xs text-[var(--foreground)]"
+              >
+                <div className="font-medium">Legend &amp; tips</div>
+                <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
+                  <li>
+                    <strong className="text-[var(--foreground)]">Solid line:</strong> Explicit ID link (colored by
+                    relation when active)
+                  </li>
+                  <li>
+                    <strong className="text-[var(--foreground)]">Dashed line:</strong> Detected text mention (double
+                    arrows = mutual)
+                  </li>
+                  <li>
+                    <strong className="text-[var(--foreground)]">Hatched fill:</strong> Book-category hint (untagged
+                    entry)
+                  </li>
+                  <li>Drag nodes to pin · Double-click node to focus or expand</li>
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <EntryReaderModal

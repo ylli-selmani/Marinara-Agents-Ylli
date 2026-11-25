@@ -1,3 +1,44 @@
+export interface LorebookManagerDocumentRecord {
+  id: string;
+  packageId: string;
+  kind: string;
+  name: string;
+  description: string;
+  data: unknown;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LorebookManagerDocumentWrite {
+  id: string;
+  packageId: string;
+  kind: string;
+  name: string;
+  description: string;
+  data: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LorebookManagerDocumentUpdate {
+  id: string;
+  packageId: string;
+  expectedRevision: number;
+  name: string;
+  description: string;
+  data: unknown;
+  updatedAt: string;
+}
+
+export interface LorebookManagerDocumentStore {
+  list(packageId: string, kind: string): Promise<LorebookManagerDocumentRecord[]>;
+  getById(packageId: string, id: string): Promise<LorebookManagerDocumentRecord | null>;
+  create(input: LorebookManagerDocumentWrite): Promise<LorebookManagerDocumentRecord>;
+  update(input: LorebookManagerDocumentUpdate): Promise<LorebookManagerDocumentRecord | null>;
+  remove(packageId: string, id: string, expectedRevision: number): Promise<boolean>;
+}
+
 export interface LorebookManagerRuntimeHost {
   logger: {
     debug(message: string, ...args: unknown[]): void;
@@ -9,6 +50,9 @@ export interface LorebookManagerRuntimeHost {
     listCharacters(characterIds?: string[]): Promise<Array<{ id: string; data: unknown; comment: string }>>;
     listPersonas(personaIds?: string[]): Promise<Array<{ id: string; data: unknown }>>;
     listLorebooks(lorebookIds?: string[]): Promise<Array<{ id: string; data: unknown; entries: unknown[] }>>;
+  };
+  persistence: {
+    documents: LorebookManagerDocumentStore;
   };
 }
 

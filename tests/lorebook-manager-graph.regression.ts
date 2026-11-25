@@ -14,7 +14,21 @@ import {
   layoutGraph,
   neighbourhood,
 } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/graph-model.js";
+import { collectLinkedCastForLorebooks } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/compendium-helpers.js";
 import { simulateLorebookRetrieval } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/retrieval.js";
+import {
+  CompendiumStoreError,
+  createCompendium,
+  deleteCompendium,
+  getChatCompendiumBinding,
+  listCompendiums,
+  setChatCompendiumBinding,
+  updateCompendium,
+} from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/compendiums-store.js";
+import type {
+  LorebookManagerDocumentRecord,
+  LorebookManagerDocumentStore,
+} from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
 import type {
   LmGraphEdge,
   LmGraphNode,
@@ -673,4 +687,187 @@ assert.ok(
   "Entries exceeding token budget must move to suppressed over_budget",
 );
 
-console.log("lorebook-manager-graph.regression: all assertions passed");
+// ── Per-book token budget override (Slice 2b) ─────────────────────────────────
+const overriddenBookBudgetRes = simulateLorebookRetrieval(simPayload, {
+  queryText: "We meet Class 1-A before the Overhaul mission.",
+  activeCharacterIds: ["izuku"],
+  tokenBudget: 5000,
+  maxOneHop: 6,
+  respectBookBudgets: false,
+  bookTokenBudgets: { "b-sim": 20 },
+});
+assert.ok(
+  overriddenBookBudgetRes.suppressed.some((s) => s.reason === "over_budget"),
+  "Compendium per-book token budget override must cap entries even when global budget is large",
+);
+
+// ── Linked cast discovery helper (Slice 2b) ───────────────────────────────────
+const linkedCast = collectLinkedCastForLorebooks(
+  [
+    {
+      id: "b-main",
+      name: "Main Book",
+      description: "",
+      category: "world",
+      enabled: true,
+      entryCount: 1,
+      tokenBudget: null,
+      characterIds: ["char-owner"],
+      personaIds: ["persona-owner"],
+      loaded: true,
+    },
+    {
+      id: "b-other",
+      name: "Other Book",
+      description: "",
+      category: "world",
+      enabled: true,
+      entryCount: 1,
+      tokenBudget: null,
+      characterIds: ["char-ignored"],
+      personaIds: [],
+      loaded: true,
+    },
+  ],
+  new Set(["b-main"]),
+  [
+    {
+      nodeType: "lore",
+      ref: "lore:x1",
+      id: "x1",
+      lorebookId: "b-main",
+      lorebookName: "Main Book",
+      lorebookCategory: "world",
+      name: "Entry X",
+      description: "",
+      content: "",
+      keys: [],
+      secondaryKeys: [],
+      tag: "",
+      family: "lore",
+      secondaryFamilies: [],
+      inferredFamily: null,
+      enabled: true,
+      constant: false,
+      locked: false,
+      characterFilterMode: "exclude",
+      characterFilterIds: ["char-filtered"],
+      relationships: { "char:char-rel": "represents", "persona:persona-rel": "related_to" },
+    },
+  ],
+);
+assert.deepEqual(linkedCast.characterIds.sort(), ["char-filtered", "char-owner", "char-rel"]);
+assert.deepEqual(linkedCast.personaIds.sort(), ["persona-owner", "persona-rel"]);
+
+// ── Compendium persistence store & chat bindings (Slice 2b) ───────────────────
+function makeMemoryDocStore(): LorebookManagerDocumentStore {
+  const docs = new Map<string, LorebookManagerDocumentRecord>();
+  return {
+    async list(packageId, kind) {
+      return [...docs.values()].filter((d) => d.packageId === packageId && d.kind === kind);
+    },
+    async getById(packageId, id) {
+      const doc = docs.get(id);
+      return doc && doc.packageId === packageId ? { ...doc } : null;
+    },
+    async create(input) {
+      const record: LorebookManagerDocumentRecord = { ...input, revision: 1 };
+      docs.set(record.id, record);
+      return { ...record };
+    },
+    async update(input) {
+      const existing = docs.get(input.id);
+      if (!existing || existing.packageId !== input.packageId || existing.revision !== input.expectedRevision) {
+        return null;
+      }
+      const next: LorebookManagerDocumentRecord = {
+        ...existing,
+        name: input.name,
+        description: input.description,
+        data: input.data,
+        revision: existing.revision + 1,
+        updatedAt: input.updatedAt,
+      };
+      docs.set(next.id, next);
+      return { ...next };
+    },
+    async remove(packageId, id, expectedRevision) {
+      const existing = docs.get(id);
+      if (!existing || existing.packageId !== packageId || existing.revision !== expectedRevision) {
+        return false;
+      }
+      docs.delete(id);
+      return true;
+    },
+  };
+}
+
+async function runStoreChecks() {
+  const store = makeMemoryDocStore();
+  await assert.rejects(
+    () => createCompendium(store, { name: "   " }),
+    (err: unknown) => err instanceof CompendiumStoreError && err.statusCode === 400,
+    "Empty Compendium name must fail with 400",
+  );
+
+  const created = await createCompendium(store, {
+    name: "U.A. Arc",
+    description: "School festival",
+    lorebookIds: ["mha", "mha"],
+    characterIds: ["izuku"],
+    personaIds: ["p1"],
+    retrievalSettings: { tokenBudget: 4000, bookTokenBudgets: { mha: 1200 } },
+  });
+  assert.equal(created.revision, 1);
+  assert.deepEqual(created.lorebookIds, ["mha"]);
+  assert.equal(created.retrievalSettings.tokenBudget, 4000);
+  assert.equal(created.retrievalSettings.bookTokenBudgets.mha, 1200);
+
+  const listed = await listCompendiums(store);
+  assert.equal(listed.length, 1);
+
+  const updated = await updateCompendium(store, created.id, {
+    name: "U.A. Sports Festival",
+    expectedRevision: 1,
+    retrievalSettings: { maxTextHits: 2 },
+  });
+  assert.equal(updated.revision, 2);
+  assert.equal(updated.retrievalSettings.bookTokenBudgets.mha, 1200);
+  assert.equal(updated.retrievalSettings.maxTextHits, 2);
+
+  await assert.rejects(
+    () => updateCompendium(store, created.id, { name: "Stale", expectedRevision: 1 }),
+    (err: unknown) => err instanceof CompendiumStoreError && err.statusCode === 409,
+    "Stale expectedRevision must throw 409 conflict",
+  );
+
+  const unbound = await getChatCompendiumBinding(store, "chat-42");
+  assert.equal(unbound.compendiumId, null);
+
+  await assert.rejects(
+    () => setChatCompendiumBinding(store, "chat-42", "compendium:missing"),
+    (err: unknown) => err instanceof CompendiumStoreError && err.statusCode === 404,
+    "Binding unknown Compendium must fail with 404",
+  );
+
+  const bound = await setChatCompendiumBinding(store, "chat-42", created.id);
+  assert.equal(bound.compendiumId, created.id);
+  const reloadedBinding = await getChatCompendiumBinding(store, "chat-42");
+  assert.equal(reloadedBinding.compendiumId, created.id);
+
+  await setChatCompendiumBinding(store, "chat-42", null);
+  const clearedBinding = await getChatCompendiumBinding(store, "chat-42");
+  assert.equal(clearedBinding.compendiumId, null);
+
+  await deleteCompendium(store, created.id, 2);
+  assert.equal((await listCompendiums(store)).length, 0);
+}
+
+runStoreChecks()
+  .then(() => {
+    console.log("lorebook-manager-graph.regression: all assertions passed");
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

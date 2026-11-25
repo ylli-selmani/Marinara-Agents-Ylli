@@ -516,7 +516,7 @@ export interface LorebookGraphProps {
   selectedLorebookIds: ReadonlySet<string>;
   collapsedLorebookIds: ReadonlySet<string>;
   onToggleCollapseLorebook: (lorebookId: string) => void;
-  onOpenLorebook?: (lorebookId: string) => void;
+  onOpenLorebook?: (lorebookId: string, entryId?: string) => void;
   onOpenCharacter?: (characterId: string) => void;
   onOpenPersona?: (personaId: string) => void;
   search: string;

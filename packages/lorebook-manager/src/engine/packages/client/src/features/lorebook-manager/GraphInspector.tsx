@@ -131,7 +131,7 @@ export interface GraphInspectorProps {
   onFocusHere: (ref: string) => void;
   onNavigate: (ref: string | null) => void;
   onOpenReader: (node: LmGraphNode, mode: "read" | "edit") => void;
-  onOpenLorebook?: (lorebookId: string) => void;
+  onOpenLorebook?: (lorebookId: string, entryId?: string) => void;
   onOpenCharacter?: (characterId: string) => void;
   onOpenPersona?: (personaId: string) => void;
   onToggleCollapseLorebook: (lorebookId: string) => void;
@@ -856,10 +856,14 @@ export function GraphInspector({
           <button
             type="button"
             className="mari-chrome-control mari-chrome-control--small"
-            onClick={() => onOpenLorebook(activeNode.nodeType === "lore" ? activeNode.lorebookId : activeNode.id)}
+            onClick={() =>
+              activeNode.nodeType === "lore"
+                ? onOpenLorebook(activeNode.lorebookId, activeNode.id)
+                : onOpenLorebook(activeNode.id)
+            }
           >
             <ExternalLink size="0.75rem" />
-            Open lorebook
+            {activeNode.nodeType === "lore" ? "Open in editor" : "Open lorebook"}
           </button>
         ) : null}
         {onOpenCharacter && activeNode.nodeType === "character" ? (

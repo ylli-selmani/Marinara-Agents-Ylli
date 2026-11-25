@@ -17,7 +17,7 @@ export type CapabilityProps = {
   chatName?: string | null;
   chatMode?: "conversation" | "roleplay" | "game" | null;
   onClose?: () => void;
-  onOpenLorebook?: (lorebookId: string) => void;
+  onOpenLorebook?: (lorebookId: string, entryId?: string) => void;
   onOpenCharacter?: (characterId: string) => void;
   onOpenPersona?: (personaId: string) => void;
   onLorebooksChanged?: () => void | Promise<void>;

@@ -25,7 +25,7 @@ export interface SimulatePanelProps {
   config: LmRetrievalInput;
   onChangeConfig: (next: LmRetrievalInput) => void;
   savingRef: string | null;
-  onOpenLorebook?: (lorebookId: string) => void;
+  onOpenLorebook?: (lorebookId: string, entryId?: string) => void;
   onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
   onHighlightOnGraph: (highlight: SimGraphHighlight) => void;
   onInspectNode: (ref: string) => void;
@@ -305,6 +305,18 @@ export function SimulatePanel({
           />
           <span>Respect individual lorebook token budgets when set</span>
         </label>
+
+        {config.bookTokenBudgets && Object.keys(config.bookTokenBudgets).length > 0 ? (
+          <div className="rounded border border-[var(--border)] bg-[var(--background)]/40 px-2.5 py-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
+            Compendium per-book caps:{" "}
+            {Object.entries(config.bookTokenBudgets)
+              .map(([bookId, cap]) => {
+                const name = payload.lorebooks.find((book) => book.id === bookId)?.name ?? bookId;
+                return `${name} (${cap} tok)`;
+              })
+              .join(", ")}
+          </div>
+        ) : null}
       </div>
 
       {/* Right column: activation results & provenance */}

@@ -322,9 +322,18 @@ export function simulateLorebookRetrieval(
   }
 
   const bookBudgetsById = new Map<string, number>();
-  for (const book of payload.lorebooks) {
-    if (typeof book.tokenBudget === "number" && book.tokenBudget > 0) {
-      bookBudgetsById.set(book.id, book.tokenBudget);
+  if (input.respectBookBudgets !== false) {
+    for (const book of payload.lorebooks) {
+      if (typeof book.tokenBudget === "number" && book.tokenBudget > 0) {
+        bookBudgetsById.set(book.id, book.tokenBudget);
+      }
+    }
+  }
+  if (input.bookTokenBudgets) {
+    for (const [bookId, cap] of Object.entries(input.bookTokenBudgets)) {
+      if (typeof cap === "number" && Number.isFinite(cap) && cap > 0) {
+        bookBudgetsById.set(bookId, Math.round(cap));
+      }
     }
   }
 
@@ -628,7 +637,6 @@ export function simulateLorebookRetrieval(
   ];
 
   const budget = Math.max(1, input.tokenBudget);
-  const respectBookBudgets = input.respectBookBudgets !== false;
   const usedByBook = new Map<string, number>();
   const activated: LmRetrievalActivatedItem[] = [];
   let totalTokens = 0;
@@ -643,7 +651,7 @@ export function simulateLorebookRetrieval(
       });
       continue;
     }
-    const bookCap = respectBookBudgets ? bookBudgetsById.get(candidate.entry.lorebookId) : undefined;
+    const bookCap = bookBudgetsById.get(candidate.entry.lorebookId);
     const currentBookUsed = usedByBook.get(candidate.entry.lorebookId) ?? 0;
     if (bookCap !== undefined && currentBookUsed + candidate.tokens > bookCap) {
       suppressed.push({

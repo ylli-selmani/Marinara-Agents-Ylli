@@ -21,6 +21,8 @@ export interface LmLorebookSummary {
   enabled: boolean;
   entryCount: number;
   tokenBudget?: number | null;
+  imagePath?: string | null;
+  imageCrop?: unknown;
   characterIds: string[];
   personaIds: string[];
   loaded: boolean;
@@ -155,6 +157,7 @@ export interface LmRetrievalInput {
   maxOneHop: number;
   maxTextHits?: number;
   respectBookBudgets?: boolean;
+  bookTokenBudgets?: Record<string, number>;
 }
 
 export interface LmRetrievalResult {
@@ -164,4 +167,33 @@ export interface LmRetrievalResult {
   tokenBudget: number;
   durationMs: number;
   cardInheritedSeedRefs: string[];
+}
+
+export interface LmCompendiumRetrievalSettings {
+  tokenBudget: number;
+  maxOneHop: number;
+  maxTextHits: number;
+  respectBookBudgets: boolean;
+  bookTokenBudgets: Record<string, number>;
+}
+
+export interface LmCompendium {
+  id: string;
+  name: string;
+  description: string;
+  lorebookIds: string[];
+  characterIds: string[];
+  personaIds: string[];
+  worldMapId?: string | null;
+  retrievalSettings: LmCompendiumRetrievalSettings;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LmChatCompendiumBinding {
+  chatId: string;
+  compendiumId: string | null;
+  revision: number;
+  updatedAt: string;
 }

@@ -34,4 +34,7 @@ export async function selfCheck({ api }: ActivationContext) {
   if (typeof api.runtime.resources?.listLorebooks !== "function") {
     throw new Error("Lorebook Manager requires resources.listLorebooks");
   }
+  if (typeof api.runtime.persistence?.documents?.list !== "function") {
+    throw new Error("Lorebook Manager requires persistence.documents.list");
+  }
 }

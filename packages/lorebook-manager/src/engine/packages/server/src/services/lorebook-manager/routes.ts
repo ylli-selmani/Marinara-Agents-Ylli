@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { formatEntityRef, parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
   classifyEntryWithFallback,
@@ -13,6 +13,17 @@ import type {
   LmLorebookSummary,
   LorebookFilterMode,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import {
+  CompendiumStoreError,
+  createCompendium,
+  deleteCompendium,
+  getChatCompendiumBinding,
+  listCompendiums,
+  setChatCompendiumBinding,
+  updateCompendium,
+  type CreateCompendiumInput,
+  type UpdateCompendiumInput,
+} from "./compendiums-store.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -150,9 +161,25 @@ function parseLorebookIdsQuery(rawQuery: unknown): ReadonlySet<string> | null {
   return ids.length > 0 ? new Set(ids) : new Set();
 }
 
+export interface BuildGraphOptions {
+  lorebookIds?: ReadonlySet<string> | null;
+  characterIds?: ReadonlySet<string> | null;
+  personaIds?: ReadonlySet<string> | null;
+}
+
 export async function buildLorebookManagerGraphPayload(
-  requestedLorebookIds?: ReadonlySet<string> | null,
+  requestedOrOptions?: ReadonlySet<string> | BuildGraphOptions | null,
 ): Promise<LmGraphPayload> {
+  const options: BuildGraphOptions =
+    requestedOrOptions instanceof Set
+      ? { lorebookIds: requestedOrOptions }
+      : requestedOrOptions && typeof requestedOrOptions === "object"
+        ? requestedOrOptions
+        : {};
+  const requestedLorebookIds = options.lorebookIds ?? null;
+  const requestedCharacterIds = options.characterIds ?? null;
+  const requestedPersonaIds = options.personaIds ?? null;
+
   const runtime = getLorebookManagerRuntime();
   const [rawLorebooks, rawCharacters, rawPersonas] = await Promise.all([
     runtime.resources.listLorebooks(),
@@ -178,6 +205,8 @@ export async function buildLorebookManagerGraphPayload(
       enabled: bookData.enabled !== false,
       entryCount: entries.length,
       tokenBudget: typeof bookData.tokenBudget === "number" && bookData.tokenBudget > 0 ? bookData.tokenBudget : null,
+      imagePath: asString(bookData.imagePath).trim() || null,
+      imageCrop: bookData.imageCrop ?? null,
       characterIds: uniqueNonEmpty(bookData.characterId, bookData.characterIds),
       personaIds: uniqueNonEmpty(bookData.personaId, bookData.personaIds),
       loaded,
@@ -224,35 +253,39 @@ export async function buildLorebookManagerGraphPayload(
   }
 
   const extraScanTextByRef = new Map<string, string>();
-  const characterNodes: LmEntityNode[] = rawCharacters.map((row) => {
-    const fields = extractCharacterFields(row.data);
-    const ref = formatEntityRef("char", row.id);
-    if (fields.scanText) extraScanTextByRef.set(ref, fields.scanText);
-    return {
-      nodeType: "character",
-      ref,
-      id: row.id,
-      name: fields.name,
-      description: fields.description,
-      aliases: fields.aliases,
-      family: "character",
-    };
-  });
+  const characterNodes: LmEntityNode[] = rawCharacters
+    .filter((row) => requestedCharacterIds == null || requestedCharacterIds.has(row.id))
+    .map((row) => {
+      const fields = extractCharacterFields(row.data);
+      const ref = formatEntityRef("char", row.id);
+      if (fields.scanText) extraScanTextByRef.set(ref, fields.scanText);
+      return {
+        nodeType: "character",
+        ref,
+        id: row.id,
+        name: fields.name,
+        description: fields.description,
+        aliases: fields.aliases,
+        family: "character",
+      };
+    });
 
-  const personaNodes: LmEntityNode[] = rawPersonas.map((row) => {
-    const fields = extractPersonaFields(row.data);
-    const ref = formatEntityRef("persona", row.id);
-    if (fields.scanText) extraScanTextByRef.set(ref, fields.scanText);
-    return {
-      nodeType: "persona",
-      ref,
-      id: row.id,
-      name: fields.name,
-      description: fields.description,
-      aliases: fields.aliases,
-      family: "character",
-    };
-  });
+  const personaNodes: LmEntityNode[] = rawPersonas
+    .filter((row) => requestedPersonaIds == null || requestedPersonaIds.has(row.id))
+    .map((row) => {
+      const fields = extractPersonaFields(row.data);
+      const ref = formatEntityRef("persona", row.id);
+      if (fields.scanText) extraScanTextByRef.set(ref, fields.scanText);
+      return {
+        nodeType: "persona",
+        ref,
+        id: row.id,
+        name: fields.name,
+        description: fields.description,
+        aliases: fields.aliases,
+        family: "character",
+      };
+    });
 
   const nodes: LmGraphNode[] = [...entryNodes, ...characterNodes, ...personaNodes];
   const nodeRefs = new Set(nodes.map((node) => node.ref));
@@ -287,10 +320,93 @@ export async function buildLorebookManagerGraphPayload(
   };
 }
 
+function sendRouteError(reply: FastifyReply, error: unknown) {
+  if (error instanceof CompendiumStoreError) {
+    return reply.code(error.statusCode).send({ error: error.message });
+  }
+  const message = error instanceof Error ? error.message : "Unexpected server error";
+  return reply.code(500).send({ error: message });
+}
+
 export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.get("/graph", async (request) => {
-    const query = request.query as { lorebookIds?: unknown } | undefined;
-    const requestedIds = parseLorebookIdsQuery(query?.lorebookIds);
-    return buildLorebookManagerGraphPayload(requestedIds);
+    const query = request.query as { lorebookIds?: unknown; characterIds?: unknown; personaIds?: unknown } | undefined;
+    return buildLorebookManagerGraphPayload({
+      lorebookIds: parseLorebookIdsQuery(query?.lorebookIds),
+      characterIds: parseLorebookIdsQuery(query?.characterIds),
+      personaIds: parseLorebookIdsQuery(query?.personaIds),
+    });
+  });
+
+  app.get("/compendiums", async (_request, reply) => {
+    try {
+      const compendiums = await listCompendiums(getLorebookManagerRuntime().persistence.documents);
+      return { compendiums };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/compendiums", async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as CreateCompendiumInput;
+      const compendium = await createCompendium(getLorebookManagerRuntime().persistence.documents, body);
+      return reply.code(201).send({ compendium });
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.patch("/compendiums/:id", async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const body = (request.body ?? {}) as UpdateCompendiumInput;
+      const compendium = await updateCompendium(getLorebookManagerRuntime().persistence.documents, id, body);
+      return { compendium };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.delete("/compendiums/:id", async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const query = request.query as { expectedRevision?: unknown } | undefined;
+      const revRaw = query?.expectedRevision;
+      const expectedRevision = typeof revRaw === "string" && revRaw.trim() ? Number(revRaw) : undefined;
+      await deleteCompendium(
+        getLorebookManagerRuntime().persistence.documents,
+        id,
+        Number.isFinite(expectedRevision) ? expectedRevision : undefined,
+      );
+      return { deleted: true };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.get("/chats/:chatId/binding", async (request, reply) => {
+    try {
+      const { chatId } = request.params as { chatId: string };
+      const binding = await getChatCompendiumBinding(getLorebookManagerRuntime().persistence.documents, chatId);
+      return { binding };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.put("/chats/:chatId/binding", async (request, reply) => {
+    try {
+      const { chatId } = request.params as { chatId: string };
+      const body = (request.body ?? {}) as { compendiumId?: string | null };
+      const binding = await setChatCompendiumBinding(
+        getLorebookManagerRuntime().persistence.documents,
+        chatId,
+        body.compendiumId ?? null,
+      );
+      return { binding };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
   });
 };

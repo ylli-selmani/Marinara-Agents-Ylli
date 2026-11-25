@@ -1,31 +1,56 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FlaskConical, Focus, List, Maximize2, Minimize2, Network, RefreshCw, Search } from "lucide-react";
+import {
+  BookMarked,
+  Check,
+  FlaskConical,
+  Focus,
+  List,
+  Maximize2,
+  Minimize2,
+  Network,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import { parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
   buildLorebookGraph,
   classifyEntryWithFallback,
 } from "../../../../shared/src/features/agents/lorebook-manager/graph-model.js";
 import type {
+  LmCompendium,
+  LmEntityNode,
   LmEntryNode,
   LmGraphEdge,
   LmGraphPayload,
   LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
+  createCompendiumApi,
+  deleteCompendiumApi,
+  fetchChatCompendiumBinding,
+  fetchCompendiums,
   fetchLorebookManagerGraph,
   lmQueryKeys,
   patchEntryRelationships,
   patchLorebookEntry,
+  setChatCompendiumBindingApi,
+  updateCompendiumApi,
+  type LmCompendiumSavePayload,
   type LmEntryPatch,
 } from "./api";
+import { CompendiumModal } from "./CompendiumModal";
+import { getHostComponents } from "./host-components";
 import { FAMILY_META, LorebookGraph } from "./LorebookGraph";
 import { SimulatePanel, type SimGraphHighlight } from "./SimulatePanel";
 import type { CapabilityProps } from "./types";
 
 const MANAGED_BOOKS_STORAGE_KEY = "lm:managed-books:v1";
 const AUTO_SELECT_ENTRY_CEILING = 400;
+const ADHOC_SCOPE_VALUE = "__adhoc__";
 
 function pairKey(a: string, b: string): string {
   return a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
@@ -124,6 +149,15 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const [collapsedLorebookIds, setCollapsedLorebookIds] = useState<Set<string>>(() => new Set());
   const [selectedNodeRef, setSelectedNodeRef] = useState<string | null>(null);
   const [savingRef, setSavingRef] = useState<string | null>(null);
+  const [selectedCompendiumId, setSelectedCompendiumId] = useState<string | null>(null);
+  const [compendiumModal, setCompendiumModal] = useState<{ open: boolean; editing: LmCompendium | null }>({
+    open: false,
+    editing: null,
+  });
+  const [savingCompendium, setSavingCompendium] = useState(false);
+  const [bindingBusy, setBindingBusy] = useState(false);
+  const autoBoundChatRef = useRef<string | null>(null);
+
   const [simConfig, setSimConfig] = useState<LmRetrievalInput>({
     queryText: "",
     activeCharacterIds: [],
@@ -133,23 +167,102 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     maxOneHop: 6,
     maxTextHits: 5,
     respectBookBudgets: true,
+    bookTokenBudgets: undefined,
   });
   const [simHighlight, setSimHighlight] = useState<SimGraphHighlight | null>(null);
 
-  const requestedIds = managedLorebookIds ?? [];
-  const scopeKey = managedLorebookIds === null ? "__init__" : [...requestedIds].sort().join(",") || "__none__";
+  const compendiumsQuery = useQuery({
+    queryKey: lmQueryKeys.compendiums,
+    queryFn: fetchCompendiums,
+  });
+
+  const chatId = props.chatId ?? null;
+  const chatBindingQuery = useQuery({
+    queryKey: lmQueryKeys.chatBinding(chatId ?? "__none__"),
+    queryFn: () => fetchChatCompendiumBinding(chatId!),
+    enabled: Boolean(chatId),
+  });
+
+  const compendiums = useMemo(() => compendiumsQuery.data ?? [], [compendiumsQuery.data]);
+  const activeCompendium = useMemo(
+    () => (selectedCompendiumId ? (compendiums.find((c) => c.id === selectedCompendiumId) ?? null) : null),
+    [compendiums, selectedCompendiumId],
+  );
+
+  const applyCompendiumSettings = useCallback((compendium: LmCompendium | null) => {
+    if (!compendium) {
+      setSimConfig((prev) => ({
+        ...prev,
+        bookTokenBudgets: undefined,
+      }));
+      return;
+    }
+    const charSet = new Set(compendium.characterIds);
+    setSimConfig((prev) => ({
+      ...prev,
+      tokenBudget: compendium.retrievalSettings.tokenBudget,
+      maxOneHop: compendium.retrievalSettings.maxOneHop,
+      maxTextHits: compendium.retrievalSettings.maxTextHits,
+      respectBookBudgets: compendium.retrievalSettings.respectBookBudgets,
+      bookTokenBudgets:
+        Object.keys(compendium.retrievalSettings.bookTokenBudgets).length > 0
+          ? compendium.retrievalSettings.bookTokenBudgets
+          : undefined,
+      activeCharacterIds: prev.activeCharacterIds.filter((id) => charSet.has(id)),
+    }));
+  }, []);
+
+  // Auto-select this chat's bound Compendium once per chat visit when opening from a bound chat.
+  useEffect(() => {
+    if (!chatId) {
+      autoBoundChatRef.current = null;
+      return;
+    }
+    if (autoBoundChatRef.current === chatId) return;
+    const binding = chatBindingQuery.data;
+    if (!binding || compendiumsQuery.isLoading) return;
+    autoBoundChatRef.current = chatId;
+    if (binding.compendiumId && compendiums.some((c) => c.id === binding.compendiumId)) {
+      const bound = compendiums.find((c) => c.id === binding.compendiumId)!;
+      setSelectedCompendiumId(bound.id);
+      applyCompendiumSettings(bound);
+    }
+  }, [applyCompendiumSettings, chatBindingQuery.data, chatId, compendiums, compendiumsQuery.isLoading]);
+
+  // Drop stale selection if a Compendium was deleted externally.
+  useEffect(() => {
+    if (selectedCompendiumId && !compendiumsQuery.isLoading && !activeCompendium) {
+      setSelectedCompendiumId(null);
+      applyCompendiumSettings(null);
+    }
+  }, [activeCompendium, applyCompendiumSettings, compendiumsQuery.isLoading, selectedCompendiumId]);
+
+  const requestedLorebookIds = activeCompendium ? activeCompendium.lorebookIds : (managedLorebookIds ?? []);
+  const requestedCharacterIds = activeCompendium ? activeCompendium.characterIds : null;
+  const requestedPersonaIds = activeCompendium ? activeCompendium.personaIds : null;
+
+  const scopeKey = activeCompendium
+    ? `comp:${activeCompendium.id}:r${activeCompendium.revision}`
+    : managedLorebookIds === null
+      ? "__init__"
+      : [...requestedLorebookIds].sort().join(",") || "__none__";
 
   const graphQuery = useQuery({
     queryKey: lmQueryKeys.graph(scopeKey),
-    queryFn: () => fetchLorebookManagerGraph(requestedIds),
+    queryFn: () =>
+      fetchLorebookManagerGraph({
+        lorebookIds: requestedLorebookIds,
+        characterIds: requestedCharacterIds,
+        personaIds: requestedPersonaIds,
+      }),
   });
 
   const payload = graphQuery.data;
 
-  // On first visit (no saved selection yet), inspect library size from the metadata-only probe:
+  // On first visit (no saved ad-hoc selection yet), inspect library size from the metadata-only probe:
   // auto-load small libraries (<= 400 entries or single book), otherwise keep opt-in empty.
   useEffect(() => {
-    if (managedLorebookIds !== null || !payload) return;
+    if (activeCompendium || managedLorebookIds !== null || !payload) return;
     const totalEntries = payload.lorebooks.reduce((sum, book) => sum + book.entryCount, 0);
     const initial =
       totalEntries <= AUTO_SELECT_ENTRY_CEILING || payload.lorebooks.length <= 1
@@ -157,9 +270,19 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
         : [];
     writeStoredManagedBooks(initial);
     setManagedLorebookIds(initial);
-  }, [managedLorebookIds, payload]);
+  }, [activeCompendium, managedLorebookIds, payload]);
 
-  const managedSet = useMemo(() => new Set(managedLorebookIds ?? []), [managedLorebookIds]);
+  const managedSet = useMemo(
+    () => new Set(activeCompendium ? activeCompendium.lorebookIds : (managedLorebookIds ?? [])),
+    [activeCompendium, managedLorebookIds],
+  );
+
+  const visibleLorebooks = useMemo(() => {
+    if (!payload) return [];
+    if (!activeCompendium) return payload.lorebooks;
+    const compSet = new Set(activeCompendium.lorebookIds);
+    return payload.lorebooks.filter((book) => compSet.has(book.id));
+  }, [activeCompendium, payload]);
 
   const updateManagedBooks = (nextIds: string[]) => {
     const deduped = [...new Set(nextIds)];
@@ -168,6 +291,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   };
 
   const toggleManagedBook = (lorebookId: string) => {
+    if (activeCompendium) return;
     const current = managedLorebookIds ?? [];
     if (managedSet.has(lorebookId)) {
       updateManagedBooks(current.filter((id) => id !== lorebookId));
@@ -217,6 +341,80 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     }
     return map;
   }, [payload]);
+
+  const handleSelectCompendium = (nextValue: string) => {
+    if (nextValue === ADHOC_SCOPE_VALUE) {
+      setSelectedCompendiumId(null);
+      setCollapsedLorebookIds(new Set());
+      setSelectedNodeRef(null);
+      setSimHighlight(null);
+      applyCompendiumSettings(null);
+      return;
+    }
+    const target = compendiums.find((c) => c.id === nextValue) ?? null;
+    setSelectedCompendiumId(target?.id ?? null);
+    setCollapsedLorebookIds(new Set());
+    setSelectedNodeRef(null);
+    setSimHighlight(null);
+    applyCompendiumSettings(target);
+  };
+
+  const handleSaveCompendium = async (data: LmCompendiumSavePayload, existingId?: string) => {
+    setSavingCompendium(true);
+    try {
+      const saved = existingId ? await updateCompendiumApi(existingId, data) : await createCompendiumApi(data);
+      await queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums });
+      setSelectedCompendiumId(saved.id);
+      applyCompendiumSettings(saved);
+      setCompendiumModal({ open: false, editing: null });
+      toast.success(existingId ? `Saved Compendium "${saved.name}"` : `Created Compendium "${saved.name}"`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save Compendium");
+    } finally {
+      setSavingCompendium(false);
+    }
+  };
+
+  const handleDeleteCompendium = async (target: LmCompendium) => {
+    setSavingCompendium(true);
+    try {
+      await deleteCompendiumApi(target.id, target.revision);
+      if (chatId && chatBindingQuery.data?.compendiumId === target.id) {
+        await setChatCompendiumBindingApi(chatId, null);
+        await queryClient.invalidateQueries({ queryKey: lmQueryKeys.chatBinding(chatId) });
+      }
+      await queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums });
+      if (selectedCompendiumId === target.id) {
+        setSelectedCompendiumId(null);
+        applyCompendiumSettings(null);
+      }
+      setCompendiumModal({ open: false, editing: null });
+      toast.success(`Deleted Compendium "${target.name}"`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not delete Compendium");
+    } finally {
+      setSavingCompendium(false);
+    }
+  };
+
+  const handleToggleChatBinding = async () => {
+    if (!chatId || !activeCompendium) return;
+    const isBoundHere = chatBindingQuery.data?.compendiumId === activeCompendium.id;
+    setBindingBusy(true);
+    try {
+      const updated = await setChatCompendiumBindingApi(chatId, isBoundHere ? null : activeCompendium.id);
+      queryClient.setQueryData(lmQueryKeys.chatBinding(chatId), updated);
+      toast.success(
+        isBoundHere
+          ? `Unbound "${activeCompendium.name}" from ${props.chatName || "this chat"}`
+          : `Bound "${activeCompendium.name}" to ${props.chatName || "this chat"}`,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update chat binding");
+    } finally {
+      setBindingBusy(false);
+    }
+  };
 
   const handleBatchSaveRelationships = async (
     updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
@@ -296,6 +494,37 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   };
 
   const totalLibraryEntries = payload?.lorebooks.reduce((sum, book) => sum + book.entryCount, 0) ?? 0;
+  const hostComponents = getHostComponents();
+  const HostSelect = hostComponents.Select;
+  const compendiumOptions = useMemo(
+    () => [
+      {
+        value: ADHOC_SCOPE_VALUE,
+        label: "Ad-hoc library",
+        description: "Pick lorebooks freely across your library",
+      },
+      ...compendiums.map((c) => ({
+        value: c.id,
+        label: c.name,
+        description: `${c.lorebookIds.length} books · ${c.characterIds.length} cards · ${c.personaIds.length} personas`,
+      })),
+    ],
+    [compendiums],
+  );
+  const boundHere = Boolean(chatId && activeCompendium && chatBindingQuery.data?.compendiumId === activeCompendium.id);
+
+  const modalLoadedEntries = useMemo(
+    () => (payload?.nodes ?? []).filter((node): node is LmEntryNode => node.nodeType === "lore"),
+    [payload],
+  );
+  const modalCharacters = useMemo(
+    () => (payload?.nodes ?? []).filter((node): node is LmEntityNode => node.nodeType === "character"),
+    [payload],
+  );
+  const modalPersonas = useMemo(
+    () => (payload?.nodes ?? []).filter((node): node is LmEntityNode => node.nodeType === "persona"),
+    [payload],
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-7xl flex-col gap-2 px-4 py-3">
@@ -316,8 +545,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="relative min-w-[14rem] flex-1 max-w-md">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          <div className="relative min-w-[12rem] flex-1 max-w-sm">
             <Search
               aria-hidden="true"
               size="0.875rem"
@@ -331,6 +560,77 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
               className="mari-chrome-field h-9 w-full rounded-lg pl-8 pr-3 text-sm md:text-xs"
             />
           </div>
+
+          <div className="flex items-center gap-1.5">
+            {HostSelect ? (
+              <div className="min-w-[11rem]">
+                <HostSelect
+                  value={activeCompendium?.id ?? ADHOC_SCOPE_VALUE}
+                  options={compendiumOptions}
+                  onChange={handleSelectCompendium}
+                  label="Compendium scope"
+                  placeholder="Ad-hoc library"
+                  className="mari-chrome-field h-9 rounded-lg px-2.5 text-xs"
+                />
+              </div>
+            ) : (
+              <label className="flex items-center gap-1.5 text-xs">
+                <BookMarked aria-hidden="true" size="0.875rem" className="text-[var(--muted-foreground)]" />
+                <select
+                  aria-label="Compendium scope"
+                  value={activeCompendium?.id ?? ADHOC_SCOPE_VALUE}
+                  onChange={(event) => handleSelectCompendium(event.target.value)}
+                  className="mari-chrome-field h-9 rounded-lg px-2 text-xs"
+                >
+                  {compendiumOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button
+              type="button"
+              className="mari-chrome-control mari-chrome-control--small"
+              onClick={() => setCompendiumModal({ open: true, editing: null })}
+            >
+              <Plus aria-hidden="true" size="0.875rem" />
+              New
+            </button>
+            {activeCompendium ? (
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                onClick={() => setCompendiumModal({ open: true, editing: activeCompendium })}
+              >
+                <Pencil aria-hidden="true" size="0.75rem" />
+                Edit
+              </button>
+            ) : null}
+            {chatId && activeCompendium ? (
+              <button
+                type="button"
+                disabled={bindingBusy}
+                aria-pressed={boundHere}
+                onClick={() => void handleToggleChatBinding()}
+                title={
+                  boundHere
+                    ? `Unbind "${activeCompendium.name}" from ${props.chatName || "this chat"}`
+                    : `Use "${activeCompendium.name}" by default in ${props.chatName || "this chat"}`
+                }
+                className="mari-chrome-control mari-chrome-control--small"
+              >
+                {boundHere ? (
+                  <Check aria-hidden="true" size="0.75rem" />
+                ) : (
+                  <BookMarked aria-hidden="true" size="0.75rem" />
+                )}
+                {boundHere ? `Bound: ${props.chatName || "chat"}` : `Bind to ${props.chatName || "chat"}`}
+              </button>
+            ) : null}
+          </div>
+
           <button
             type="button"
             className="mari-chrome-control mari-chrome-control--small"
@@ -373,10 +673,15 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
         </div>
       </div>
 
-      {payload && payload.lorebooks.length > 0 ? (
+      {payload &&
+      (activeCompendium
+        ? visibleLorebooks.length > 0 || activeCompendium.lorebookIds.length === 0
+        : payload.lorebooks.length > 0) ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-medium text-[var(--muted-foreground)]">Managed lorebooks:</span>
-          {payload.lorebooks.length > 1 ? (
+          <span className="text-xs font-medium text-[var(--muted-foreground)]">
+            {activeCompendium ? "Compendium scope:" : "Managed lorebooks:"}
+          </span>
+          {!activeCompendium && payload.lorebooks.length > 1 ? (
             <button
               type="button"
               className="mari-chrome-control mari-chrome-control--small"
@@ -393,21 +698,32 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                 : `Load all (${payload.lorebooks.length})`}
             </button>
           ) : null}
-          {payload.lorebooks.map((book) => {
+          {visibleLorebooks.map((book) => {
             const active = managedSet.has(book.id);
             const collapsed = collapsedLorebookIds.has(book.id);
+            const bookOverride = activeCompendium?.retrievalSettings.bookTokenBudgets[book.id];
             return (
               <div key={book.id} className="inline-flex items-center gap-0.5">
-                <button
-                  type="button"
-                  className="mari-chrome-control mari-chrome-control--small"
-                  aria-pressed={active}
-                  title={active ? `Click to unload ${book.name}` : `Click to opt ${book.name} into Lorebook Manager`}
-                  onClick={() => toggleManagedBook(book.id)}
-                >
-                  <span>{book.name}</span>
-                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{book.entryCount}</span>
-                </button>
+                {activeCompendium ? (
+                  <span className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--card)]/60 px-2 py-0.5 text-xs">
+                    <span>{book.name}</span>
+                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                      {book.entryCount}
+                      {bookOverride ? ` · ${bookOverride} tok` : ""}
+                    </span>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="mari-chrome-control mari-chrome-control--small"
+                    aria-pressed={active}
+                    title={active ? `Click to unload ${book.name}` : `Click to opt ${book.name} into Lorebook Manager`}
+                    onClick={() => toggleManagedBook(book.id)}
+                  >
+                    <span>{book.name}</span>
+                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{book.entryCount}</span>
+                  </button>
+                )}
                 {active ? (
                   <button
                     type="button"
@@ -423,9 +739,14 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
               </div>
             );
           })}
-          {managedLorebookIds !== null && managedSet.size === 0 ? (
+          {activeCompendium ? (
             <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
-              · 0 loaded ({totalLibraryEntries} entries available — click a book)
+              · {activeCompendium.characterIds.length} cards · {activeCompendium.personaIds.length} personas ·{" "}
+              {activeCompendium.retrievalSettings.tokenBudget} tok budget
+            </span>
+          ) : managedLorebookIds !== null && managedSet.size === 0 ? (
+            <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              · 0 loaded ({totalLibraryEntries} entries available — click a book or create a Compendium)
             </span>
           ) : null}
         </div>
@@ -526,6 +847,19 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
           </div>
         )
       ) : null}
+
+      <CompendiumModal
+        open={compendiumModal.open}
+        compendium={compendiumModal.editing}
+        lorebooks={payload?.lorebooks ?? []}
+        loadedEntries={modalLoadedEntries}
+        characters={modalCharacters}
+        personas={modalPersonas}
+        saving={savingCompendium}
+        onClose={() => setCompendiumModal({ open: false, editing: null })}
+        onSave={handleSaveCompendium}
+        onDelete={handleDeleteCompendium}
+      />
     </div>
   );
 }

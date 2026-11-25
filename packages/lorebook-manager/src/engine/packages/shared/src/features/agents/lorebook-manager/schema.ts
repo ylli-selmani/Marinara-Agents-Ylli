@@ -1,5 +1,7 @@
 export type EntityFamily = "character" | "location" | "faction" | "item" | "creature" | "ability" | "quest" | "lore";
 
+export type LorebookFilterMode = "any" | "include" | "exclude";
+
 export const ENTITY_FAMILIES: readonly EntityFamily[] = [
   "character",
   "location",
@@ -42,6 +44,8 @@ export interface LmEntryNode {
   enabled: boolean;
   constant: boolean;
   locked: boolean;
+  characterFilterMode: LorebookFilterMode;
+  characterFilterIds: string[];
   relationships: Record<string, string>;
 }
 

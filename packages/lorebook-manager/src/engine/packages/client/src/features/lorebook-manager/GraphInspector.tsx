@@ -39,6 +39,7 @@ export const RELATION_PRESETS = [
   "rival_of",
   "owns",
   "part_of",
+  "represents",
 ] as const;
 
 export const SYMMETRIC_RELATIONS = new Set<string>(["related_to", "ally_of", "rival_of"]);
@@ -131,6 +132,8 @@ export interface GraphInspectorProps {
   onNavigate: (ref: string | null) => void;
   onOpenReader: (node: LmGraphNode, mode: "read" | "edit") => void;
   onOpenLorebook?: (lorebookId: string) => void;
+  onOpenCharacter?: (characterId: string) => void;
+  onOpenPersona?: (personaId: string) => void;
   onToggleCollapseLorebook: (lorebookId: string) => void;
   savingRef: string | null;
   onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<void>;
@@ -157,6 +160,8 @@ export function GraphInspector({
   onNavigate,
   onOpenReader,
   onOpenLorebook,
+  onOpenCharacter,
+  onOpenPersona,
   onToggleCollapseLorebook,
   savingRef,
   onSaveRelationships,
@@ -179,7 +184,10 @@ export function GraphInspector({
     setAddTargetRef("");
     setAddFlipped(false);
     setEditingLink(null);
-  }, [activeNode.ref]);
+    if (activeNode.nodeType === "character" || activeNode.nodeType === "persona") {
+      setPromoteDirection("incoming");
+    }
+  }, [activeNode.ref, activeNode.nodeType]);
 
   const explicitGroups = useMemo(() => {
     const outItems: Array<{ key: string; targetRef: string; targetName: string; relation: string }> = [];
@@ -341,6 +349,33 @@ export function GraphInspector({
     setSectionOpenOverrides((prev) => ({ ...prev, [stateKey]: !currentOpen }));
   };
 
+  const maybeAutoExcludeCardForRepresents = async (entry: LmEntryNode, targetRef: string, relation: string) => {
+    if (relation !== "represents") return;
+    const parsed = parseEntityRef(targetRef);
+    if (parsed?.kind !== "char") return;
+    if (entry.characterFilterMode === "include") return;
+    if (entry.characterFilterMode === "exclude" && entry.characterFilterIds.includes(parsed.id)) return;
+    await onUpdateEntry(entry, {
+      characterFilterMode: "exclude",
+      characterFilterIds: [...new Set([...entry.characterFilterIds, parsed.id])],
+    });
+  };
+
+  const toggleExcludeCard = async (entry: LmEntryNode, cardId: string) => {
+    if (entry.characterFilterMode === "include") {
+      toast.error("Entry uses an Include character filter — adjust it in the Lorebook editor first.");
+      return;
+    }
+    const currentlyExcluded = entry.characterFilterMode === "exclude" && entry.characterFilterIds.includes(cardId);
+    const nextIds = currentlyExcluded
+      ? entry.characterFilterIds.filter((id) => id !== cardId)
+      : [...new Set([...entry.characterFilterIds, cardId])];
+    await onUpdateEntry(entry, {
+      characterFilterMode: nextIds.length === 0 ? "any" : "exclude",
+      characterFilterIds: nextIds,
+    });
+  };
+
   const handlePromoteMention = async (otherRef: string) => {
     const otherNode = allNodesByRef.get(otherRef);
     const rel = relationDraft.trim() || "related_to";
@@ -355,10 +390,12 @@ export function GraphInspector({
     if (promoteDirection === "outgoing") {
       if (activeNode.nodeType !== "lore") return;
       await onSaveRelationships(activeNode, { ...activeNode.relationships, [toRelationshipKey(otherRef)]: rel });
+      await maybeAutoExcludeCardForRepresents(activeNode, otherRef, rel);
       return;
     }
     if (otherNode?.nodeType !== "lore") return;
     await onSaveRelationships(otherNode, { ...otherNode.relationships, [toRelationshipKey(activeNode.ref)]: rel });
+    await maybeAutoExcludeCardForRepresents(otherNode, activeNode.ref, rel);
   };
 
   const canPromoteForOther = (otherRef: string): { allowed: boolean; reason?: string } => {
@@ -415,6 +452,7 @@ export function GraphInspector({
         ...activeNode.relationships,
         [toRelationshipKey(addTargetRef)]: rel,
       });
+      await maybeAutoExcludeCardForRepresents(activeNode, addTargetRef, rel);
     }
     setAddTargetRef("");
   };
@@ -452,6 +490,7 @@ export function GraphInspector({
       }
     }
     await onBatchSaveRelationships([...updates.values()]);
+    await maybeAutoExcludeCardForRepresents(sourceEntry, targetRef, relation);
     setEditingLink(null);
   };
 
@@ -487,6 +526,28 @@ export function GraphInspector({
     mentionGroups.mutual.length + mentionGroups.outgoing.length + mentionGroups.incoming.length;
   const totalExplicitForActive =
     explicitGroups.mutual.length + explicitGroups.outgoing.length + explicitGroups.incoming.length;
+
+  const relatedCardsForDedup = useMemo(() => {
+    if (activeNode.nodeType !== "lore") return [];
+    const ids = new Set<string>(activeNode.characterFilterIds);
+    const maybeAdd = (ref: string) => {
+      const parsed = parseEntityRef(ref);
+      if (parsed?.kind === "char") ids.add(parsed.id);
+    };
+    for (const item of explicitGroups.mutual) maybeAdd(item.otherRef);
+    for (const item of explicitGroups.outgoing) maybeAdd(item.targetRef);
+    for (const item of explicitGroups.incoming) maybeAdd(item.sourceRef);
+    for (const item of mentionGroups.mutual) maybeAdd(item.otherRef);
+    for (const edge of mentionGroups.outgoing) maybeAdd(edge.targetRef);
+    for (const item of mentionGroups.incoming) maybeAdd(item.edge.sourceRef);
+    return [...ids]
+      .map((id) => ({
+        id,
+        name: allNodesByRef.get(`char:${id}`)?.name ?? id,
+        excluded: activeNode.characterFilterMode === "exclude" && activeNode.characterFilterIds.includes(id),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [activeNode, explicitGroups, mentionGroups, allNodesByRef]);
 
   const renderMentionRow = (key: string, otherRef: string, subtitle: string) => {
     const otherNode = allNodesByRef.get(otherRef);
@@ -782,6 +843,26 @@ export function GraphInspector({
             Open lorebook
           </button>
         ) : null}
+        {onOpenCharacter && activeNode.nodeType === "character" ? (
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small"
+            onClick={() => onOpenCharacter(activeNode.id)}
+          >
+            <ExternalLink size="0.75rem" />
+            Open character
+          </button>
+        ) : null}
+        {onOpenPersona && activeNode.nodeType === "persona" ? (
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small"
+            onClick={() => onOpenPersona(activeNode.id)}
+          >
+            <ExternalLink size="0.75rem" />
+            Open persona
+          </button>
+        ) : null}
         {activeNode.nodeType === "lorebook" ? (
           <button
             type="button"
@@ -793,6 +874,36 @@ export function GraphInspector({
           </button>
         ) : null}
       </div>
+
+      {activeNode.nodeType === "lore" && relatedCardsForDedup.length > 0 ? (
+        <div className="space-y-1.5 rounded border border-[var(--border)] bg-[var(--background)]/30 p-2">
+          <div className="flex items-center justify-between gap-2 text-[0.6875rem]">
+            <span className="font-medium text-[var(--foreground)]">Active-card dedup</span>
+            <span className="text-[var(--muted-foreground)]">
+              {activeNode.characterFilterMode === "include" ? "Uses Include filter" : "Exclude while card active"}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {relatedCardsForDedup.map((card) => (
+              <button
+                key={`dedup-${card.id}`}
+                type="button"
+                aria-pressed={card.excluded}
+                disabled={savingRef === activeNode.ref}
+                title={
+                  card.excluded
+                    ? `Currently excluded while ${card.name} is active — click to allow`
+                    : `Exclude this entry while ${card.name} is active in chat`
+                }
+                onClick={() => void toggleExcludeCard(activeNode, card.id)}
+                className="mari-chrome-control mari-chrome-control--small text-[0.6875rem] disabled:opacity-45"
+              >
+                {card.excluded ? `Excluded while ${card.name} active` : `Exclude while ${card.name} active`}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {activeNode.nodeType === "lore" && (activeNode.keys.length > 0 || activeNode.secondaryKeys.length > 0) ? (
         <div className="space-y-1">
@@ -1407,7 +1518,7 @@ export function GraphInspector({
               </CollapsibleSection>
 
               <CollapsibleSection
-                title="This entry mentions →"
+                title={activeNode.nodeType === "lore" ? "This entry mentions →" : "Mentions →"}
                 count={mentionGroups.outgoing.length}
                 open={isSectionOpen("men-out", mentionGroups.outgoing.length)}
                 onToggle={() => toggleSection("men-out", isSectionOpen("men-out", mentionGroups.outgoing.length))}

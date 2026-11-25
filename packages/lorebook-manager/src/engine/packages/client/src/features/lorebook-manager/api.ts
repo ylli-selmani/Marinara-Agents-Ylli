@@ -1,4 +1,7 @@
-import type { LmGraphPayload } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import type {
+  LmGraphPayload,
+  LorebookFilterMode,
+} from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 
 const CSRF_HEADER = "x-marinara-csrf";
 const CSRF_HEADER_VALUE = "1";
@@ -20,6 +23,8 @@ export interface LmEntryPatch {
   tag?: string;
   enabled?: boolean;
   constant?: boolean;
+  characterFilterMode?: LorebookFilterMode;
+  characterFilterIds?: string[];
   relationships?: Record<string, string>;
 }
 

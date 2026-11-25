@@ -22,6 +22,8 @@ export interface EntryReaderModalProps {
   saving: boolean;
   onClose: () => void;
   onOpenLorebook?: (lorebookId: string) => void;
+  onOpenCharacter?: (characterId: string) => void;
+  onOpenPersona?: (personaId: string) => void;
   onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
 }
 
@@ -38,6 +40,8 @@ export function EntryReaderModal({
   saving,
   onClose,
   onOpenLorebook,
+  onOpenCharacter,
+  onOpenPersona,
   onUpdateEntry,
 }: EntryReaderModalProps) {
   const [mode, setMode] = useState<"read" | "edit">(initialMode);
@@ -154,6 +158,32 @@ export function EntryReaderModal({
               >
                 <ExternalLink size="0.75rem" />
                 Open lorebook
+              </button>
+            ) : null}
+            {onOpenCharacter && node.nodeType === "character" ? (
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                onClick={() => {
+                  onOpenCharacter(node.id);
+                  onClose();
+                }}
+              >
+                <ExternalLink size="0.75rem" />
+                Open character
+              </button>
+            ) : null}
+            {onOpenPersona && node.nodeType === "persona" ? (
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                onClick={() => {
+                  onOpenPersona(node.id);
+                  onClose();
+                }}
+              >
+                <ExternalLink size="0.75rem" />
+                Open persona
               </button>
             ) : null}
             <button
@@ -343,6 +373,20 @@ export function EntryReaderModal({
                     ))}
                   </div>
                 ) : null}
+              </div>
+            ) : null}
+
+            {(node.nodeType === "character" || node.nodeType === "persona") && node.aliases.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1 rounded-lg border border-[var(--border)] p-3 text-xs">
+                <span className="font-medium text-[var(--muted-foreground)]">Other names:</span>
+                {node.aliases.map((alias) => (
+                  <span
+                    key={`ra-${alias}`}
+                    className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[0.6875rem]"
+                  >
+                    {alias}
+                  </span>
+                ))}
               </div>
             ) : null}
 

@@ -54,6 +54,9 @@ function applyOptimisticEntryUpdate(
       inferredFamily: classification.inferredFamily,
       enabled: patch.enabled !== undefined ? patch.enabled : node.enabled,
       constant: patch.constant !== undefined ? patch.constant : node.constant,
+      characterFilterMode:
+        patch.characterFilterMode !== undefined ? patch.characterFilterMode : node.characterFilterMode,
+      characterFilterIds: patch.characterFilterIds !== undefined ? patch.characterFilterIds : node.characterFilterIds,
       relationships: patch.relationships !== undefined ? patch.relationships : node.relationships,
     };
   });
@@ -398,13 +401,11 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
               </div>
             );
           })}
-        </div>
-      ) : null}
-
-      {payload && payload.lorebooks.length > 0 && managedLorebookIds !== null && managedSet.size === 0 ? (
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--card)]/60 px-3 py-2 text-xs text-[var(--muted-foreground)]">
-          No lorebooks opted into Lorebook Manager ({payload.lorebooks.length} books, {totalLibraryEntries} entries
-          available). Click a lorebook pill above to load it without loading the entire library.
+          {managedLorebookIds !== null && managedSet.size === 0 ? (
+            <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              · 0 loaded ({totalLibraryEntries} entries available — click a book)
+            </span>
+          ) : null}
         </div>
       ) : null}
 
@@ -424,6 +425,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
             collapsedLorebookIds={collapsedLorebookIds}
             onToggleCollapseLorebook={toggleCollapseLorebook}
             onOpenLorebook={props.onOpenLorebook}
+            onOpenCharacter={props.onOpenCharacter}
+            onOpenPersona={props.onOpenPersona}
             search={search}
             selectedNodeRef={selectedNodeRef}
             onSelectNodeRef={setSelectedNodeRef}

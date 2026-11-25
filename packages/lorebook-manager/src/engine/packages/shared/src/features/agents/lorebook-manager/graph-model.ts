@@ -226,14 +226,15 @@ function pairKey(a: string, b: string): string {
 }
 
 /**
- * Scan lore entry content + description for whole-word mentions of other nodes'
- * names, keys, or character aliases. Pairs that already have an explicit ID link
- * in either direction are skipped so promoting a mention turns dashed -> solid
- * cleanly without duplicate lines.
+ * Scan lore entry content + description (and optional full character/persona text)
+ * for whole-word mentions of other nodes' names, keys, or aliases. Pairs that already
+ * have an explicit ID link in either direction are skipped so promoting a mention turns
+ * dashed -> solid cleanly without duplicate lines.
  */
 export function extractMentionEdges(
   nodes: readonly LmGraphNode[],
   explicitEdges: readonly LmGraphEdge[],
+  extraScanTextByRef?: ReadonlyMap<string, string>,
 ): LmGraphEdge[] {
   const explicitPairs = new Set(explicitEdges.map((edge) => pairKey(edge.sourceRef, edge.targetRef)));
   const targets = nodes
@@ -243,8 +244,12 @@ export function extractMentionEdges(
   const emitted = new Set<string>();
 
   for (const source of nodes) {
-    if (source.nodeType !== "lore") continue;
-    const haystack = `${source.description}\n${source.content}`.trim();
+    if (source.nodeType === "lorebook") continue;
+    const rawHaystack =
+      source.nodeType === "lore"
+        ? `${source.description}\n${source.content}`
+        : (extraScanTextByRef?.get(source.ref) ?? source.description);
+    const haystack = rawHaystack.trim();
     if (!haystack) continue;
     for (const target of targets) {
       if (target.node.ref === source.ref) continue;

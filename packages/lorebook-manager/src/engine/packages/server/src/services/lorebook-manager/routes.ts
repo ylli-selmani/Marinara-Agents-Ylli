@@ -11,6 +11,7 @@ import type {
   LmGraphNode,
   LmGraphPayload,
   LmLorebookSummary,
+  LorebookFilterMode,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
 
@@ -37,7 +38,31 @@ function asString(value: unknown, fallback = ""): string {
 
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((s) => s.trim());
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return asStringArray(value);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) return asStringArray(parsed);
+    } catch {
+      return trimmed
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function parseFilterMode(value: unknown): LorebookFilterMode {
+  return value === "include" || value === "exclude" ? value : "any";
 }
 
 function uniqueNonEmpty(single: unknown, list: unknown): string[] {
@@ -62,7 +87,12 @@ function parseRelationships(value: unknown): Record<string, string> {
   return result;
 }
 
-function extractCharacterFields(rawData: unknown): { name: string; description: string; aliases: string[] } {
+function extractCharacterFields(rawData: unknown): {
+  name: string;
+  description: string;
+  aliases: string[];
+  scanText: string;
+} {
   const top = asRecord(rawData);
   const inner = asRecord(top.data);
   const source = Object.keys(inner).length > 0 ? inner : top;
@@ -70,19 +100,38 @@ function extractCharacterFields(rawData: unknown): { name: string; description: 
   const name = asString(source.name, asString(top.name, "Unnamed character")).trim() || "Unnamed character";
   const description = asString(source.description, asString(top.description)).trim();
   const aliases = [
-    ...asStringArray(source.nameAliases),
-    ...asStringArray(top.nameAliases),
-    ...asStringArray(extensions.nameAliases),
+    ...parseStringArray(source.nameAliases),
+    ...parseStringArray(top.nameAliases),
+    ...parseStringArray(extensions.nameAliases),
   ];
-  return { name, description, aliases: [...new Set(aliases)] };
+  const scanText = [
+    description,
+    asString(source.personality),
+    asString(source.scenario),
+    asString(extensions.backstory),
+    asString(extensions.appearance),
+  ]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n");
+  return { name, description, aliases: [...new Set(aliases)], scanText };
 }
 
-function extractPersonaFields(rawData: unknown): { name: string; description: string; aliases: string[] } {
+function extractPersonaFields(rawData: unknown): {
+  name: string;
+  description: string;
+  aliases: string[];
+  scanText: string;
+} {
   const source = asRecord(rawData);
   const name = asString(source.name, "Unnamed persona").trim() || "Unnamed persona";
   const description = asString(source.description).trim();
-  const aliases = asStringArray(source.nameAliases);
-  return { name, description, aliases };
+  const aliases = parseStringArray(source.nameAliases);
+  const scanText = [description, asString(source.appearance), asString(source.comment)]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n");
+  return { name, description, aliases: [...new Set(aliases)], scanText };
 }
 
 function parseLorebookIdsQuery(rawQuery: unknown): ReadonlySet<string> | null {
@@ -156,16 +205,21 @@ export async function buildLorebookManagerGraphPayload(
         enabled: entry.enabled !== false,
         constant: entry.constant === true,
         locked: entry.locked === true,
+        characterFilterMode: parseFilterMode(entry.characterFilterMode),
+        characterFilterIds: parseStringArray(entry.characterFilterIds),
         relationships: parseRelationships(entry.relationships),
       });
     }
   }
 
+  const extraScanTextByRef = new Map<string, string>();
   const characterNodes: LmEntityNode[] = rawCharacters.map((row) => {
     const fields = extractCharacterFields(row.data);
+    const ref = formatEntityRef("char", row.id);
+    if (fields.scanText) extraScanTextByRef.set(ref, fields.scanText);
     return {
       nodeType: "character",
-      ref: formatEntityRef("char", row.id),
+      ref,
       id: row.id,
       name: fields.name,
       description: fields.description,
@@ -176,9 +230,11 @@ export async function buildLorebookManagerGraphPayload(
 
   const personaNodes: LmEntityNode[] = rawPersonas.map((row) => {
     const fields = extractPersonaFields(row.data);
+    const ref = formatEntityRef("persona", row.id);
+    if (fields.scanText) extraScanTextByRef.set(ref, fields.scanText);
     return {
       nodeType: "persona",
-      ref: formatEntityRef("persona", row.id),
+      ref,
       id: row.id,
       name: fields.name,
       description: fields.description,
@@ -209,7 +265,7 @@ export async function buildLorebookManagerGraphPayload(
     }
   }
 
-  const mentionEdges = extractMentionEdges(nodes, explicitEdges);
+  const mentionEdges = extractMentionEdges(nodes, explicitEdges, extraScanTextByRef);
 
   return {
     lorebooks,

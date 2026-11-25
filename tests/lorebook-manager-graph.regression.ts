@@ -108,6 +108,8 @@ const nodes: LmGraphNode[] = [
     enabled: true,
     constant: false,
     locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
     relationships: { e2: "contains" },
   },
   {
@@ -129,6 +131,8 @@ const nodes: LmGraphNode[] = [
     enabled: true,
     constant: false,
     locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
     relationships: {},
   },
   {
@@ -168,6 +172,8 @@ const nodes: LmGraphNode[] = [
     enabled: true,
     constant: false,
     locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
     relationships: {},
   },
 ];
@@ -202,6 +208,8 @@ const unicodeNodes: LmGraphNode[] = [
     enabled: true,
     constant: false,
     locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
     relationships: {},
   },
   {
@@ -223,6 +231,8 @@ const unicodeNodes: LmGraphNode[] = [
     enabled: true,
     constant: false,
     locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
     relationships: {},
   },
   {
@@ -238,6 +248,73 @@ const unicodeNodes: LmGraphNode[] = [
 const unicodeMentions = extractMentionEdges(unicodeNodes, []);
 assert.ok(!unicodeMentions.some((edge) => edge.sourceRef === "lore:u-src-miss" && edge.targetRef === "char:elara-uni"));
 assert.ok(unicodeMentions.some((edge) => edge.sourceRef === "lore:u-src-hit" && edge.targetRef === "char:elara-uni"));
+
+// Character aliases and extra card scan text both surface mention edges.
+const cardAliasNodes: LmGraphNode[] = [
+  {
+    nodeType: "lore",
+    ref: "lore:deku-entry",
+    id: "deku-entry",
+    lorebookId: "b1",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "One For All Notes",
+    description: "",
+    content: "Deku inherited One For All at U.A. High School.",
+    keys: ["One For All"],
+    secondaryKeys: [],
+    tag: "lore",
+    family: "lore",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: {},
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:ua-entry",
+    id: "ua-entry",
+    lorebookId: "b1",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "U.A. High School",
+    description: "",
+    content: "Hero academy.",
+    keys: ["U.A."],
+    secondaryKeys: [],
+    tag: "location",
+    family: "location",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: {},
+  },
+  {
+    nodeType: "character",
+    ref: "char:izuku",
+    id: "izuku",
+    name: "Izuku Midoriya",
+    description: "Short bio.",
+    aliases: ["Deku"],
+    family: "character",
+  },
+];
+const extraScan = new Map([["char:izuku", "Short bio.\nStudent in Class 1-A at U.A. High School."]]);
+const cardAliasMentions = extractMentionEdges(cardAliasNodes, [], extraScan);
+assert.ok(
+  cardAliasMentions.some(
+    (edge) => edge.sourceRef === "lore:deku-entry" && edge.targetRef === "char:izuku" && edge.matchedText === "Deku",
+  ),
+);
+assert.ok(cardAliasMentions.some((edge) => edge.sourceRef === "char:izuku" && edge.targetRef === "lore:ua-entry"));
 
 // ── Graph filtering, multi-tag survival, card book links, collapsed books ─────
 const payload: LmGraphPayload = {

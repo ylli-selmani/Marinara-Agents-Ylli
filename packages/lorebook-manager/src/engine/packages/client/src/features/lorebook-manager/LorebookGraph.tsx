@@ -75,6 +75,7 @@ const RELATION_COLORS: Record<string, string> = {
   part_of: "#a855f7",
   member_of: "#6366f1",
   owns: "#f59e0b",
+  represents: "#06b6d4",
 };
 
 function relationMarkerId(relation: string): string | null {
@@ -179,7 +180,7 @@ export const GRAPH_STYLE = `
   --lm-graph-overlay-shadow: 0 12px 32px -10px rgb(0 0 0 / 0.7), 0 2px 8px -2px rgb(0 0 0 / 0.5);
 }
 [data-lm-graph-canvas] {
-  height: clamp(26rem, 66vh, 44rem);
+  height: clamp(20rem, calc(100vh - 18.5rem), 42rem);
   border: 1px solid var(--border);
   border-radius: 0.5rem;
   background-color: var(--lm-graph-canvas);
@@ -234,7 +235,7 @@ export const GRAPH_STYLE = `
 }
 [data-lm-graph-card][data-lm-graph-docked] {
   width: 100%;
-  max-height: clamp(26rem, 66vh, 44rem);
+  max-height: clamp(20rem, calc(100vh - 18.5rem), 42rem);
 }
 @media (min-width: 64rem) {
   [data-lm-graph-card][data-lm-graph-docked] {
@@ -359,7 +360,6 @@ const GraphNodeView = memo(function GraphNodeView({
       }}
       onPointerLeave={() => actions.hover(null, node.ref)}
       onPointerDown={(event) => actions.pointerDownNode(node.ref, event)}
-      onDoubleClick={() => actions.doubleClick(node)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -493,6 +493,8 @@ export interface LorebookGraphProps {
   collapsedLorebookIds: ReadonlySet<string>;
   onToggleCollapseLorebook: (lorebookId: string) => void;
   onOpenLorebook?: (lorebookId: string) => void;
+  onOpenCharacter?: (characterId: string) => void;
+  onOpenPersona?: (personaId: string) => void;
   search: string;
   selectedNodeRef: string | null;
   onSelectNodeRef: (ref: string | null) => void;
@@ -510,6 +512,8 @@ export function LorebookGraph({
   collapsedLorebookIds,
   onToggleCollapseLorebook,
   onOpenLorebook,
+  onOpenCharacter,
+  onOpenPersona,
   search,
   selectedNodeRef,
   onSelectNodeRef,
@@ -548,6 +552,7 @@ export function LorebookGraph({
   const layoutCacheRef = useRef<{ key: string; positions: Map<string, GraphPoint> } | null>(null);
   const hasFittedRef = useRef(false);
   const lastFitTriggerRef = useRef("");
+  const lastNodeTapRef = useRef<{ ref: string; time: number } | null>(null);
   const dragNode = useRef<{
     ref: string;
     pointerId: number;
@@ -825,13 +830,13 @@ export function LorebookGraph({
         pointers.current.set(event.pointerId, point);
         if (pointers.current.size > 1) {
           dragNode.current = null;
+          lastNodeTapRef.current = null;
           press.current.moved = true;
           svgRef.current?.setPointerCapture(event.pointerId);
           return;
         }
         const startGraph = effectivePositionsRef.current.get(ref);
         if (!startGraph) return;
-        svgRef.current?.setPointerCapture(event.pointerId);
         dragNode.current = {
           ref,
           pointerId: event.pointerId,
@@ -1072,6 +1077,8 @@ export function LorebookGraph({
       onNavigate={(ref) => navigateTo(ref)}
       onOpenReader={(node, mode) => setReaderState({ ref: node.ref, mode })}
       onOpenLorebook={onOpenLorebook}
+      onOpenCharacter={onOpenCharacter}
+      onOpenPersona={onOpenPersona}
       onToggleCollapseLorebook={onToggleCollapseLorebook}
       savingRef={savingRef}
       onSaveRelationships={onSaveRelationships}
@@ -1258,6 +1265,7 @@ export function LorebookGraph({
                   const dyScreen = next.y - dragNode.current.startScreen.y;
                   if (!dragNode.current.moved && Math.hypot(dxScreen, dyScreen) > TAP_SLOP) {
                     dragNode.current.moved = true;
+                    svgRef.current?.setPointerCapture(event.pointerId);
                   }
                   if (dragNode.current.moved) {
                     const ref = dragNode.current.ref;
@@ -1298,7 +1306,20 @@ export function LorebookGraph({
                   const finished = dragNode.current;
                   dragNode.current = null;
                   pointers.current.delete(event.pointerId);
-                  if (!finished.moved) navigateTo(finished.ref);
+                  if (!finished.moved) {
+                    const now = Date.now();
+                    const prevTap = lastNodeTapRef.current;
+                    if (prevTap && prevTap.ref === finished.ref && now - prevTap.time < 350) {
+                      lastNodeTapRef.current = null;
+                      const node = nodesByRef.get(finished.ref);
+                      if (node) nodeActions.doubleClick(node);
+                    } else {
+                      lastNodeTapRef.current = { ref: finished.ref, time: now };
+                      navigateTo(finished.ref);
+                    }
+                  } else {
+                    lastNodeTapRef.current = null;
+                  }
                   return;
                 }
                 const wasSingle = pointers.current.size === 1;
@@ -1559,6 +1580,8 @@ export function LorebookGraph({
         saving={Boolean(readerNode && savingRef === readerNode.ref)}
         onClose={() => setReaderState(null)}
         onOpenLorebook={onOpenLorebook}
+        onOpenCharacter={onOpenCharacter}
+        onOpenPersona={onOpenPersona}
         onUpdateEntry={onUpdateEntry}
       />
     </div>

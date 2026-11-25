@@ -125,8 +125,11 @@ function tokenizeBm25(text: string): string[] {
   return tokens.filter((token) => !STOPWORDS.has(token));
 }
 
-function computeBm25Scores(entries: readonly LmEntryNode[], queryText: string): Map<string, number> {
-  const scores = new Map<string, number>();
+function computeBm25Scores(
+  entries: readonly LmEntryNode[],
+  queryText: string,
+): Map<string, { score: number; matchedTerms: string[] }> {
+  const scores = new Map<string, { score: number; matchedTerms: string[] }>();
   const queryTerms = [...new Set(tokenizeBm25(queryText))];
   if (queryTerms.length === 0 || entries.length === 0) return scores;
 
@@ -162,15 +165,21 @@ function computeBm25Scores(entries: readonly LmEntryNode[], queryText: string): 
 
   for (const doc of docs) {
     let total = 0;
+    const matched: Array<{ term: string; contrib: number }> = [];
     for (const term of queryTerms) {
       const f = doc.tf.get(term) ?? 0;
       if (f === 0) continue;
       const nq = df.get(term) ?? 0;
       const idf = Math.log(1 + (N - nq + 0.5) / (nq + 0.5));
       const denom = f + k1 * (1 - b + b * (doc.length / avgLen));
-      total += idf * ((f * (k1 + 1)) / denom);
+      const contrib = idf * ((f * (k1 + 1)) / denom);
+      total += contrib;
+      matched.push({ term, contrib });
     }
-    if (total > 0) scores.set(doc.ref, total);
+    if (total > 0) {
+      matched.sort((aItem, bItem) => bItem.contrib - aItem.contrib);
+      scores.set(doc.ref, { score: total, matchedTerms: matched.map((item) => item.term) });
+    }
   }
   return scores;
 }
@@ -294,7 +303,7 @@ export function simulateLorebookRetrieval(
 
   const bm25Scores = computeBm25Scores(eligibleEntries, queryText);
   const queryTokenCount = tokenizeBm25(queryText).length;
-  const bm25DirectThreshold = queryTokenCount <= 1 ? 1.2 : 1.8;
+  const bm25DirectThreshold = queryTokenCount <= 1 ? 1.5 : 2.6;
 
   const directCandidates = new Map<
     string,
@@ -339,11 +348,20 @@ export function simulateLorebookRetrieval(
       reasons.push({ kind: "location", detail: `Location "${locationQuery}"`, score: 12 });
     }
 
-    const bm25 = bm25Scores.get(entry.ref) ?? 0;
-    if (bm25 >= bm25DirectThreshold) {
+    const bm25Hit = bm25Scores.get(entry.ref);
+    const bm25 = bm25Hit?.score ?? 0;
+    if (bm25Hit && bm25 >= bm25DirectThreshold) {
       tier ??= "direct";
       score += bm25;
-      reasons.push({ kind: "bm25", detail: `BM25 ${bm25.toFixed(2)}`, score: bm25 });
+      const topTerms = bm25Hit.matchedTerms.slice(0, 3).map((t) => `"${t}"`);
+      const extraCount = bm25Hit.matchedTerms.length - topTerms.length;
+      const termsLabel = extraCount > 0 ? `${topTerms.join(", ")} +${extraCount}` : topTerms.join(", ");
+      reasons.push({
+        kind: "bm25",
+        detail: termsLabel ? `Text: ${termsLabel} (${bm25.toFixed(1)})` : `Text score ${bm25.toFixed(1)}`,
+        score: bm25,
+        matchedTerms: bm25Hit.matchedTerms,
+      });
     }
 
     if (tier) {
@@ -351,9 +369,19 @@ export function simulateLorebookRetrieval(
     }
   }
 
-  // Build bidirectional lore adjacency so 1-hop expansion reads both outgoing and incoming ID links.
-  const adjacency = new Map<string, Array<{ neighborRef: string; relation: string; direction: "out" | "in" }>>();
-  const pushAdj = (fromRef: string, item: { neighborRef: string; relation: string; direction: "out" | "in" }) => {
+  // Build bidirectional lore adjacency, merging opposing out/in links of the same relation into <->.
+  type AdjLink = { neighborRef: string; relation: string; direction: "out" | "in" | "both" };
+  const adjacency = new Map<string, AdjLink[]>();
+  const adjByPair = new Map<string, AdjLink>();
+  const upsertAdj = (fromRef: string, neighborRef: string, relation: string, direction: "out" | "in") => {
+    const pairKey = `${fromRef}\u0000${neighborRef}\u0000${relation.trim().toLowerCase()}`;
+    const existing = adjByPair.get(pairKey);
+    if (existing) {
+      if (existing.direction !== direction) existing.direction = "both";
+      return;
+    }
+    const item: AdjLink = { neighborRef, relation, direction };
+    adjByPair.set(pairKey, item);
     const list = adjacency.get(fromRef);
     if (list) list.push(item);
     else adjacency.set(fromRef, [item]);
@@ -366,8 +394,8 @@ export function simulateLorebookRetrieval(
       if (!parsed || parsed.kind !== "lore") continue;
       const target = entriesByRef.get(parsed.ref);
       if (!target || target.ref === entry.ref) continue;
-      pushAdj(entry.ref, { neighborRef: target.ref, relation: rel, direction: "out" });
-      pushAdj(target.ref, { neighborRef: entry.ref, relation: rel, direction: "in" });
+      upsertAdj(entry.ref, target.ref, rel, "out");
+      upsertAdj(target.ref, entry.ref, rel, "in");
     }
   }
 
@@ -404,12 +432,13 @@ export function simulateLorebookRetrieval(
         const neighborEntry = entriesByRef.get(link.neighborRef);
         if (!neighborEntry) continue;
 
-        const policy = oneHopPolicy(link.relation, link.direction, seed.matchedLocation, Boolean(seed.viaCardName));
-        const bm25 = bm25Scores.get(link.neighborRef) ?? 0;
+        const effectiveDirection = link.direction === "both" ? "out" : link.direction;
+        const policy = oneHopPolicy(link.relation, effectiveDirection, seed.matchedLocation, Boolean(seed.viaCardName));
+        const bm25 = bm25Scores.get(link.neighborRef)?.score ?? 0;
         if (bm25 < policy.floor) continue;
 
         const hopScore = policy.weight * seed.seedScore + bm25 * 0.25;
-        const arrow = link.direction === "out" ? "→" : "←";
+        const arrow = link.direction === "both" ? "↔" : link.direction === "out" ? "→" : "←";
         const reason: LmRetrievalReason = seed.viaCardName
           ? {
               kind: "card_inherited",

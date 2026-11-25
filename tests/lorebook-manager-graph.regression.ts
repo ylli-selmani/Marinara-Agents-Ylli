@@ -476,7 +476,9 @@ const simNodes: LmGraphNode[] = [
     locked: false,
     characterFilterMode: "any",
     characterFilterIds: [],
-    relationships: {},
+    relationships: {
+      "deku-lore": "ally_of",
+    },
   },
   {
     nodeType: "lore",
@@ -595,9 +597,33 @@ assert.ok(
   simRes.suppressed.some((s) => s.entry.ref === "lore:deku-lore" && s.reason === "excluded_by_card"),
   "Izuku Entry must be suppressed while Izuku card is active",
 );
+const allMightSim = simRes.activated.find((a) => a.entry.ref === "lore:allmight");
 assert.ok(
-  simRes.activated.some((a) => a.entry.ref === "lore:allmight" && a.reasons.some((r) => r.kind === "card_inherited")),
+  allMightSim && allMightSim.reasons.some((r) => r.kind === "card_inherited"),
   "Active Izuku card must inherit explicit 1-hop links from suppressed represents entry",
+);
+assert.equal(
+  allMightSim?.reasons.filter((r) => r.kind === "card_inherited").length,
+  1,
+  "Bidirectional ally_of link must emit one deduplicated <-> reason badge",
+);
+assert.ok(
+  allMightSim?.reasons.some((r) => r.detail.includes("↔")),
+  "Deduped opposing link reason must use bidirectional arrow",
+);
+
+const bm25OnlyRes = simulateLorebookRetrieval(simPayload, {
+  queryText: "quirks superpowers symbol peace",
+  activeCharacterIds: [],
+  tokenBudget: 2000,
+  maxOneHop: 6,
+});
+const bm25Reason = bm25OnlyRes.activated
+  .find((a) => a.entry.ref === "lore:allmight")
+  ?.reasons.find((r) => r.kind === "bm25");
+assert.ok(
+  bm25Reason?.matchedTerms?.includes("symbol") && bm25Reason.detail.includes('"symbol"'),
+  "BM25 reason must surface matched query terms cleanly",
 );
 assert.ok(
   !simRes.activated.some((a) => a.entry.ref === "lore:unrelated-student"),

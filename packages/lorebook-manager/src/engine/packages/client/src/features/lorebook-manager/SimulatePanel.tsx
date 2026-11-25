@@ -1,12 +1,15 @@
-import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Eye, Network, RotateCcw, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, FileText, Network, RotateCcw, Sparkles } from "lucide-react";
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
   LmEntityNode,
+  LmEntryNode,
   LmGraphPayload,
   LmRetrievalActivatedItem,
   LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import type { LmEntryPatch } from "./api";
+import { EntryReaderModal } from "./EntryReaderModal";
 
 export type SimGraphHighlight = {
   directRefs: ReadonlySet<string>;
@@ -21,9 +24,29 @@ export interface SimulatePanelProps {
   managedLorebookIds: ReadonlySet<string>;
   config: LmRetrievalInput;
   onChangeConfig: (next: LmRetrievalInput) => void;
+  savingRef: string | null;
+  onOpenLorebook?: (lorebookId: string) => void;
+  onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
   onHighlightOnGraph: (highlight: SimGraphHighlight) => void;
   onInspectNode: (ref: string) => void;
 }
+
+const SIM_STYLE = `
+[data-lm-sim-grid] {
+  display: grid;
+  gap: 0.875rem;
+}
+[data-lm-sim-results] {
+  max-height: clamp(20rem, calc(100vh - 15rem), 46rem);
+  overflow-y: auto;
+}
+@media (min-width: 64rem) {
+  [data-lm-sim-grid] {
+    grid-template-columns: minmax(19rem, 25rem) minmax(0, 1fr);
+    align-items: start;
+  }
+}
+`;
 
 const TIER_LABEL: Record<LmRetrievalActivatedItem["tier"], string> = {
   constant: "Constant",
@@ -45,10 +68,26 @@ export function SimulatePanel({
   managedLorebookIds,
   config,
   onChangeConfig,
+  savingRef,
+  onOpenLorebook,
+  onUpdateEntry,
   onHighlightOnGraph,
   onInspectNode,
 }: SimulatePanelProps) {
   const [showSuppressed, setShowSuppressed] = useState(true);
+  const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
+
+  useEffect(() => {
+    if (!readerState) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setReaderState(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [readerState]);
 
   const characterCards = useMemo(
     () =>
@@ -73,7 +112,7 @@ export function SimulatePanel({
   );
 
   const activeCardSet = useMemo(() => new Set(config.activeCharacterIds), [config.activeCharacterIds]);
-  const nodeNamesByRef = useMemo(() => new Map(payload.nodes.map((node) => [node.ref, node.name])), [payload.nodes]);
+  const nodesByRef = useMemo(() => new Map(payload.nodes.map((node) => [node.ref, node])), [payload.nodes]);
 
   const toggleCharacter = (id: string) => {
     const next = activeCardSet.has(id)
@@ -117,10 +156,14 @@ export function SimulatePanel({
       respectBookBudgets: true,
     });
 
+  const readerNode = readerState ? (nodesByRef.get(readerState.ref) ?? null) : null;
+
   return (
-    <div className="grid gap-4 lg:grid-cols-12 lg:items-start">
+    <div data-lm-sim-grid>
+      <style>{SIM_STYLE}</style>
+
       {/* Left column: test scene & simulation parameters */}
-      <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--card)]/70 p-3.5 lg:col-span-5">
+      <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--card)]/70 p-3.5">
         <div className="flex items-center justify-between gap-2">
           <div>
             <h2 className="text-sm font-semibold">Simulate Retrieval (Stage 1 pure code)</h2>
@@ -194,38 +237,41 @@ export function SimulatePanel({
           />
         </label>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="space-y-1 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="font-medium text-[var(--muted-foreground)]">Token budget</span>
-              <span className="tabular-nums text-[var(--foreground)]">{config.tokenBudget}</span>
-            </div>
+        <div className="flex flex-wrap items-center gap-4 text-xs">
+          <label className="flex items-center gap-2">
+            <span className="font-medium text-[var(--muted-foreground)]">Token budget</span>
             <input
-              type="range"
+              type="number"
               aria-label="Simulation token budget"
-              min={500}
-              max={8000}
-              step={250}
+              min={100}
+              max={32000}
+              step={100}
               value={config.tokenBudget}
-              onChange={(event) => onChangeConfig({ ...config, tokenBudget: Number(event.target.value) })}
-              className="h-1.5 w-full accent-[var(--primary)]"
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                if (Number.isFinite(next)) onChangeConfig({ ...config, tokenBudget: Math.max(100, next) });
+              }}
+              className="mari-chrome-field h-8 w-24 rounded px-2 text-xs tabular-nums"
             />
           </label>
 
-          <label className="space-y-1 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="font-medium text-[var(--muted-foreground)]">Max 1-hop bonus</span>
-              <span className="tabular-nums text-[var(--foreground)]">{config.maxOneHop}</span>
-            </div>
+          <label
+            className="flex items-center gap-2"
+            title="Maximum ID-linked neighbor entries pulled in via 1-hop bonus per turn"
+          >
+            <span className="font-medium text-[var(--muted-foreground)]">Max 1-hop bonus</span>
             <input
-              type="range"
-              aria-label="Maximum 1-hop entries"
+              type="number"
+              aria-label="Maximum 1-hop bonus entries"
               min={0}
-              max={15}
+              max={25}
               step={1}
               value={config.maxOneHop}
-              onChange={(event) => onChangeConfig({ ...config, maxOneHop: Number(event.target.value) })}
-              className="h-1.5 w-full accent-[var(--primary)]"
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                if (Number.isFinite(next)) onChangeConfig({ ...config, maxOneHop: Math.max(0, Math.min(25, next)) });
+              }}
+              className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
             />
           </label>
         </div>
@@ -241,7 +287,7 @@ export function SimulatePanel({
       </div>
 
       {/* Right column: activation results & provenance */}
-      <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--card)]/70 p-3.5 lg:col-span-7">
+      <div data-lm-sim-results className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--card)]/70 p-3.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="space-y-0.5">
             <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
@@ -275,7 +321,7 @@ export function SimulatePanel({
             <Sparkles size="0.8rem" className="shrink-0 text-cyan-400" />
             <span>
               Inherited 1-hop links from{" "}
-              {result.cardInheritedSeedRefs.map((ref) => nodeNamesByRef.get(ref) ?? ref).join(", ")} while active
+              {result.cardInheritedSeedRefs.map((ref) => nodesByRef.get(ref)?.name ?? ref).join(", ")} while active
               card(s) are in context.
             </span>
           </div>
@@ -302,7 +348,7 @@ export function SimulatePanel({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => onInspectNode(item.entry.ref)}
+                        onClick={() => setReaderState({ ref: item.entry.ref, mode: "read" })}
                         className="truncate text-left font-medium hover:underline"
                       >
                         {item.entry.name}
@@ -312,16 +358,25 @@ export function SimulatePanel({
                       </span>
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
+                  <div className="flex shrink-0 items-center gap-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
                     <span className="tabular-nums">~{item.tokens} tok</span>
                     <button
                       type="button"
-                      title="Open in Graph"
-                      aria-label={`Inspect ${item.entry.name} in Graph`}
+                      title="Read or edit inline"
+                      aria-label={`Read ${item.entry.name}`}
+                      onClick={() => setReaderState({ ref: item.entry.ref, mode: "read" })}
+                      className="p-0.5 hover:text-[var(--foreground)]"
+                    >
+                      <FileText size="0.8rem" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Show in Graph"
+                      aria-label={`Show ${item.entry.name} in Graph`}
                       onClick={() => onInspectNode(item.entry.ref)}
                       className="p-0.5 hover:text-[var(--foreground)]"
                     >
-                      <Eye size="0.8rem" />
+                      <Network size="0.8rem" />
                     </button>
                   </div>
                 </div>
@@ -361,7 +416,7 @@ export function SimulatePanel({
               </span>
             </button>
             {showSuppressed ? (
-              <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+              <div className="space-y-1">
                 {result.suppressed.map((item) => (
                   <div
                     key={`sup-${item.entry.ref}`}
@@ -369,12 +424,21 @@ export function SimulatePanel({
                   >
                     <button
                       type="button"
-                      onClick={() => onInspectNode(item.entry.ref)}
+                      onClick={() => setReaderState({ ref: item.entry.ref, mode: "read" })}
                       className="min-w-0 flex-1 truncate text-left font-medium hover:underline"
                     >
                       {item.entry.name}
                     </button>
                     <span className="shrink-0 text-[0.6875rem] text-[var(--muted-foreground)]">{item.detail}</span>
+                    <button
+                      type="button"
+                      title="Show in Graph"
+                      aria-label={`Show ${item.entry.name} in Graph`}
+                      onClick={() => onInspectNode(item.entry.ref)}
+                      className="shrink-0 p-0.5 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                    >
+                      <Network size="0.75rem" />
+                    </button>
                   </div>
                 ))}
               </div>
@@ -382,6 +446,15 @@ export function SimulatePanel({
           </div>
         ) : null}
       </div>
+
+      <EntryReaderModal
+        node={readerNode}
+        initialMode={readerState?.mode ?? "read"}
+        saving={Boolean(readerNode && savingRef === readerNode.ref)}
+        onClose={() => setReaderState(null)}
+        onOpenLorebook={onOpenLorebook}
+        onUpdateEntry={onUpdateEntry}
+      />
     </div>
   );
 }

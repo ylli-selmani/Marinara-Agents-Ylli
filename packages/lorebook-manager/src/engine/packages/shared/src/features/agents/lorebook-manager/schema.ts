@@ -125,6 +125,7 @@ export interface LmRetrievalReason {
   score: number;
   fromRef?: string;
   relation?: string;
+  matchedTerms?: string[];
 }
 
 export interface LmRetrievalActivatedItem {

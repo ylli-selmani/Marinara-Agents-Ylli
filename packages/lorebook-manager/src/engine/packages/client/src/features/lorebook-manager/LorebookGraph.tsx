@@ -51,7 +51,7 @@ import { EntryReaderModal } from "./EntryReaderModal";
 import { GraphInspector } from "./GraphInspector";
 import type { SimGraphHighlight } from "./SimulatePanel";
 
-const FOCUS_HOPS = 2;
+const DEFAULT_FOCUS_HOPS = 2;
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 4;
 const FIT_MAX_ZOOM = 2;
@@ -553,6 +553,7 @@ export function LorebookGraph({
   onUpdateEntry,
 }: LorebookGraphProps) {
   const [whole, setWhole] = useState(true);
+  const [focusHops, setFocusHops] = useState(DEFAULT_FOCUS_HOPS);
   const [expanded, setExpanded] = useState(false);
   const [floating, setFloating] = useState(false);
   const [hiddenFamilies, setHiddenFamilies] = useState<ReadonlySet<EntityFamily>>(() => new Set());
@@ -695,12 +696,12 @@ export function LorebookGraph({
 
   const shown = useMemo(() => {
     if (whole || !focusRef) return graph;
-    const ids = neighbourhood(graph, focusRef, FOCUS_HOPS);
+    const ids = neighbourhood(graph, focusRef, focusHops);
     return {
       nodes: graph.nodes.filter((node) => ids.has(node.ref)),
       edges: graph.edges.filter((edge) => ids.has(edge.sourceRef) && ids.has(edge.targetRef)),
     };
-  }, [graph, whole, focusRef]);
+  }, [graph, whole, focusRef, focusHops]);
 
   const sortedNodeRefsKey = useMemo(
     () =>
@@ -1625,15 +1626,32 @@ export function LorebookGraph({
 
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--card)]/60 px-2.5 py-1.5">
         <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
-            aria-pressed={!whole}
-            onClick={() => setWhole((value) => !value)}
-          >
-            <Focus aria-hidden="true" size="0.875rem" />
-            {whole ? "Whole graph" : "Focus (2-hop)"}
-          </button>
+          <div className="inline-flex items-center gap-1">
+            <button
+              type="button"
+              className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
+              aria-pressed={!whole}
+              onClick={() => setWhole((value) => !value)}
+            >
+              <Focus aria-hidden="true" size="0.875rem" />
+              {whole ? "Whole graph" : `Focus (${focusHops}-hop)`}
+            </button>
+            <select
+              aria-label="Focus hop depth"
+              title="Neighbourhood hop depth when focused"
+              value={focusHops}
+              onChange={(event) => {
+                setFocusHops(Number(event.target.value));
+                setWhole(false);
+              }}
+              className="mari-chrome-field h-7 rounded px-1.5 text-xs text-[var(--foreground)]"
+            >
+              <option value={1}>1-hop</option>
+              <option value={2}>2-hop</option>
+              <option value={3}>3-hop</option>
+              <option value={4}>4-hop</option>
+            </select>
+          </div>
 
           <span aria-hidden="true" data-lm-graph-divider />
 

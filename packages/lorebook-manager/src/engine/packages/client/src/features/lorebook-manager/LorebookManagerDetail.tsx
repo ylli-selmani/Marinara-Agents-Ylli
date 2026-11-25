@@ -465,6 +465,9 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
             managedLorebookIds={managedSet}
             config={simConfig}
             onChangeConfig={setSimConfig}
+            savingRef={savingRef}
+            onOpenLorebook={props.onOpenLorebook}
+            onUpdateEntry={handleUpdateEntry}
             onHighlightOnGraph={(highlight) => {
               setSimHighlight(highlight);
               setView("graph");

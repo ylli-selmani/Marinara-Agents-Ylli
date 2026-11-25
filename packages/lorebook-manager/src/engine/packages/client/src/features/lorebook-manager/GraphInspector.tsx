@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import {
   ArrowLeft,
   ArrowLeftRight,
@@ -60,6 +61,14 @@ function parseTagList(raw: string): string[] {
     .filter(Boolean);
 }
 
+function findRawRelationshipKey(entry: LmEntryNode | null | undefined, targetRef: string): string | null {
+  if (!entry) return null;
+  for (const key of Object.keys(entry.relationships)) {
+    if (parseEntityRef(key)?.ref === targetRef) return key;
+  }
+  return null;
+}
+
 function CollapsibleSection({
   title,
   count,
@@ -71,7 +80,7 @@ function CollapsibleSection({
   count: number;
   open: boolean;
   onToggle: () => void;
-  children: ReactNode;
+  children: ReactNode | (() => ReactNode);
 }) {
   if (count === 0) return null;
   return (
@@ -88,15 +97,16 @@ function CollapsibleSection({
         </span>
         <span>{count}</span>
       </button>
-      {open ? <div className="flex flex-col gap-1">{children}</div> : null}
+      {open ? (
+        <div className="flex flex-col gap-1">{typeof children === "function" ? children() : children}</div>
+      ) : null}
     </div>
   );
 }
 
 type EditingLinkState = {
-  id: string;
-  sourceEntry: LmEntryNode | null;
-  targetEntry: LmEntryNode | null;
+  ownerRef: string;
+  section: "mutual" | "outgoing" | "incoming";
   sourceRef: string;
   targetRef: string;
   relation: string;
@@ -165,6 +175,12 @@ export function GraphInspector({
   const [editingLink, setEditingLink] = useState<EditingLinkState | null>(null);
   const [sectionOpenOverrides, setSectionOpenOverrides] = useState<Record<string, boolean>>({});
 
+  useEffect(() => {
+    setAddTargetRef("");
+    setAddFlipped(false);
+    setEditingLink(null);
+  }, [activeNode.ref]);
+
   const explicitGroups = useMemo(() => {
     const outItems: Array<{ key: string; targetRef: string; targetName: string; relation: string }> = [];
     if (activeNode.nodeType === "lore") {
@@ -224,12 +240,13 @@ export function GraphInspector({
     for (const [sourceRef, edge] of inBySource) {
       if (matchedIncoming.has(sourceRef)) continue;
       const sourceNode = allNodesByRef.get(sourceRef);
+      const sourceEntry = sourceNode?.nodeType === "lore" ? sourceNode : null;
       incoming.push({
         sourceRef,
         sourceName: sourceNode?.name ?? sourceRef,
         relation: edge.relation,
-        sourceEntry: sourceNode?.nodeType === "lore" ? sourceNode : null,
-        keyOnSource: toRelationshipKey(activeNode.ref),
+        sourceEntry,
+        keyOnSource: findRawRelationshipKey(sourceEntry, activeNode.ref) ?? toRelationshipKey(activeNode.ref),
       });
     }
 
@@ -368,15 +385,27 @@ export function GraphInspector({
   };
 
   const handleAddExplicit = async () => {
-    if (activeNode.nodeType !== "lore" || !addTargetRef) return;
+    if (
+      activeNode.nodeType !== "lore" ||
+      !addTargetRef ||
+      addTargetRef === activeNode.ref ||
+      !linkableTargets.some((candidate) => candidate.ref === addTargetRef)
+    ) {
+      return;
+    }
     const rel = addRelation.trim() || "related_to";
     const targetNode = allNodesByRef.get(addTargetRef);
     if (addBothWays && targetNode?.nodeType === "lore") {
+      const reverseKey = findRawRelationshipKey(targetNode, activeNode.ref) ?? toRelationshipKey(activeNode.ref);
       await onBatchSaveRelationships([
         { entry: activeNode, relationships: { ...activeNode.relationships, [toRelationshipKey(addTargetRef)]: rel } },
-        { entry: targetNode, relationships: { ...targetNode.relationships, [toRelationshipKey(activeNode.ref)]: rel } },
+        { entry: targetNode, relationships: { ...targetNode.relationships, [reverseKey]: rel } },
       ]);
     } else if (addFlipped && targetNode?.nodeType === "lore") {
+      if (findRawRelationshipKey(targetNode, activeNode.ref)) {
+        toast.error(`${targetNode.name} already links to ${activeNode.name}. Edit it under "Linking to this".`);
+        return;
+      }
       await onSaveRelationships(targetNode, {
         ...targetNode.relationships,
         [toRelationshipKey(activeNode.ref)]: rel,
@@ -392,7 +421,18 @@ export function GraphInspector({
 
   const handleSaveEditedLink = async () => {
     if (!editingLink) return;
-    const { sourceEntry, targetEntry, sourceRef, targetRef, relation, bothWays, wasBothWays } = editingLink;
+    const { sourceRef, targetRef, relation, bothWays, wasBothWays } = editingLink;
+    const sourceNode = allNodesByRef.get(sourceRef);
+    const targetNode = allNodesByRef.get(targetRef);
+    const sourceEntry = sourceNode?.nodeType === "lore" ? sourceNode : null;
+    const targetEntry = targetNode?.nodeType === "lore" ? targetNode : null;
+    const sourceKey = findRawRelationshipKey(sourceEntry, targetRef);
+    if (!sourceEntry || !sourceKey) {
+      toast.error("That link changed or was removed.");
+      setEditingLink(null);
+      return;
+    }
+
     const updates = new Map<string, { entry: LmEntryNode; relationships: Record<string, string> }>();
     const ensure = (entry: LmEntryNode) => {
       if (!updates.has(entry.ref)) {
@@ -401,28 +441,37 @@ export function GraphInspector({
       return updates.get(entry.ref)!.relationships;
     };
 
-    if (sourceEntry) {
-      ensure(sourceEntry)[toRelationshipKey(targetRef)] = relation;
-    }
+    ensure(sourceEntry)[sourceKey] = relation;
     if (targetEntry) {
       const targetRels = ensure(targetEntry);
-      const revKey = toRelationshipKey(sourceRef);
-      if (bothWays) targetRels[revKey] = relation;
-      else if (wasBothWays) delete targetRels[revKey];
-    }
-    if (bothWays && !wasBothWays && !sourceEntry && targetEntry) {
-      ensure(targetEntry)[toRelationshipKey(sourceRef)] = relation;
+      const revKey = findRawRelationshipKey(targetEntry, sourceRef);
+      if (bothWays) {
+        targetRels[revKey ?? toRelationshipKey(sourceRef)] = relation;
+      } else if (wasBothWays && revKey) {
+        delete targetRels[revKey];
+      }
     }
     await onBatchSaveRelationships([...updates.values()]);
     setEditingLink(null);
   };
 
   const handleFlipEditedLink = async () => {
-    if (!editingLink || !editingLink.sourceEntry || !editingLink.targetEntry) return;
-    const { sourceEntry, targetEntry, sourceRef, targetRef, relation } = editingLink;
+    if (!editingLink) return;
+    const { sourceRef, targetRef, relation } = editingLink;
+    const sourceNode = allNodesByRef.get(sourceRef);
+    const targetNode = allNodesByRef.get(targetRef);
+    const sourceEntry = sourceNode?.nodeType === "lore" ? sourceNode : null;
+    const targetEntry = targetNode?.nodeType === "lore" ? targetNode : null;
+    const sourceKey = findRawRelationshipKey(sourceEntry, targetRef);
+    if (!sourceEntry || !targetEntry || !sourceKey) {
+      toast.error("That link changed or was removed.");
+      setEditingLink(null);
+      return;
+    }
     const nextSource = { ...sourceEntry.relationships };
-    delete nextSource[toRelationshipKey(targetRef)];
-    const nextTarget = { ...targetEntry.relationships, [toRelationshipKey(sourceRef)]: relation };
+    delete nextSource[sourceKey];
+    const targetKey = findRawRelationshipKey(targetEntry, sourceRef) ?? toRelationshipKey(sourceRef);
+    const nextTarget = { ...targetEntry.relationships, [targetKey]: relation };
     await onBatchSaveRelationships([
       { entry: sourceEntry, relationships: nextSource },
       { entry: targetEntry, relationships: nextTarget },
@@ -826,7 +875,12 @@ export function GraphInspector({
             >
               {explicitGroups.mutual.map((item) => {
                 const rowId = `mut-${item.outKey}`;
-                const isEditing = editingLink?.id === rowId;
+                const isEditing =
+                  editingLink?.ownerRef === activeNode.ref &&
+                  editingLink.section === "mutual" &&
+                  editingLink.sourceRef === activeNode.ref &&
+                  editingLink.targetRef === item.otherRef;
+                const targetCanBeBidirect = isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
                 return (
                   <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
                     <div className="flex items-center justify-between gap-1">
@@ -849,9 +903,8 @@ export function GraphInspector({
                             aria-label={`Edit link to ${item.otherName}`}
                             onClick={() =>
                               setEditingLink({
-                                id: rowId,
-                                sourceEntry: activeNode,
-                                targetEntry: item.otherEntry,
+                                ownerRef: activeNode.ref,
+                                section: "mutual",
                                 sourceRef: activeNode.ref,
                                 targetRef: item.otherRef,
                                 relation: item.outRel,
@@ -888,7 +941,7 @@ export function GraphInspector({
                             </option>
                           ))}
                         </select>
-                        {editingLink.targetEntry ? (
+                        {targetCanBeBidirect ? (
                           <label className="flex items-center gap-1">
                             <input
                               type="checkbox"
@@ -928,9 +981,12 @@ export function GraphInspector({
             >
               {explicitGroups.outgoing.map((item) => {
                 const rowId = `out-${item.key}`;
-                const isEditing = editingLink?.id === rowId;
-                const targetNode = allNodesByRef.get(item.targetRef);
-                const targetEntry = targetNode?.nodeType === "lore" ? targetNode : null;
+                const isEditing =
+                  editingLink?.ownerRef === activeNode.ref &&
+                  editingLink.section === "outgoing" &&
+                  editingLink.sourceRef === activeNode.ref &&
+                  editingLink.targetRef === item.targetRef;
+                const targetCanBeBidirect = isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
                 return (
                   <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
                     <div className="flex items-center justify-between gap-1">
@@ -950,9 +1006,8 @@ export function GraphInspector({
                             aria-label={`Edit link to ${item.targetName}`}
                             onClick={() =>
                               setEditingLink({
-                                id: rowId,
-                                sourceEntry: activeNode,
-                                targetEntry,
+                                ownerRef: activeNode.ref,
+                                section: "outgoing",
                                 sourceRef: activeNode.ref,
                                 targetRef: item.targetRef,
                                 relation: item.relation,
@@ -989,7 +1044,7 @@ export function GraphInspector({
                             </option>
                           ))}
                         </select>
-                        {editingLink.targetEntry ? (
+                        {targetCanBeBidirect ? (
                           <>
                             <button
                               type="button"
@@ -1040,7 +1095,12 @@ export function GraphInspector({
             >
               {explicitGroups.incoming.map((item) => {
                 const rowId = `in-${item.sourceRef}`;
-                const isEditing = editingLink?.id === rowId;
+                const isEditing =
+                  editingLink?.ownerRef === activeNode.ref &&
+                  editingLink.section === "incoming" &&
+                  editingLink.sourceRef === item.sourceRef &&
+                  editingLink.targetRef === activeNode.ref;
+                const targetCanBeBidirect = isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
                 return (
                   <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
                     <div className="flex items-center justify-between gap-1">
@@ -1060,9 +1120,8 @@ export function GraphInspector({
                             aria-label={`Edit link from ${item.sourceName}`}
                             onClick={() =>
                               setEditingLink({
-                                id: rowId,
-                                sourceEntry: item.sourceEntry,
-                                targetEntry: activeNode.nodeType === "lore" ? activeNode : null,
+                                ownerRef: activeNode.ref,
+                                section: "incoming",
                                 sourceRef: item.sourceRef,
                                 targetRef: activeNode.ref,
                                 relation: item.relation,
@@ -1099,7 +1158,7 @@ export function GraphInspector({
                             </option>
                           ))}
                         </select>
-                        {editingLink.targetEntry ? (
+                        {targetCanBeBidirect ? (
                           <>
                             <button
                               type="button"
@@ -1336,13 +1395,15 @@ export function GraphInspector({
                 open={isSectionOpen("men-mutual", mentionGroups.mutual.length)}
                 onToggle={() => toggleSection("men-mutual", isSectionOpen("men-mutual", mentionGroups.mutual.length))}
               >
-                {mentionGroups.mutual.map((item) =>
-                  renderMentionRow(
-                    `mm-${item.otherRef}`,
-                    item.otherRef,
-                    `("${item.outEdge.matchedText}" ↔ "${item.inEdge.matchedText}")`,
-                  ),
-                )}
+                {() =>
+                  mentionGroups.mutual.map((item) =>
+                    renderMentionRow(
+                      `mm-${item.otherRef}`,
+                      item.otherRef,
+                      `("${item.outEdge.matchedText}" ↔ "${item.inEdge.matchedText}")`,
+                    ),
+                  )
+                }
               </CollapsibleSection>
 
               <CollapsibleSection
@@ -1351,13 +1412,15 @@ export function GraphInspector({
                 open={isSectionOpen("men-out", mentionGroups.outgoing.length)}
                 onToggle={() => toggleSection("men-out", isSectionOpen("men-out", mentionGroups.outgoing.length))}
               >
-                {mentionGroups.outgoing.map((edge, index) =>
-                  renderMentionRow(
-                    `mo-${edge.targetRef}|${index}`,
-                    edge.targetRef,
-                    edge.matchedText ? `(matches "${edge.matchedText}")` : "",
-                  ),
-                )}
+                {() =>
+                  mentionGroups.outgoing.map((edge, index) =>
+                    renderMentionRow(
+                      `mo-${edge.targetRef}|${index}`,
+                      edge.targetRef,
+                      edge.matchedText ? `(matches "${edge.matchedText}")` : "",
+                    ),
+                  )
+                }
               </CollapsibleSection>
 
               <CollapsibleSection
@@ -1366,13 +1429,15 @@ export function GraphInspector({
                 open={isSectionOpen("men-in", mentionGroups.incoming.length)}
                 onToggle={() => toggleSection("men-in", isSectionOpen("men-in", mentionGroups.incoming.length))}
               >
-                {mentionGroups.incoming.map(({ edge }, index) =>
-                  renderMentionRow(
-                    `mi-${edge.sourceRef}|${index}`,
-                    edge.sourceRef,
-                    edge.matchedText ? `(uses "${edge.matchedText}")` : "",
-                  ),
-                )}
+                {() =>
+                  mentionGroups.incoming.map(({ edge }, index) =>
+                    renderMentionRow(
+                      `mi-${edge.sourceRef}|${index}`,
+                      edge.sourceRef,
+                      edge.matchedText ? `(uses "${edge.matchedText}")` : "",
+                    ),
+                  )
+                }
               </CollapsibleSection>
             </div>
           )}

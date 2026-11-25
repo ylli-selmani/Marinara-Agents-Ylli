@@ -183,30 +183,68 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     }).nodes.sort((a, b) => a.name.localeCompare(b.name));
   }, [payload, managedSet, collapsedLorebookIds, search]);
 
+  const incidentCounts = useMemo(() => {
+    const map = new Map<string, { explicit: number; mention: number }>();
+    if (!payload) return map;
+    const bump = (ref: string, field: "explicit" | "mention") => {
+      const entry = map.get(ref);
+      if (entry) entry[field] += 1;
+      else map.set(ref, field === "explicit" ? { explicit: 1, mention: 0 } : { explicit: 0, mention: 1 });
+    };
+    for (const edge of payload.explicitEdges) {
+      bump(edge.sourceRef, "explicit");
+      if (edge.targetRef !== edge.sourceRef) bump(edge.targetRef, "explicit");
+    }
+    for (const edge of payload.mentionEdges) {
+      bump(edge.sourceRef, "mention");
+      if (edge.targetRef !== edge.sourceRef) bump(edge.targetRef, "mention");
+    }
+    return map;
+  }, [payload]);
+
   const handleBatchSaveRelationships = async (
     updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
   ) => {
     if (updates.length === 0) return;
-    const hadRemoved = updates.some(({ entry, relationships }) =>
-      Object.keys(entry.relationships).some((key) => !(key in relationships)),
-    );
     setSavingRef(updates[0]!.entry.ref);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         updates.map(({ entry, relationships }) => patchEntryRelationships(entry.lorebookId, entry.id, relationships)),
       );
-      queryClient.setQueriesData<LmGraphPayload>({ queryKey: lmQueryKeys.root }, (current) =>
-        applyOptimisticRelationships(current, updates),
-      );
-      if (hadRemoved) {
-        void queryClient.invalidateQueries({ queryKey: lmQueryKeys.root });
+      const succeededUpdates: typeof updates = [];
+      const failureReasons: string[] = [];
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          succeededUpdates.push(updates[index]!);
+        } else {
+          failureReasons.push(result.reason instanceof Error ? result.reason.message : "Could not save lorebook links");
+        }
+      });
+
+      if (succeededUpdates.length > 0) {
+        const hadRemoved = succeededUpdates.some(({ entry, relationships }) =>
+          Object.keys(entry.relationships).some((key) => !(key in relationships)),
+        );
+        queryClient.setQueriesData<LmGraphPayload>({ queryKey: lmQueryKeys.root }, (current) =>
+          applyOptimisticRelationships(current, succeededUpdates),
+        );
+        if (hadRemoved || failureReasons.length > 0) {
+          void queryClient.invalidateQueries({ queryKey: lmQueryKeys.root });
+        }
+        void props.onLorebooksChanged?.();
       }
-      void props.onLorebooksChanged?.();
-      toast.success(
-        updates.length === 1 ? `Updated links for ${updates[0]!.entry.name}` : "Updated bidirectional link",
-      );
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not save lorebook links");
+
+      if (failureReasons.length === 0) {
+        toast.success(
+          updates.length === 1 ? `Updated links for ${updates[0]!.entry.name}` : "Updated bidirectional link",
+        );
+      } else if (succeededUpdates.length > 0) {
+        toast.error(
+          `Saved ${succeededUpdates.length} of ${updates.length} link updates; refreshed to resync. ${failureReasons[0]}`,
+        );
+      } else {
+        toast.error(failureReasons[0] ?? "Could not save lorebook links");
+      }
     } finally {
       setSavingRef(null);
     }
@@ -400,12 +438,9 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
               <div className="p-6 text-sm text-[var(--muted-foreground)]">No matching entries.</div>
             ) : (
               listNodes.map((node) => {
-                const explicitCount = payload.explicitEdges.filter(
-                  (edge) => edge.sourceRef === node.ref || edge.targetRef === node.ref,
-                ).length;
-                const mentionCount = payload.mentionEdges.filter(
-                  (edge) => edge.sourceRef === node.ref || edge.targetRef === node.ref,
-                ).length;
+                const counts = incidentCounts.get(node.ref);
+                const explicitCount = counts?.explicit ?? 0;
+                const mentionCount = counts?.mention ?? 0;
                 return (
                   <div key={node.ref} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
                     <div className="min-w-0 flex-1">

@@ -181,6 +181,64 @@ assert.equal(mentionEdges.length, 2, "Explicit pair and <3-char keys must be ski
 assert.ok(mentionEdges.some((edge) => edge.sourceRef === "lore:e1" && edge.targetRef === "char:c1"));
 assert.ok(mentionEdges.some((edge) => edge.sourceRef === "lore:e3" && edge.targetRef === "lore:e1"));
 
+// Unicode word-boundary check: accented names must not match inside larger words.
+const unicodeNodes: LmGraphNode[] = [
+  {
+    nodeType: "lore",
+    ref: "lore:u-src-miss",
+    id: "u-src-miss",
+    lorebookId: "b1",
+    lorebookName: "Test",
+    lorebookCategory: "world",
+    name: "Source Miss",
+    description: "",
+    content: "Mentions XÉlara and ÉlaraX only.",
+    keys: ["Miss"],
+    secondaryKeys: [],
+    tag: "",
+    family: "lore",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    relationships: {},
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:u-src-hit",
+    id: "u-src-hit",
+    lorebookId: "b1",
+    lorebookName: "Test",
+    lorebookCategory: "world",
+    name: "Source Hit",
+    description: "",
+    content: "Speaks with Élara at dawn.",
+    keys: ["Hit"],
+    secondaryKeys: [],
+    tag: "",
+    family: "lore",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    relationships: {},
+  },
+  {
+    nodeType: "character",
+    ref: "char:elara-uni",
+    id: "elara-uni",
+    name: "Élara",
+    description: "",
+    aliases: [],
+    family: "character",
+  },
+];
+const unicodeMentions = extractMentionEdges(unicodeNodes, []);
+assert.ok(!unicodeMentions.some((edge) => edge.sourceRef === "lore:u-src-miss" && edge.targetRef === "char:elara-uni"));
+assert.ok(unicodeMentions.some((edge) => edge.sourceRef === "lore:u-src-hit" && edge.targetRef === "char:elara-uni"));
+
 // ── Graph filtering, multi-tag survival, card book links, collapsed books ─────
 const payload: LmGraphPayload = {
   lorebooks: [

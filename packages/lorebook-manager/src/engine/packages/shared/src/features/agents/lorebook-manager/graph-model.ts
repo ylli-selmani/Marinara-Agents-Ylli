@@ -214,8 +214,8 @@ function compileSearchTerms(node: LmGraphNode): SearchTerm[] {
     seen.add(lowered);
     const escaped = escapeRegExp(term);
     // Word boundary when edge characters are word chars; avoids splitting mid-word.
-    const prefix = /^\w/u.test(term) ? "(?<![\\p{L}\\p{N}_])" : "";
-    const suffix = /\w$/u.test(term) ? "(?![\\p{L}\\p{N}_])" : "";
+    const prefix = /^[\p{L}\p{N}_]/u.test(term) ? "(?<![\\p{L}\\p{N}_])" : "";
+    const suffix = /[\p{L}\p{N}_]$/u.test(term) ? "(?![\\p{L}\\p{N}_])" : "";
     compiled.push({ term, regex: new RegExp(`${prefix}${escaped}${suffix}`, "iu") });
   }
   return compiled;

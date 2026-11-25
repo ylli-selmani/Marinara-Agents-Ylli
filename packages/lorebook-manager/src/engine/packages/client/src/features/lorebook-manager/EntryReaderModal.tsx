@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ExternalLink, Pencil, Save, X } from "lucide-react";
 import type { LmEntryNode, LmGraphNode } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
@@ -49,21 +49,36 @@ export function EntryReaderModal({
   const [content, setContent] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [constant, setConstant] = useState(false);
+  const lastNodeRef = useRef<string | null>(null);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+
+  const resetDraftFromNode = useCallback((target: LmGraphNode) => {
+    setName(target.name);
+    setDescription(target.description);
+    if (target.nodeType === "lore") {
+      setTag(target.tag);
+      setKeysText(target.keys.join(", "));
+      setSecondaryKeysText(target.secondaryKeys.join(", "));
+      setContent(target.content);
+      setEnabled(target.enabled);
+      setConstant(target.constant);
+    }
+  }, []);
 
   useEffect(() => {
-    setMode(node?.nodeType === "lore" ? initialMode : "read");
-    if (!node) return;
-    setName(node.name);
-    setDescription(node.description);
-    if (node.nodeType === "lore") {
-      setTag(node.tag);
-      setKeysText(node.keys.join(", "));
-      setSecondaryKeysText(node.secondaryKeys.join(", "));
-      setContent(node.content);
-      setEnabled(node.enabled);
-      setConstant(node.constant);
+    if (!node) {
+      lastNodeRef.current = null;
+      return;
     }
-  }, [node, initialMode]);
+    if (lastNodeRef.current !== node.ref) {
+      lastNodeRef.current = node.ref;
+      setMode(node.nodeType === "lore" ? initialMode : "read");
+      resetDraftFromNode(node);
+    } else if (modeRef.current === "read") {
+      resetDraftFromNode(node);
+    }
+  }, [node, initialMode, resetDraftFromNode]);
 
   if (!node || typeof document === "undefined") return null;
 
@@ -72,17 +87,21 @@ export function EntryReaderModal({
 
   const handleSave = async () => {
     if (!isLore) return;
-    await onUpdateEntry(node, {
-      name: name.trim() || node.name,
-      tag: tag.trim(),
-      keys: parseKeywords(keysText),
-      secondaryKeys: parseKeywords(secondaryKeysText),
-      description,
-      content,
-      enabled,
-      constant,
-    });
-    setMode("read");
+    try {
+      await onUpdateEntry(node, {
+        name: name.trim() || node.name,
+        tag: tag.trim(),
+        keys: parseKeywords(keysText),
+        secondaryKeys: parseKeywords(secondaryKeysText),
+        description,
+        content,
+        enabled,
+        constant,
+      });
+      setMode("read");
+    } catch {
+      // LorebookManagerDetail surfaces the error toast; keep the user in edit mode.
+    }
   };
 
   return createPortal(
@@ -115,7 +134,10 @@ export function EntryReaderModal({
               <button
                 type="button"
                 className="mari-chrome-control mari-chrome-control--small"
-                onClick={() => setMode("edit")}
+                onClick={() => {
+                  resetDraftFromNode(node);
+                  setMode("edit");
+                }}
               >
                 <Pencil size="0.75rem" />
                 Edit entry
@@ -152,9 +174,10 @@ export function EntryReaderModal({
                 <span className="block font-medium text-[var(--muted-foreground)]">Name</span>
                 <input
                   type="text"
+                  disabled={saving}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
-                  className="mari-chrome-field h-8 w-full rounded px-2 text-xs"
+                  className="mari-chrome-field h-8 w-full rounded px-2 text-xs disabled:opacity-60"
                 />
               </label>
               <div className="space-y-1">
@@ -162,11 +185,12 @@ export function EntryReaderModal({
                 <div className="flex gap-1.5">
                   <select
                     aria-label="Tag preset"
+                    disabled={saving}
                     value={TAG_PRESETS.some((p) => p.value === tag) ? tag : "__custom__"}
                     onChange={(event) => {
                       if (event.target.value !== "__custom__") setTag(event.target.value);
                     }}
-                    className="mari-chrome-field h-8 w-36 rounded px-1.5 text-xs"
+                    className="mari-chrome-field h-8 w-36 rounded px-1.5 text-xs disabled:opacity-60"
                   >
                     {TAG_PRESETS.map((preset) => (
                       <option key={preset.value || "_none"} value={preset.value}>
@@ -175,15 +199,21 @@ export function EntryReaderModal({
                     ))}
                     {!TAG_PRESETS.some((p) => p.value === tag) ? <option value="__custom__">custom</option> : null}
                   </select>
+                  <label htmlFor="lm-entry-custom-tag" className="sr-only">
+                    Custom tags
+                  </label>
                   <input
+                    id="lm-entry-custom-tag"
+                    aria-describedby="lm-entry-tag-hint"
                     type="text"
+                    disabled={saving}
                     value={tag}
                     placeholder="custom tag…"
                     onChange={(event) => setTag(event.target.value)}
-                    className="mari-chrome-field h-8 min-w-0 flex-1 rounded px-2 text-xs"
+                    className="mari-chrome-field h-8 min-w-0 flex-1 rounded px-2 text-xs disabled:opacity-60"
                   />
                 </div>
-                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                <p id="lm-entry-tag-hint" className="text-[0.625rem] text-[var(--muted-foreground)]">
                   Comma-separate for multi-tags (e.g. location, faction)
                 </p>
               </div>
@@ -196,9 +226,10 @@ export function EntryReaderModal({
                 </span>
                 <input
                   type="text"
+                  disabled={saving}
                   value={keysText}
                   onChange={(event) => setKeysText(event.target.value)}
-                  className="mari-chrome-field h-8 w-full rounded px-2 text-xs"
+                  className="mari-chrome-field h-8 w-full rounded px-2 text-xs disabled:opacity-60"
                 />
               </label>
               <label className="space-y-1">
@@ -207,9 +238,10 @@ export function EntryReaderModal({
                 </span>
                 <input
                   type="text"
+                  disabled={saving}
                   value={secondaryKeysText}
                   onChange={(event) => setSecondaryKeysText(event.target.value)}
-                  className="mari-chrome-field h-8 w-full rounded px-2 text-xs"
+                  className="mari-chrome-field h-8 w-full rounded px-2 text-xs disabled:opacity-60"
                 />
               </label>
             </div>
@@ -218,9 +250,10 @@ export function EntryReaderModal({
               <span className="block font-medium text-[var(--muted-foreground)]">Description (short summary)</span>
               <textarea
                 rows={2}
+                disabled={saving}
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
-                className="mari-chrome-field w-full rounded p-2 text-xs"
+                className="mari-chrome-field w-full rounded p-2 text-xs disabled:opacity-60"
               />
             </label>
 
@@ -228,20 +261,31 @@ export function EntryReaderModal({
               <span className="block font-medium text-[var(--muted-foreground)]">Content</span>
               <textarea
                 rows={8}
+                disabled={saving}
                 value={content}
                 onChange={(event) => setContent(event.target.value)}
-                className="mari-chrome-field w-full rounded p-2 text-xs leading-relaxed"
+                className="mari-chrome-field w-full rounded p-2 text-xs leading-relaxed disabled:opacity-60"
               />
             </label>
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-1.5">
-                  <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+                  <input
+                    type="checkbox"
+                    disabled={saving}
+                    checked={enabled}
+                    onChange={(event) => setEnabled(event.target.checked)}
+                  />
                   <span>Enabled</span>
                 </label>
                 <label className="flex items-center gap-1.5">
-                  <input type="checkbox" checked={constant} onChange={(event) => setConstant(event.target.checked)} />
+                  <input
+                    type="checkbox"
+                    disabled={saving}
+                    checked={constant}
+                    onChange={(event) => setConstant(event.target.checked)}
+                  />
                   <span>Constant</span>
                 </label>
               </div>
@@ -250,7 +294,10 @@ export function EntryReaderModal({
                   type="button"
                   disabled={saving}
                   className="mari-chrome-control mari-chrome-control--small"
-                  onClick={() => setMode("read")}
+                  onClick={() => {
+                    resetDraftFromNode(node);
+                    setMode("read");
+                  }}
                 >
                   Cancel
                 </button>

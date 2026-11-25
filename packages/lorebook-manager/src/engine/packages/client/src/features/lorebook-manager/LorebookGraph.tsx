@@ -248,6 +248,13 @@ export const GRAPH_STYLE = `
   max-height: calc(100% - 1.2rem);
   box-shadow: var(--lm-graph-overlay-shadow);
 }
+[data-lm-graph-node] {
+  outline: none;
+}
+[data-lm-graph-node]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
 [data-lm-graph-pointing] [data-lm-graph-node]:not([data-lm-graph-near]) {
   opacity: 0.2;
 }
@@ -343,7 +350,7 @@ const GraphNodeView = memo(function GraphNodeView({
       tabIndex={0}
       aria-label={`${node.name} (${node.nodeType === "lore" ? node.family : node.nodeType})`}
       opacity={disabled ? 0.5 : 1}
-      style={{ cursor: "grab", outline: "none" }}
+      style={{ cursor: "grab" }}
       data-lm-graph-node={node.ref}
       data-lm-graph-near={near || undefined}
       onPointerEnter={(event) => {
@@ -771,6 +778,8 @@ export function LorebookGraph({
 
   const effectivePositionsRef = useRef(effectivePositions);
   effectivePositionsRef.current = effectivePositions;
+  const focusStateRef = useRef({ whole, focusRef });
+  focusStateRef.current = { whole, focusRef };
 
   const nodeActions = useMemo<NodeActions>(
     () => ({
@@ -785,19 +794,31 @@ export function LorebookGraph({
           onToggleCollapseLorebook(node.id);
           return;
         }
+        if (!focusStateRef.current.whole && focusStateRef.current.focusRef === node.ref) {
+          setWhole(true);
+          return;
+        }
         setFocusPick(node.ref);
         setWhole(false);
       },
       pointerDownNode: (ref, event) => {
         if (event.button !== 0 && event.pointerType === "mouse") return;
         event.stopPropagation();
+        const point = screenPoint(event);
+        pointers.current.set(event.pointerId, point);
+        if (pointers.current.size > 1) {
+          dragNode.current = null;
+          press.current.moved = true;
+          svgRef.current?.setPointerCapture(event.pointerId);
+          return;
+        }
         const startGraph = effectivePositionsRef.current.get(ref);
         if (!startGraph) return;
         svgRef.current?.setPointerCapture(event.pointerId);
         dragNode.current = {
           ref,
           pointerId: event.pointerId,
-          startScreen: screenPoint(event),
+          startScreen: point,
           startGraph,
           moved: false,
         };
@@ -979,7 +1000,7 @@ export function LorebookGraph({
       const label = element.querySelector("[data-lm-graph-label]");
       if (label) write(label, `translate(0 ${nodeRadius(node)}) scale(${labelScale})`);
     }
-  }, [nodeLayer, effectivePositions, nodesByRef, edgeScale, labelScale]);
+  }, [nodeLayer, effectivePositions, nodesByRef, edgeScale, labelScale, expanded]);
 
   const toggleFamily = (family: EntityFamily) =>
     setHiddenFamilies((current) => {
@@ -1041,6 +1062,7 @@ export function LorebookGraph({
       data-lm-graph-expanded={expanded || undefined}
       role={expanded ? "dialog" : undefined}
       aria-modal={expanded || undefined}
+      aria-label={expanded ? "Lorebook graph" : undefined}
     >
       <style>{GRAPH_STYLE}</style>
 
@@ -1157,8 +1179,18 @@ export function LorebookGraph({
       </div>
 
       {shown.nodes.length === 0 ? (
-        <div className="rounded-lg border border-[var(--border)] p-6 text-sm text-[var(--muted-foreground)]">
-          No nodes match the current lorebook or filter selection.
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-6 text-sm text-[var(--muted-foreground)]">
+          <span>No nodes match the current lorebook or filter selection.</span>
+          {expanded ? (
+            <button
+              type="button"
+              className="mari-chrome-control mari-chrome-control--small"
+              onClick={() => setExpanded(false)}
+            >
+              <Minimize size="0.875rem" />
+              Exit full screen
+            </button>
+          ) : null}
         </div>
       ) : (
         <div data-lm-graph-workspace className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start">
@@ -1243,12 +1275,14 @@ export function LorebookGraph({
                 if (pointers.current.size === 1) {
                   press.current = { start: point, moved: false };
                 } else {
+                  dragNode.current = null;
                   press.current.moved = true;
                 }
               }}
               onPointerMove={(event) => {
                 if (dragNode.current && dragNode.current.pointerId === event.pointerId) {
                   const next = screenPoint(event);
+                  pointers.current.set(event.pointerId, next);
                   const dxScreen = next.x - dragNode.current.startScreen.x;
                   const dyScreen = next.y - dragNode.current.startScreen.y;
                   if (!dragNode.current.moved && Math.hypot(dxScreen, dyScreen) > TAP_SLOP) {
@@ -1292,6 +1326,7 @@ export function LorebookGraph({
                 if (dragNode.current && dragNode.current.pointerId === event.pointerId) {
                   const finished = dragNode.current;
                   dragNode.current = null;
+                  pointers.current.delete(event.pointerId);
                   if (!finished.moved) navigateTo(finished.ref);
                   return;
                 }

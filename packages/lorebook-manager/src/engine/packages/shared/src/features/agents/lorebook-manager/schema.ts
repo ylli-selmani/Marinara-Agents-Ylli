@@ -37,6 +37,7 @@ export interface LmEntryNode {
   secondaryKeys: string[];
   tag: string;
   family: EntityFamily;
+  secondaryFamilies: EntityFamily[];
   inferredFamily: EntityFamily | null;
   enabled: boolean;
   constant: boolean;

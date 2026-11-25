@@ -153,6 +153,7 @@ export function SimulatePanel({
       activeLocationText: "",
       tokenBudget: 2000,
       maxOneHop: 6,
+      maxTextHits: 5,
       respectBookBudgets: true,
     });
 
@@ -270,6 +271,26 @@ export function SimulatePanel({
               onChange={(event) => {
                 const next = Number(event.target.value);
                 if (Number.isFinite(next)) onChangeConfig({ ...config, maxOneHop: Math.max(0, Math.min(25, next)) });
+              }}
+              className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
+            />
+          </label>
+
+          <label
+            className="flex items-center gap-2"
+            title="Cap on fuzzy BM25 text-only matches in Instant Mode (0 = keywords, locations & graph links only)"
+          >
+            <span className="font-medium text-[var(--muted-foreground)]">Max text hits</span>
+            <input
+              type="number"
+              aria-label="Maximum fuzzy text hits"
+              min={0}
+              max={25}
+              step={1}
+              value={config.maxTextHits ?? 5}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                if (Number.isFinite(next)) onChangeConfig({ ...config, maxTextHits: Math.max(0, Math.min(25, next)) });
               }}
               className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
             />

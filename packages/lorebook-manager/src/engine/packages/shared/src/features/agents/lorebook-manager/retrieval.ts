@@ -29,9 +29,15 @@ const STOPWORDS = new Set([
   "she",
   "they",
   "them",
+  "their",
   "have",
   "has",
   "had",
+  "been",
+  "being",
+  "does",
+  "did",
+  "doing",
   "into",
   "onto",
   "about",
@@ -39,14 +45,94 @@ const STOPWORDS = new Set([
   "when",
   "where",
   "who",
+  "whom",
+  "whose",
+  "which",
+  "why",
   "how",
   "out",
   "off",
   "over",
   "under",
+  "above",
+  "below",
+  "between",
   "again",
   "then",
   "than",
+  "there",
+  "here",
+  "these",
+  "those",
+  "while",
+  "all",
+  "both",
+  "each",
+  "every",
+  "some",
+  "any",
+  "many",
+  "much",
+  "more",
+  "most",
+  "other",
+  "another",
+  "such",
+  "only",
+  "just",
+  "also",
+  "even",
+  "still",
+  "very",
+  "well",
+  "will",
+  "would",
+  "can",
+  "could",
+  "should",
+  "may",
+  "might",
+  "must",
+  "shall",
+  "during",
+  "before",
+  "after",
+  "until",
+  "since",
+  "through",
+  "though",
+  "although",
+  "because",
+  "around",
+  "away",
+  "down",
+  "near",
+  "upon",
+  "within",
+  "without",
+  "one",
+  "two",
+  "first",
+  "like",
+  "back",
+  "now",
+  "way",
+  "make",
+  "made",
+  "take",
+  "took",
+  "come",
+  "came",
+  "goes",
+  "went",
+  "gets",
+  "got",
+  "look",
+  "looks",
+  "watch",
+  "watches",
+  "step",
+  "steps",
 ]);
 
 function nowMs(): number {
@@ -303,7 +389,12 @@ export function simulateLorebookRetrieval(
 
   const bm25Scores = computeBm25Scores(eligibleEntries, queryText);
   const queryTokenCount = tokenizeBm25(queryText).length;
-  const bm25DirectThreshold = queryTokenCount <= 1 ? 1.5 : 2.6;
+  let topBm25 = 0;
+  for (const hit of bm25Scores.values()) {
+    if (hit.score > topBm25) topBm25 = hit.score;
+  }
+  const bm25Floor = queryTokenCount <= 1 ? 1.8 : Math.max(4.0, topBm25 * 0.45);
+  const maxTextHits = Math.max(0, input.maxTextHits ?? 5);
 
   const directCandidates = new Map<
     string,
@@ -348,24 +439,51 @@ export function simulateLorebookRetrieval(
       reasons.push({ kind: "location", detail: `Location "${locationQuery}"`, score: 12 });
     }
 
-    const bm25Hit = bm25Scores.get(entry.ref);
-    const bm25 = bm25Hit?.score ?? 0;
-    if (bm25Hit && bm25 >= bm25DirectThreshold) {
-      tier ??= "direct";
-      score += bm25;
-      const topTerms = bm25Hit.matchedTerms.slice(0, 3).map((t) => `"${t}"`);
-      const extraCount = bm25Hit.matchedTerms.length - topTerms.length;
-      const termsLabel = extraCount > 0 ? `${topTerms.join(", ")} +${extraCount}` : topTerms.join(", ");
-      reasons.push({
-        kind: "bm25",
-        detail: termsLabel ? `Text: ${termsLabel} (${bm25.toFixed(1)})` : `Text score ${bm25.toFixed(1)}`,
-        score: bm25,
-        matchedTerms: bm25Hit.matchedTerms,
-      });
-    }
-
     if (tier) {
       directCandidates.set(entry.ref, { entry, tier, score, reasons, matchedLocation });
+    }
+  }
+
+  const formatBm25Reason = (bm25Hit: { score: number; matchedTerms: string[] }): LmRetrievalReason => {
+    const topTerms = bm25Hit.matchedTerms.slice(0, 3).map((t) => `"${t}"`);
+    const extraCount = bm25Hit.matchedTerms.length - topTerms.length;
+    const termsLabel = extraCount > 0 ? `${topTerms.join(", ")} +${extraCount}` : topTerms.join(", ");
+    return {
+      kind: "bm25",
+      detail: termsLabel
+        ? `Text: ${termsLabel} (${bm25Hit.score.toFixed(1)})`
+        : `Text score ${bm25Hit.score.toFixed(1)}`,
+      score: bm25Hit.score,
+      matchedTerms: bm25Hit.matchedTerms,
+    };
+  };
+
+  for (const [ref, direct] of directCandidates) {
+    const bm25Hit = bm25Scores.get(ref);
+    if (bm25Hit && bm25Hit.score >= 2.0) {
+      direct.score += bm25Hit.score;
+      direct.reasons.push(formatBm25Reason(bm25Hit));
+    }
+  }
+
+  if (maxTextHits > 0) {
+    const textOnlyRanked = eligibleEntries
+      .filter((entry) => !directCandidates.has(entry.ref))
+      .map((entry) => ({ entry, hit: bm25Scores.get(entry.ref) }))
+      .filter((item): item is { entry: LmEntryNode; hit: { score: number; matchedTerms: string[] } } =>
+        Boolean(item.hit && item.hit.score >= bm25Floor),
+      )
+      .sort((a, b) => b.hit.score - a.hit.score)
+      .slice(0, maxTextHits);
+
+    for (const { entry, hit } of textOnlyRanked) {
+      directCandidates.set(entry.ref, {
+        entry,
+        tier: "direct",
+        score: hit.score,
+        reasons: [formatBm25Reason(hit)],
+        matchedLocation: false,
+      });
     }
   }
 

@@ -625,6 +625,38 @@ assert.ok(
   bm25Reason?.matchedTerms?.includes("symbol") && bm25Reason.detail.includes('"symbol"'),
   "BM25 reason must surface matched query terms cleanly",
 );
+
+// Stopwords like "while", "all", "might", "watches" must not trigger BM25-only false positives,
+// while exact keyword phrases ("All Might") still activate cleanly.
+const fillerRes = simulateLorebookRetrieval(simPayload, {
+  queryText: "While all people might watch something, someone mentions a grape juice quirk.",
+  activeCharacterIds: [],
+  tokenBudget: 2000,
+  maxOneHop: 0,
+  maxTextHits: 0,
+});
+assert.ok(
+  !fillerRes.activated.some((a) => a.entry.ref === "lore:unrelated-student"),
+  "maxTextHits=0 must suppress BM25-only matches cleanly",
+);
+
+const exactPhraseThroughStopwords = simulateLorebookRetrieval(simPayload, {
+  queryText: "All Might watches while everyone steps forward.",
+  activeCharacterIds: [],
+  tokenBudget: 2000,
+  maxOneHop: 0,
+  maxTextHits: 5,
+});
+assert.ok(
+  exactPhraseThroughStopwords.activated.some(
+    (a) => a.entry.ref === "lore:allmight" && a.reasons.some((r) => r.kind === "keyword"),
+  ),
+  "Exact keyword phrase 'All Might' must still activate even when its words are BM25 stopwords",
+);
+assert.ok(
+  !exactPhraseThroughStopwords.activated.some((a) => a.entry.ref === "lore:class1a"),
+  "Entries without non-stopword matches must not false-trigger via stopwords",
+);
 assert.ok(
   !simRes.activated.some((a) => a.entry.ref === "lore:unrelated-student"),
   "Incoming member_of links from Class 1-A must not flood unrelated students",

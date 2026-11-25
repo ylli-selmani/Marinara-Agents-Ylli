@@ -153,6 +153,7 @@ export interface LmRetrievalInput {
   activeLocationText?: string;
   tokenBudget: number;
   maxOneHop: number;
+  maxTextHits?: number;
   respectBookBudgets?: boolean;
 }
 

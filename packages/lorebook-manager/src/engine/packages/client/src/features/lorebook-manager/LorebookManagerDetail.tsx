@@ -131,6 +131,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     activeLocationText: "",
     tokenBudget: 2000,
     maxOneHop: 6,
+    maxTextHits: 5,
     respectBookBudgets: true,
   });
   const [simHighlight, setSimHighlight] = useState<SimGraphHighlight | null>(null);

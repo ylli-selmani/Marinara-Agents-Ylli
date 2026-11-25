@@ -20,7 +20,10 @@ import {
   X,
 } from "lucide-react";
 import {
+  isCardOrPersonaRef,
+  isImpliedMutualLink,
   parseEntityRef,
+  SYMMETRIC_RELATIONS,
   toRelationshipKey,
 } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import type {
@@ -41,8 +44,6 @@ export const RELATION_PRESETS = [
   "part_of",
   "represents",
 ] as const;
-
-export const SYMMETRIC_RELATIONS = new Set<string>(["related_to", "ally_of", "rival_of"]);
 
 const TAG_OVERRIDES = ["", "lore", "character", "location", "faction", "item", "creature", "ability", "quest"] as const;
 const SECTION_AUTO_COLLAPSE = 6;
@@ -344,6 +345,12 @@ export function GraphInspector({
 
   const addTargetNode = addTargetRef ? allNodesByRef.get(addTargetRef) : undefined;
   const canBidirectTarget = activeNode.nodeType === "lore" && addTargetNode?.nodeType === "lore";
+  // Entry ↔ card/persona with a symmetric relation: stored once on the entry, shown and read as mutual.
+  const addImpliedMutual =
+    !!addTargetNode &&
+    (activeNode.nodeType === "lore"
+      ? isImpliedMutualLink(addTargetNode.ref, addRelation)
+      : addTargetNode.nodeType === "lore" && isImpliedMutualLink(activeNode.ref, addRelation));
 
   const isSectionOpen = (sectionKey: string, count: number) => {
     const stateKey = `${activeNode.ref}::${sectionKey}`;
@@ -386,7 +393,19 @@ export function GraphInspector({
     const otherNode = allNodesByRef.get(otherRef);
     const rel = relationDraft.trim() || "related_to";
     if (promoteDirection === "both") {
-      if (activeNode.nodeType !== "lore" || otherNode?.nodeType !== "lore") return;
+      if (!otherNode) return;
+      // Card or persona on one side: it can't store links, so one symmetric link on the entry stands for both.
+      if (activeNode.nodeType === "lore" && isCardOrPersonaRef(otherRef)) {
+        if (!SYMMETRIC_RELATIONS.has(rel)) return;
+        await onSaveRelationships(activeNode, { ...activeNode.relationships, [toRelationshipKey(otherRef)]: rel });
+        return;
+      }
+      if (otherNode.nodeType === "lore" && isCardOrPersonaRef(activeNode.ref)) {
+        if (!SYMMETRIC_RELATIONS.has(rel)) return;
+        await onSaveRelationships(otherNode, { ...otherNode.relationships, [toRelationshipKey(activeNode.ref)]: rel });
+        return;
+      }
+      if (activeNode.nodeType !== "lore" || otherNode.nodeType !== "lore") return;
       await onBatchSaveRelationships([
         { entry: activeNode, relationships: { ...activeNode.relationships, [toRelationshipKey(otherRef)]: rel } },
         { entry: otherNode, relationships: { ...otherNode.relationships, [toRelationshipKey(activeNode.ref)]: rel } },
@@ -416,9 +435,17 @@ export function GraphInspector({
         ? { allowed: true }
         : { allowed: false, reason: "Only lorebook entries can own links — switch direction to This → Other" };
     }
-    return activeNode.nodeType === "lore" && otherNode?.nodeType === "lore"
-      ? { allowed: true }
-      : { allowed: false, reason: "Both sides must be lorebook entries for Both ways" };
+    if (activeNode.nodeType === "lore" && otherNode?.nodeType === "lore") return { allowed: true };
+    const cardWithEntry =
+      (activeNode.nodeType === "lore" && isCardOrPersonaRef(otherRef)) ||
+      (otherNode?.nodeType === "lore" && isCardOrPersonaRef(activeNode.ref));
+    if (cardWithEntry && SYMMETRIC_RELATIONS.has(relationDraft.trim() || "related_to")) return { allowed: true };
+    return {
+      allowed: false,
+      reason: cardWithEntry
+        ? "Cards and personas can't store links, so Both ways with them only works for related_to, ally_of or rival_of"
+        : "Both sides must be lorebook entries for Both ways",
+    };
   };
 
   const handleRemoveExplicit = async (entryNode: LmEntryNode, key: string) => {
@@ -1392,7 +1419,12 @@ export function GraphInspector({
           {addTargetNode ? (
             <div className="flex flex-wrap items-center justify-between gap-1.5 rounded border border-[var(--border)] bg-[var(--background)]/40 px-2 py-1 text-[0.6875rem]">
               <span className="min-w-0 truncate text-[var(--muted-foreground)]">
-                {activeNode.nodeType !== "lore" || (addFlipped && canBidirectTarget) ? (
+                {addImpliedMutual ? (
+                  <>
+                    <strong className="text-[var(--foreground)]">{activeNode.name}</strong> ↔ {addRelation} ↔{" "}
+                    <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong>
+                  </>
+                ) : activeNode.nodeType !== "lore" || (addFlipped && canBidirectTarget) ? (
                   <>
                     <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong> — {addRelation} →{" "}
                     <strong className="text-[var(--foreground)]">{activeNode.name}</strong>

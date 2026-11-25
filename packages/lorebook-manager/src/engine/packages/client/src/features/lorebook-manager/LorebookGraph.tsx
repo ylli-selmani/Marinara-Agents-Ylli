@@ -234,6 +234,11 @@ export const GRAPH_STYLE = `
   border-radius: 0.5rem;
   background: var(--card);
 }
+/* The card is a height-capped flex column: without this, children with overflow hidden
+   (the line-clamped text snippet) shrink to zero height once the mention lists overflow. */
+[data-lm-graph-card] > * {
+  flex-shrink: 0;
+}
 [data-lm-graph-card][data-lm-graph-docked] {
   width: 100%;
   max-height: clamp(20rem, calc(100vh - 18.5rem), 42rem);

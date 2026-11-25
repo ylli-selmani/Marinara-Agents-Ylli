@@ -18,7 +18,10 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import { parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
+import {
+  isImpliedMutualLink,
+  parseEntityRef,
+} from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
   buildLorebookGraph,
   classifyEntryWithFallback,
@@ -129,7 +132,13 @@ function applyOptimisticRelationships(
     for (const [rawTarget, relation] of Object.entries(rels)) {
       const parsed = parseEntityRef(rawTarget);
       if (!parsed || !nodeRefs.has(parsed.ref)) continue;
-      explicitEdges.push({ kind: "explicit", sourceRef, targetRef: parsed.ref, relation });
+      explicitEdges.push({
+        kind: "explicit",
+        sourceRef,
+        targetRef: parsed.ref,
+        relation,
+        ...(isImpliedMutualLink(parsed.ref, relation) ? { bidirectional: true } : {}),
+      });
     }
   }
 

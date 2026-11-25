@@ -45,3 +45,20 @@ export function toRelationshipKey(targetRef: string): string {
   if (!parsed) throw new Error(`Invalid entity ref: ${targetRef}`);
   return parsed.kind === "lore" ? parsed.id : parsed.ref;
 }
+
+/** Relations that read the same in both directions (`A ally_of B` = `B ally_of A`). */
+export const SYMMETRIC_RELATIONS: ReadonlySet<string> = new Set(["related_to", "ally_of", "rival_of"]);
+
+/** Character Cards and Personas have no `relationships` map, so links to them live on the entry side only. */
+export function isCardOrPersonaRef(ref: string): boolean {
+  const kind = parseEntityRef(ref)?.kind;
+  return kind === "char" || kind === "persona";
+}
+
+/**
+ * A symmetric link stored on an entry and pointing at a Card or Persona is mutual by meaning:
+ * the card side cannot store the reverse link, so the single entry-side link stands for both.
+ */
+export function isImpliedMutualLink(targetRef: string, relation: string): boolean {
+  return isCardOrPersonaRef(targetRef) && SYMMETRIC_RELATIONS.has(relation.trim());
+}

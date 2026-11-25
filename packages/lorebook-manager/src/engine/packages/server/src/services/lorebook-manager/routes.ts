@@ -1,5 +1,9 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
-import { formatEntityRef, parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
+import {
+  formatEntityRef,
+  isImpliedMutualLink,
+  parseEntityRef,
+} from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
   classifyEntryWithFallback,
   extractMentionEdges,
@@ -305,6 +309,7 @@ export async function buildLorebookManagerGraphPayload(
         sourceRef: entry.ref,
         targetRef: parsed.ref,
         relation,
+        ...(isImpliedMutualLink(parsed.ref, relation) ? { bidirectional: true } : {}),
       });
     }
   }

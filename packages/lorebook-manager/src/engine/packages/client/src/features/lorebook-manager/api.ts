@@ -168,12 +168,13 @@ export async function fetchChatCompendiumBinding(chatId: string): Promise<LmChat
 export async function setChatCompendiumBindingApi(
   chatId: string,
   compendiumId: string | null,
+  ifCompendiumId?: string | null,
 ): Promise<LmChatCompendiumBinding> {
   const response = await fetch(`${API_ROOT}/chats/${encodeURIComponent(chatId)}/binding`, {
     method: "PUT",
     credentials: "same-origin",
     headers: writeHeaders(),
-    body: JSON.stringify({ compendiumId }),
+    body: JSON.stringify(ifCompendiumId ? { compendiumId, ifCompendiumId } : { compendiumId }),
   });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   const payload = (await response.json()) as { binding: LmChatCompendiumBinding };

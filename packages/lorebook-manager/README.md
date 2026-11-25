@@ -27,7 +27,7 @@ Lorebook Manager reads comma-separated values from each entry's `tag` field (`lo
 
 Character Cards render as cyan hexagons and Personas as pink diamonds so they stay visually distinct from blue `character` lorebook entries, and linked books connect to their cards and personas through book hub nodes. Untagged entries inside `character`, `npc`, or `spellbook` lorebooks stay counted under **Lore** with a diagonal-hatched fill until you pick **lore (explicit)** or another tag in the inspector.
 
-Each explicit ID link stores one of these relation labels in `entry.relationships`:
+Each explicit ID link stores one of these relation labels in `entry.relationships`. Character Cards and Personas can't store links themselves, so a link with them always lives on the entry; with `related_to`, `ally_of` or `rival_of` it counts as both ways. Picking `represents` also adds the card to the entry's Exclude character filter:
 
 | Relation     | Symmetry                | Intended direction                                 | Planned 1-hop retrieval role                                       |
 | ------------ | ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------ |
@@ -38,6 +38,7 @@ Each explicit ID link stores one of these relation labels in `entry.relationship
 | `ally_of`    | Symmetric (`Both ways`) | Mutual link between allies                         | Soft social candidate for Stage 2 filtering                        |
 | `rival_of`   | Symmetric (`Both ways`) | Mutual link between rivals                         | Soft social candidate for Stage 2 filtering                        |
 | `related_to` | Symmetric (`Both ways`) | General two-way link                               | Lightest fallback connection and graph navigation                  |
+| `represents` | Directed                | Entry to Character Card (`Izuku entry` → `Izuku`)  | Excludes the entry while the card is active; the card inherits the entry's links |
 
 ## When something goes wrong
 

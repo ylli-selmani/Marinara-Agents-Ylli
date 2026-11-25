@@ -201,6 +201,28 @@ export async function deleteCompendium(
 
   const removed = await documents.remove(LOREBOOK_MANAGER_PACKAGE_ID, cleanId, revision);
   if (!removed) throw new CompendiumStoreError("Could not delete Compendium due to revision conflict", 409);
+
+  // Clear every chat binding that still points at the deleted Compendium. Best effort per binding:
+  // getChatCompendiumBinding also treats a dangling id as unbound, so a lost race here is harmless.
+  const bindingDocs = await documents.list(LOREBOOK_MANAGER_PACKAGE_ID, CHAT_BINDING_DOC_KIND);
+  for (const bindingDoc of bindingDocs) {
+    if (bindingDoc.kind !== CHAT_BINDING_DOC_KIND) continue;
+    const bindingData = asRecord(bindingDoc.data);
+    if (typeof bindingData.compendiumId !== "string" || bindingData.compendiumId.trim() !== cleanId) continue;
+    try {
+      await documents.update({
+        id: bindingDoc.id,
+        packageId: LOREBOOK_MANAGER_PACKAGE_ID,
+        expectedRevision: bindingDoc.revision,
+        name: bindingDoc.name,
+        description: "",
+        data: { ...bindingData, compendiumId: null },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {
+      // Left for getChatCompendiumBinding's dangling-id guard.
+    }
+  }
   return true;
 }
 
@@ -218,9 +240,10 @@ export async function getChatCompendiumBinding(
   const data = asRecord(doc.data);
   const compendiumId =
     typeof data.compendiumId === "string" && data.compendiumId.trim() ? data.compendiumId.trim() : null;
+  const stillExists = compendiumId ? (await getCompendium(documents, compendiumId)) !== null : false;
   return {
     chatId: cleanChatId,
-    compendiumId,
+    compendiumId: stillExists ? compendiumId : null,
     revision: doc.revision,
     updatedAt: doc.updatedAt,
   };
@@ -230,9 +253,20 @@ export async function setChatCompendiumBinding(
   documents: LorebookManagerDocumentStore,
   chatId: string,
   compendiumId: string | null,
+  ifCompendiumId?: string | null,
 ): Promise<LmChatCompendiumBinding> {
   const cleanChatId = chatId.trim();
   if (!cleanChatId) throw new CompendiumStoreError("Chat id is required", 400);
+
+  // Conditional clear: only unbind when the chat is still bound to the Compendium the caller saw.
+  const cleanIfId = typeof ifCompendiumId === "string" && ifCompendiumId.trim() ? ifCompendiumId.trim() : null;
+  if (cleanIfId && !(typeof compendiumId === "string" && compendiumId.trim())) {
+    const current = asRecord(
+      (await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, chatBindingDocId(cleanChatId)))?.data,
+    );
+    const currentId = typeof current.compendiumId === "string" ? current.compendiumId.trim() : null;
+    if (currentId !== cleanIfId) return getChatCompendiumBinding(documents, cleanChatId);
+  }
 
   const cleanCompendiumId = typeof compendiumId === "string" && compendiumId.trim() ? compendiumId.trim() : null;
   if (cleanCompendiumId) {

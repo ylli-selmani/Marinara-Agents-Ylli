@@ -531,10 +531,10 @@ export interface LorebookGraphProps {
   onClearSimHighlight?: () => void;
   onBackToSimulate?: () => void;
   savingRef: string | null;
-  onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<void>;
+  onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<boolean>;
   onBatchSaveRelationships: (
     updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
 }
 
@@ -573,6 +573,7 @@ export function LorebookGraph({
   const [hoverRef, setHoverRef] = useState<string | null>(null);
   const [view, setView] = useState<GraphView>({ k: 1, x: 0, y: 0 });
   const [size, setSize] = useState({ w: 800, h: 520 });
+  const [measured, setMeasured] = useState(false);
   const [navHistory, setNavHistory] = useState<string[]>([]);
   const [navIndex, setNavIndex] = useState(-1);
   const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
@@ -615,6 +616,16 @@ export function LorebookGraph({
     },
     [navIndex, onSelectNodeRef],
   );
+
+  // A new Compendium or library scope drops history entries that no longer exist in it.
+  useEffect(() => {
+    const present = new Set(payload.nodes.map((node) => node.ref));
+    setNavHistory((prev) => {
+      if (prev.every((ref) => present.has(ref))) return prev;
+      setNavIndex(-1);
+      return [];
+    });
+  }, [payload.nodes]);
 
   useEffect(() => {
     if (!selectedNodeRef) return;
@@ -787,7 +798,10 @@ export function LorebookGraph({
     const measure = () => {
       const w = Math.round(wrap.clientWidth);
       const h = Math.round(wrap.clientHeight);
-      if (w > 0 && h > 0) setSize((current) => (current.w === w && current.h === h ? current : { w, h }));
+      if (w > 0 && h > 0) {
+        setSize((current) => (current.w === w && current.h === h ? current : { w, h }));
+        setMeasured(true);
+      }
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -815,13 +829,13 @@ export function LorebookGraph({
   fitRef.current = fit;
   const fitTrigger = sortedNodeRefsKey;
   useEffect(() => {
-    if (effectivePositions.size === 0 || size.w <= 0 || size.h <= 0) return;
+    if (!measured || effectivePositions.size === 0 || size.w <= 0 || size.h <= 0) return;
     if (!hasFittedRef.current || lastFitTriggerRef.current !== fitTrigger) {
       hasFittedRef.current = true;
       lastFitTriggerRef.current = fitTrigger;
       fitRef.current();
     }
-  }, [fitTrigger, effectivePositions.size, size.w, size.h]);
+  }, [fitTrigger, measured, effectivePositions.size, size.w, size.h]);
 
   const zoomAt = useCallback(
     (factor: number, px = size.w / 2, py = size.h / 2) =>
@@ -1422,6 +1436,11 @@ export function LorebookGraph({
                 }
               }}
               onPointerMove={(event) => {
+                if (dragNode.current && event.pointerType === "mouse" && event.buttons === 0) {
+                  // Released outside the SVG before capture started: the press is over.
+                  pointers.current.delete(dragNode.current.pointerId);
+                  dragNode.current = null;
+                }
                 if (dragNode.current && dragNode.current.pointerId === event.pointerId) {
                   const next = screenPoint(event);
                   pointers.current.set(event.pointerId, next);

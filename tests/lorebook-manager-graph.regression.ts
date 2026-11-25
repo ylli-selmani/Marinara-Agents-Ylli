@@ -30,6 +30,7 @@ import type {
   LorebookManagerDocumentStore,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
 import type {
+  LmEntryNode,
   LmGraphEdge,
   LmGraphNode,
   LmGraphPayload,
@@ -699,6 +700,60 @@ const overriddenBookBudgetRes = simulateLorebookRetrieval(simPayload, {
 assert.ok(
   overriddenBookBudgetRes.suppressed.some((s) => s.reason === "over_budget"),
   "Compendium per-book token budget override must cap entries even when global budget is large",
+);
+
+// ── One-hop cap counts only activated neighbours; disabled lorebooks are suppressed ──
+const simQuery = {
+  queryText: "We meet Class 1-A before the Overhaul mission.",
+  activeCharacterIds: ["izuku"],
+  tokenBudget: 2000,
+};
+const extraAlly = {
+  ...(simNodes.find((n) => n.ref === "lore:allmight") as LmEntryNode),
+  ref: "lore:extra-ally",
+  id: "extra-ally",
+  name: "Extra Ally",
+  keys: [],
+  relationships: {},
+};
+const oneHopPayload: LmGraphPayload = {
+  ...simPayload,
+  nodes: simPayload.nodes
+    .map((n) =>
+      n.ref === "lore:deku-lore" && n.nodeType === "lore"
+        ? { ...n, relationships: { ...n.relationships, "extra-ally": "ally_of" } }
+        : n,
+    )
+    .concat([extraAlly]),
+};
+const oneHopFull = simulateLorebookRetrieval(oneHopPayload, { ...simQuery, maxOneHop: 6 });
+const oneHopActivatedCount = oneHopFull.activated.filter((a) => a.tier === "graph_1hop").length;
+assert.ok(oneHopActivatedCount >= 2, "Fixture must activate at least two 1-hop neighbours");
+const oneHopCapped = simulateLorebookRetrieval(oneHopPayload, { ...simQuery, maxOneHop: 1 });
+assert.equal(
+  oneHopCapped.activated.filter((a) => a.tier === "graph_1hop").length,
+  1,
+  "One-hop cap must hold exactly the configured number of activated neighbours",
+);
+assert.ok(
+  oneHopCapped.suppressed.some((s) => s.detail.includes("One-hop limit")),
+  "Neighbours beyond the one-hop cap must be suppressed with a clear reason",
+);
+// The one-hop cap must also hold under a tight token budget.
+const oneHopTight = simulateLorebookRetrieval(oneHopPayload, { ...simQuery, maxOneHop: 1, tokenBudget: 15 });
+assert.ok(
+  oneHopTight.activated.filter((a) => a.tier === "graph_1hop").length <= 1,
+  "One-hop cap must hold under a tight token budget",
+);
+
+const disabledBookRes = simulateLorebookRetrieval(
+  { ...simPayload, lorebooks: simPayload.lorebooks.map((b) => ({ ...b, enabled: false })) },
+  { ...simQuery, maxOneHop: 6 },
+);
+assert.equal(disabledBookRes.activated.length, 0, "Entries of a disabled lorebook must not activate");
+assert.ok(
+  disabledBookRes.suppressed.some((s) => s.reason === "disabled" && s.detail === "Lorebook is disabled"),
+  "Disabled lorebook entries must be suppressed with the lorebook reason",
 );
 
 // ── Linked cast discovery helper (Slice 2b) ───────────────────────────────────

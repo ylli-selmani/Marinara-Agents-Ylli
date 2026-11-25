@@ -63,6 +63,49 @@ const REASON_BADGE_STYLE: Record<string, { border: string; text: string }> = {
   card_inherited: { border: "#06b6d4", text: "#22d3ee" },
 };
 
+/** Number input that clamps on commit (blur/Enter) instead of every keystroke, so "1500" can be typed. */
+function ClampedNumberInput({
+  value,
+  min,
+  max,
+  step,
+  ariaLabel,
+  className,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  ariaLabel: string;
+  className: string;
+  onCommit: (next: number) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const next = Number(draft);
+    setDraft(null);
+    if (draft.trim() !== "" && Number.isFinite(next)) onCommit(Math.max(min, Math.min(max, next)));
+  };
+  return (
+    <input
+      type="number"
+      aria-label={ariaLabel}
+      min={min}
+      max={max}
+      step={step}
+      value={draft ?? value}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") commit();
+      }}
+      className={className}
+    />
+  );
+}
+
 export function SimulatePanel({
   payload,
   managedLorebookIds,
@@ -145,16 +188,14 @@ export function SimulatePanel({
     };
   };
 
+  // Only clears the scene fields; budgets and per-book caps (possibly from a Compendium) stay as configured.
   const resetInputs = () =>
     onChangeConfig({
+      ...config,
       queryText: "",
       activeCharacterIds: [],
       activePersonaId: null,
       activeLocationText: "",
-      tokenBudget: 2000,
-      maxOneHop: 6,
-      maxTextHits: 5,
-      respectBookBudgets: true,
     });
 
   const readerNode = readerState ? (nodesByRef.get(readerState.ref) ?? null) : null;
@@ -241,17 +282,13 @@ export function SimulatePanel({
         <div className="flex flex-wrap items-center gap-4 text-xs">
           <label className="flex items-center gap-2">
             <span className="font-medium text-[var(--muted-foreground)]">Token budget</span>
-            <input
-              type="number"
-              aria-label="Simulation token budget"
+            <ClampedNumberInput
+              ariaLabel="Simulation token budget"
               min={100}
               max={32000}
-              step={100}
+              step={1}
               value={config.tokenBudget}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                if (Number.isFinite(next)) onChangeConfig({ ...config, tokenBudget: Math.max(100, next) });
-              }}
+              onCommit={(next) => onChangeConfig({ ...config, tokenBudget: next })}
               className="mari-chrome-field h-8 w-24 rounded px-2 text-xs tabular-nums"
             />
           </label>
@@ -261,17 +298,13 @@ export function SimulatePanel({
             title="Maximum ID-linked neighbor entries pulled in via 1-hop bonus per turn"
           >
             <span className="font-medium text-[var(--muted-foreground)]">Max 1-hop bonus</span>
-            <input
-              type="number"
-              aria-label="Maximum 1-hop bonus entries"
+            <ClampedNumberInput
+              ariaLabel="Maximum 1-hop bonus entries"
               min={0}
               max={25}
               step={1}
               value={config.maxOneHop}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                if (Number.isFinite(next)) onChangeConfig({ ...config, maxOneHop: Math.max(0, Math.min(25, next)) });
-              }}
+              onCommit={(next) => onChangeConfig({ ...config, maxOneHop: next })}
               className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
             />
           </label>
@@ -281,17 +314,13 @@ export function SimulatePanel({
             title="Cap on fuzzy BM25 text-only matches in Instant Mode (0 = keywords, locations & graph links only)"
           >
             <span className="font-medium text-[var(--muted-foreground)]">Max text hits</span>
-            <input
-              type="number"
-              aria-label="Maximum fuzzy text hits"
+            <ClampedNumberInput
+              ariaLabel="Maximum fuzzy text hits"
               min={0}
               max={25}
               step={1}
               value={config.maxTextHits ?? 5}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                if (Number.isFinite(next)) onChangeConfig({ ...config, maxTextHits: Math.max(0, Math.min(25, next)) });
-              }}
+              onCommit={(next) => onChangeConfig({ ...config, maxTextHits: next })}
               className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
             />
           </label>
@@ -363,6 +392,11 @@ export function SimulatePanel({
         {loadedEntryCount === 0 ? (
           <div className="rounded border border-[var(--border)] p-4 text-xs text-[var(--muted-foreground)]">
             No lorebooks loaded yet. Opt a lorebook in above to test Stage 1 retrieval against its entries.
+          </div>
+        ) : result.activated.length === 0 && result.suppressed.length > 0 ? (
+          <div className="rounded border border-[var(--border)] p-4 text-xs text-[var(--muted-foreground)]">
+            Entries matched, but none were activated (token budgets or filters suppressed them). See the suppressed list
+            below.
           </div>
         ) : result.activated.length === 0 ? (
           <div className="rounded border border-[var(--border)] p-4 text-xs text-[var(--muted-foreground)]">

@@ -58,7 +58,24 @@ export function EntryReaderModal({
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
+  // Draft values as loaded; Save sends only fields that differ, so a stale draft can't overwrite
+  // edits made elsewhere and untouched keys never go through the comma split/join round-trip.
+  const baselineRef = useRef<Record<string, string | boolean>>({});
+
   const resetDraftFromNode = useCallback((target: LmGraphNode) => {
+    baselineRef.current =
+      target.nodeType === "lore"
+        ? {
+            name: target.name,
+            description: target.description,
+            tag: target.tag,
+            keysText: target.keys.join(", "),
+            secondaryKeysText: target.secondaryKeys.join(", "),
+            content: target.content,
+            enabled: target.enabled,
+            constant: target.constant,
+          }
+        : { name: target.name, description: target.description };
     setName(target.name);
     setDescription(target.description);
     if (target.nodeType === "lore") {
@@ -92,17 +109,22 @@ export function EntryReaderModal({
 
   const handleSave = async () => {
     if (!isLore) return;
+    const base = baselineRef.current;
+    const patch: LmEntryPatch = {};
+    if (name !== base.name) patch.name = name.trim() || node.name;
+    if (tag !== base.tag) patch.tag = tag.trim();
+    if (keysText !== base.keysText) patch.keys = parseKeywords(keysText);
+    if (secondaryKeysText !== base.secondaryKeysText) patch.secondaryKeys = parseKeywords(secondaryKeysText);
+    if (description !== base.description) patch.description = description;
+    if (content !== base.content) patch.content = content;
+    if (enabled !== base.enabled) patch.enabled = enabled;
+    if (constant !== base.constant) patch.constant = constant;
+    if (Object.keys(patch).length === 0) {
+      setMode("read");
+      return;
+    }
     try {
-      await onUpdateEntry(node, {
-        name: name.trim() || node.name,
-        tag: tag.trim(),
-        keys: parseKeywords(keysText),
-        secondaryKeys: parseKeywords(secondaryKeysText),
-        description,
-        content,
-        enabled,
-        constant,
-      });
+      await onUpdateEntry(node, patch);
       setMode("read");
     } catch {
       // LorebookManagerDetail surfaces the error toast; keep the user in edit mode.

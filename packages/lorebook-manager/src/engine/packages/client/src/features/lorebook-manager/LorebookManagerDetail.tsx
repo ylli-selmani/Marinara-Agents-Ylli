@@ -57,6 +57,14 @@ import type { CapabilityProps } from "./types";
 const MANAGED_BOOKS_STORAGE_KEY = "lm:managed-books:v1";
 const AUTO_SELECT_ENTRY_CEILING = 400;
 const ADHOC_SCOPE_VALUE = "__adhoc__";
+/** Retrieval settings outside any Compendium (whole-library view). */
+const AD_HOC_RETRIEVAL_DEFAULTS = {
+  tokenBudget: 2000,
+  maxOneHop: 6,
+  maxTextHits: 5,
+  respectBookBudgets: true,
+  bookTokenBudgets: undefined,
+} satisfies Partial<LmRetrievalInput>;
 
 const LIBRARY_STYLE = `
 [data-lm-compendium-grid] {
@@ -129,6 +137,8 @@ function applyOptimisticRelationships(
   const nodeRefs = new Set(nodes.map((node) => node.ref));
   const explicitEdges: LmGraphEdge[] = payload.explicitEdges.filter((edge) => !relByRef.has(edge.sourceRef));
   for (const [sourceRef, rels] of relByRef) {
+    // Every cached graph scope gets this merge; skip entries this scope doesn't show.
+    if (!nodeRefs.has(sourceRef)) continue;
     for (const [rawTarget, relation] of Object.entries(rels)) {
       const parsed = parseEntityRef(rawTarget);
       if (!parsed || !nodeRefs.has(parsed.ref)) continue;
@@ -188,17 +198,15 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const [savingCompendium, setSavingCompendium] = useState(false);
   const [bindingBusy, setBindingBusy] = useState(false);
   const autoBoundChatRef = useRef<string | null>(null);
+  // Compendium opened automatically from a chat binding; only this one closes again when the chat changes.
+  const autoOpenedCompendiumIdRef = useRef<string | null>(null);
 
   const [simConfig, setSimConfig] = useState<LmRetrievalInput>({
     queryText: "",
     activeCharacterIds: [],
     activePersonaId: null,
     activeLocationText: "",
-    tokenBudget: 2000,
-    maxOneHop: 6,
-    maxTextHits: 5,
-    respectBookBudgets: true,
-    bookTokenBudgets: undefined,
+    ...AD_HOC_RETRIEVAL_DEFAULTS,
   });
   const [simHighlight, setSimHighlight] = useState<SimGraphHighlight | null>(null);
 
@@ -222,10 +230,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
 
   const applyCompendiumSettings = useCallback((compendium: LmCompendium | null) => {
     if (!compendium) {
-      setSimConfig((prev) => ({
-        ...prev,
-        bookTokenBudgets: undefined,
-      }));
+      // Leaving a Compendium: back to the whole-library defaults, keeping the scene inputs.
+      setSimConfig((prev) => ({ ...prev, ...AD_HOC_RETRIEVAL_DEFAULTS }));
       return;
     }
     const charSet = new Set(compendium.characterIds);
@@ -244,22 +250,45 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   }, []);
 
   // When opened inside a chat bound to a Compendium, jump straight into that Compendium once.
+  // The host keeps this component mounted across chat switches, so a Compendium that was auto-opened for the
+  // previous chat closes when the new chat has no binding. One the user opened by hand stays open.
   useEffect(() => {
+    const closeAutoOpened = () => {
+      const autoId = autoOpenedCompendiumIdRef.current;
+      autoOpenedCompendiumIdRef.current = null;
+      if (autoId && selectedCompendiumId === autoId) {
+        setSelectedCompendiumId(null);
+        applyCompendiumSettings(null);
+        setSurface("library");
+      }
+    };
     if (!chatId) {
+      if (autoBoundChatRef.current !== null) closeAutoOpened();
       autoBoundChatRef.current = null;
       return;
     }
     if (autoBoundChatRef.current === chatId) return;
     const binding = chatBindingQuery.data;
-    if (!binding || compendiumsQuery.isLoading) return;
+    // Wait for a successful list: marking the chat handled after a failed fetch would skip the retry.
+    if (!binding || !compendiumsQuery.isSuccess) return;
     autoBoundChatRef.current = chatId;
-    if (binding.compendiumId && compendiums.some((c) => c.id === binding.compendiumId)) {
-      const bound = compendiums.find((c) => c.id === binding.compendiumId)!;
+    const bound = binding.compendiumId ? compendiums.find((c) => c.id === binding.compendiumId) : undefined;
+    if (bound) {
+      autoOpenedCompendiumIdRef.current = bound.id;
       setSelectedCompendiumId(bound.id);
       applyCompendiumSettings(bound);
       setSurface("workbench");
+    } else {
+      closeAutoOpened();
     }
-  }, [applyCompendiumSettings, chatBindingQuery.data, chatId, compendiums, compendiumsQuery.isLoading]);
+  }, [
+    applyCompendiumSettings,
+    chatBindingQuery.data,
+    chatId,
+    compendiums,
+    compendiumsQuery.isSuccess,
+    selectedCompendiumId,
+  ]);
 
   // Drop stale selection if a Compendium was deleted externally.
   useEffect(() => {
@@ -316,6 +345,9 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const managedSet = useMemo(
     () => new Set(activeCompendium ? activeCompendium.lorebookIds : (managedLorebookIds ?? [])),
     [activeCompendium, managedLorebookIds],
+  );
+  const allBooksManaged = Boolean(
+    payload && payload.lorebooks.length > 0 && payload.lorebooks.every((book) => managedSet.has(book.id)),
   );
 
   const visibleLorebooks = useMemo(() => {
@@ -421,12 +453,13 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const handleDeleteCompendium = async (target: LmCompendium) => {
     setSavingCompendium(true);
     try {
-      await deleteCompendiumApi(target.id, target.revision);
-      if (chatId && chatBindingQuery.data?.compendiumId === target.id) {
-        await setChatCompendiumBindingApi(chatId, null);
-        await queryClient.invalidateQueries({ queryKey: lmQueryKeys.chatBinding(chatId) });
+      try {
+        await deleteCompendiumApi(target.id, target.revision);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not delete Compendium");
+        return;
       }
-      await queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums });
+      // The delete succeeded: always close and refresh, even if the binding refresh below fails.
       if (selectedCompendiumId === target.id) {
         setSelectedCompendiumId(null);
         applyCompendiumSettings(null);
@@ -434,8 +467,11 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       }
       setCompendiumModal({ open: false, editing: null });
       toast.success(`Deleted Compendium "${target.name}"`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete Compendium");
+      // The server clears every chat binding that pointed at it; refetch so badges drop it.
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums }),
+        queryClient.invalidateQueries({ queryKey: ["lorebook-manager", "chat-binding"] }),
+      ]);
     } finally {
       setSavingCompendium(false);
     }
@@ -457,7 +493,12 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     const isBoundHere = chatBindingQuery.data?.compendiumId === target.id;
     setBindingBusy(true);
     try {
-      const updated = await setChatCompendiumBindingApi(chatId, isBoundHere ? null : target.id);
+      // Unbind only if this chat is still bound to it (another tab may have rebound it meanwhile).
+      const updated = await setChatCompendiumBindingApi(
+        chatId,
+        isBoundHere ? null : target.id,
+        isBoundHere ? target.id : null,
+      );
       queryClient.setQueryData(lmQueryKeys.chatBinding(chatId), updated);
       toast.success(
         isBoundHere
@@ -473,10 +514,13 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
 
   const handleBatchSaveRelationships = async (
     updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
-  ) => {
-    if (updates.length === 0) return;
+  ): Promise<boolean> => {
+    if (updates.length === 0) return true;
     setSavingRef(updates[0]!.entry.ref);
     try {
+      // A graph GET already in flight would land after the optimistic merge and revert it.
+      const graphWasFetching = queryClient.isFetching({ queryKey: lmQueryKeys.graphRoot }) > 0;
+      if (graphWasFetching) await queryClient.cancelQueries({ queryKey: lmQueryKeys.graphRoot });
       const results = await Promise.allSettled(
         updates.map(({ entry, relationships }) => patchEntryRelationships(entry.lorebookId, entry.id, relationships)),
       );
@@ -497,10 +541,12 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
         queryClient.setQueriesData<LmGraphPayload>({ queryKey: lmQueryKeys.graphRoot }, (current) =>
           applyOptimisticRelationships(current, succeededUpdates),
         );
-        if (hadRemoved || failureReasons.length > 0) {
+        if (hadRemoved || failureReasons.length > 0 || graphWasFetching) {
           void queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
         }
-        void props.onLorebooksChanged?.();
+        void notifyLorebooksChanged();
+      } else if (graphWasFetching) {
+        void queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
       }
 
       if (failureReasons.length === 0) {
@@ -514,13 +560,23 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       } else {
         toast.error(failureReasons[0] ?? "Could not save lorebook links");
       }
+      return failureReasons.length === 0;
     } finally {
       setSavingRef(null);
     }
   };
 
+  /** Host refresh after a save; its failure must not be reported as a failed save. */
+  const notifyLorebooksChanged = async () => {
+    try {
+      await props.onLorebooksChanged?.();
+    } catch {
+      toast.error("Saved, but Marinara Engine couldn't refresh its lorebook list.");
+    }
+  };
+
   const handleSaveRelationships = async (entry: LmEntryNode, nextRelationships: Record<string, string>) => {
-    await handleBatchSaveRelationships([{ entry, relationships: nextRelationships }]);
+    return handleBatchSaveRelationships([{ entry, relationships: nextRelationships }]);
   };
 
   const handleUpdateEntry = async (entry: LmEntryNode, patch: LmEntryPatch) => {
@@ -538,7 +594,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       if (needsMentionRescan) {
         void queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
       }
-      void props.onLorebooksChanged?.();
+      void notifyLorebooksChanged();
       toast.success(`Saved ${patch.name ?? entry.name}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save lorebook entry");
@@ -642,6 +698,20 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
           {compendiumsQuery.isLoading ? (
             <div className="rounded-xl border border-[var(--border)] p-6 text-sm text-[var(--muted-foreground)]">
               Loading Compendiums…
+            </div>
+          ) : compendiumsQuery.isError ? (
+            <div className="flex flex-col items-start gap-3 rounded-xl border border-[var(--border)] p-6">
+              <p className="text-sm text-[var(--muted-foreground)]">
+                Couldn't load your Compendiums.{" "}
+                {compendiumsQuery.error instanceof Error ? compendiumsQuery.error.message : ""}
+              </p>
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                onClick={() => void compendiumsQuery.refetch()}
+              >
+                Try again
+              </button>
             </div>
           ) : compendiums.length === 0 ? (
             <div className="flex flex-col items-start gap-3 rounded-xl border border-dashed border-[var(--border)] bg-[var(--card)]/40 p-6">
@@ -933,14 +1003,14 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                   type="button"
                   className="mari-chrome-control mari-chrome-control--small"
                   onClick={() => {
-                    if (managedSet.size === payload.lorebooks.length) {
+                    if (allBooksManaged) {
                       updateManagedBooks([]);
                     } else {
                       updateManagedBooks(payload.lorebooks.map((book) => book.id));
                     }
                   }}
                 >
-                  {managedSet.size === payload.lorebooks.length
+                  {allBooksManaged
                     ? `Unload all (${payload.lorebooks.length})`
                     : `Load all (${payload.lorebooks.length})`}
                 </button>

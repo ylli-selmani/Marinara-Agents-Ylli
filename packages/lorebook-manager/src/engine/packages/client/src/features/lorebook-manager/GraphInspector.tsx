@@ -112,6 +112,8 @@ type EditingLinkState = {
   sourceRef: string;
   targetRef: string;
   relation: string;
+  /** Relation when editing started; a mutual pair may hold a different relation on its reverse side. */
+  initialRelation: string;
   bothWays: boolean;
   wasBothWays: boolean;
 };
@@ -137,10 +139,12 @@ export interface GraphInspectorProps {
   onOpenPersona?: (personaId: string) => void;
   onToggleCollapseLorebook: (lorebookId: string) => void;
   savingRef: string | null;
-  onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<void>;
+  /** Resolves `true` only when every update was saved. */
+  onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<boolean>;
+  /** Resolves `true` only when every update was saved. */
   onBatchSaveRelationships: (
     updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
 }
 
@@ -469,18 +473,20 @@ export function GraphInspector({
 
     if (activeNode.nodeType === "character" || activeNode.nodeType === "persona") {
       if (targetNode.nodeType !== "lore") return;
-      await onSaveRelationships(targetNode, {
+      const saved = await onSaveRelationships(targetNode, {
         ...targetNode.relationships,
         [toRelationshipKey(activeNode.ref)]: rel,
       });
+      if (!saved) return;
       await maybeAutoExcludeCardForRepresents(targetNode, activeNode.ref, rel);
       setAddTargetRef("");
       return;
     }
 
+    let saved: boolean;
     if (addBothWays && targetNode.nodeType === "lore") {
       const reverseKey = findRawRelationshipKey(targetNode, activeNode.ref) ?? toRelationshipKey(activeNode.ref);
-      await onBatchSaveRelationships([
+      saved = await onBatchSaveRelationships([
         { entry: activeNode, relationships: { ...activeNode.relationships, [toRelationshipKey(addTargetRef)]: rel } },
         { entry: targetNode, relationships: { ...targetNode.relationships, [reverseKey]: rel } },
       ]);
@@ -489,23 +495,24 @@ export function GraphInspector({
         toast.error(`${targetNode.name} already links to ${activeNode.name}. Edit it under "Linking to this".`);
         return;
       }
-      await onSaveRelationships(targetNode, {
+      saved = await onSaveRelationships(targetNode, {
         ...targetNode.relationships,
         [toRelationshipKey(activeNode.ref)]: rel,
       });
     } else {
-      await onSaveRelationships(activeNode, {
+      saved = await onSaveRelationships(activeNode, {
         ...activeNode.relationships,
         [toRelationshipKey(addTargetRef)]: rel,
       });
-      await maybeAutoExcludeCardForRepresents(activeNode, addTargetRef, rel);
+      if (saved) await maybeAutoExcludeCardForRepresents(activeNode, addTargetRef, rel);
     }
-    setAddTargetRef("");
+    // Keep the picked target on failure so the user can retry without re-picking.
+    if (saved) setAddTargetRef("");
   };
 
   const handleSaveEditedLink = async () => {
     if (!editingLink) return;
-    const { sourceRef, targetRef, relation, bothWays, wasBothWays } = editingLink;
+    const { sourceRef, targetRef, relation, initialRelation, bothWays, wasBothWays } = editingLink;
     const sourceNode = allNodesByRef.get(sourceRef);
     const targetNode = allNodesByRef.get(targetRef);
     const sourceEntry = sourceNode?.nodeType === "lore" ? sourceNode : null;
@@ -529,15 +536,25 @@ export function GraphInspector({
     if (targetEntry) {
       const targetRels = ensure(targetEntry);
       const revKey = findRawRelationshipKey(targetEntry, sourceRef);
-      if (bothWays) {
+      // An unchanged mutual pair keeps its own reverse relation (A owns B / B related_to A stays that way);
+      // the reverse side is only rewritten when Both ways is newly applied or the relation was edited.
+      if (bothWays && (!wasBothWays || relation !== initialRelation)) {
         targetRels[revKey ?? toRelationshipKey(sourceRef)] = relation;
-      } else if (wasBothWays && revKey) {
+      } else if (!bothWays && wasBothWays && revKey) {
         delete targetRels[revKey];
       }
     }
-    await onBatchSaveRelationships([...updates.values()]);
+    const saved = await onBatchSaveRelationships([...updates.values()]);
+    if (!saved) return;
     await maybeAutoExcludeCardForRepresents(sourceEntry, targetRef, relation);
-    setEditingLink(null);
+    clearEditingLinkIfCurrent(sourceRef, targetRef);
+  };
+
+  /** Close the link editor only if it still shows the link whose save just finished. */
+  const clearEditingLinkIfCurrent = (sourceRef: string, targetRef: string) => {
+    setEditingLink((current) =>
+      current && current.sourceRef === sourceRef && current.targetRef === targetRef ? null : current,
+    );
   };
 
   const handleFlipEditedLink = async () => {
@@ -553,15 +570,15 @@ export function GraphInspector({
       setEditingLink(null);
       return;
     }
-    const nextSource = { ...sourceEntry.relationships };
-    delete nextSource[sourceKey];
+    // Two separate saves: write the new direction first and drop the old one only after that succeeded,
+    // so a failure leaves a duplicate link at worst, never no link at all.
     const targetKey = findRawRelationshipKey(targetEntry, sourceRef) ?? toRelationshipKey(sourceRef);
     const nextTarget = { ...targetEntry.relationships, [targetKey]: relation };
-    await onBatchSaveRelationships([
-      { entry: sourceEntry, relationships: nextSource },
-      { entry: targetEntry, relationships: nextTarget },
-    ]);
-    setEditingLink(null);
+    if (!(await onSaveRelationships(targetEntry, nextTarget))) return;
+    const nextSource = { ...sourceEntry.relationships };
+    delete nextSource[sourceKey];
+    if (!(await onSaveRelationships(sourceEntry, nextSource))) return;
+    clearEditingLinkIfCurrent(sourceRef, targetRef);
   };
 
   const activeTags = activeNode.nodeType === "lore" ? parseTagList(activeNode.tag) : [];
@@ -1034,104 +1051,108 @@ export function GraphInspector({
               open={isSectionOpen("exp-mutual", explicitGroups.mutual.length)}
               onToggle={() => toggleSection("exp-mutual", isSectionOpen("exp-mutual", explicitGroups.mutual.length))}
             >
-              {explicitGroups.mutual.map((item) => {
-                const rowId = `mut-${item.outKey}`;
-                const isEditing =
-                  editingLink?.ownerRef === activeNode.ref &&
-                  editingLink.section === "mutual" &&
-                  editingLink.sourceRef === activeNode.ref &&
-                  editingLink.targetRef === item.otherRef;
-                const targetCanBeBidirect = isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
-                return (
-                  <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
-                    <div className="flex items-center justify-between gap-1">
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 truncate text-left hover:underline"
-                        onClick={() => onNavigate(item.otherRef)}
-                      >
-                        <span className="font-medium">{item.otherName}</span>
-                        <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                          {" "}
-                          ({item.outRel} ↔ {item.inRel})
-                        </span>
-                      </button>
-                      {activeNode.nodeType === "lore" ? (
-                        <div className="flex shrink-0 items-center gap-0.5">
+              {() =>
+                explicitGroups.mutual.map((item) => {
+                  const rowId = `mut-${item.outKey}`;
+                  const isEditing =
+                    editingLink?.ownerRef === activeNode.ref &&
+                    editingLink.section === "mutual" &&
+                    editingLink.sourceRef === activeNode.ref &&
+                    editingLink.targetRef === item.otherRef;
+                  const targetCanBeBidirect =
+                    isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
+                  return (
+                    <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 truncate text-left hover:underline"
+                          onClick={() => onNavigate(item.otherRef)}
+                        >
+                          <span className="font-medium">{item.otherName}</span>
+                          <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                            {" "}
+                            ({item.outRel} ↔ {item.inRel})
+                          </span>
+                        </button>
+                        {activeNode.nodeType === "lore" ? (
+                          <div className="flex shrink-0 items-center gap-0.5">
+                            <button
+                              type="button"
+                              className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                              aria-label={`Edit link to ${item.otherName}`}
+                              onClick={() =>
+                                setEditingLink({
+                                  ownerRef: activeNode.ref,
+                                  section: "mutual",
+                                  sourceRef: activeNode.ref,
+                                  targetRef: item.otherRef,
+                                  relation: item.outRel,
+                                  initialRelation: item.outRel,
+                                  bothWays: true,
+                                  wasBothWays: true,
+                                })
+                              }
+                            >
+                              <Pencil size="0.72rem" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={savingRef === activeNode.ref}
+                              className="p-1 text-[var(--destructive)] disabled:opacity-40"
+                              aria-label={`Remove link to ${item.otherName}`}
+                              onClick={() => void handleRemoveExplicit(activeNode, item.outKey)}
+                            >
+                              <Trash2 size="0.75rem" />
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      {isEditing && editingLink ? (
+                        <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
+                          <select
+                            aria-label="Edit relation type"
+                            value={editingLink.relation}
+                            onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
+                            className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
+                          >
+                            {RELATION_PRESETS.map((rel) => (
+                              <option key={rel} value={rel}>
+                                {rel}
+                              </option>
+                            ))}
+                          </select>
+                          {targetCanBeBidirect ? (
+                            <label className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                checked={editingLink.bothWays}
+                                onChange={(event) => setEditingLink({ ...editingLink, bothWays: event.target.checked })}
+                              />
+                              <span>Both ways</span>
+                            </label>
+                          ) : null}
                           <button
                             type="button"
-                            className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                            aria-label={`Edit link to ${item.otherName}`}
-                            onClick={() =>
-                              setEditingLink({
-                                ownerRef: activeNode.ref,
-                                section: "mutual",
-                                sourceRef: activeNode.ref,
-                                targetRef: item.otherRef,
-                                relation: item.outRel,
-                                bothWays: true,
-                                wasBothWays: true,
-                              })
-                            }
+                            className="mari-chrome-control mari-chrome-control--small"
+                            onClick={() => void handleSaveEditedLink()}
                           >
-                            <Pencil size="0.72rem" />
+                            <Check size="0.7rem" />
+                            Save
                           </button>
                           <button
                             type="button"
-                            disabled={savingRef === activeNode.ref}
-                            className="p-1 text-[var(--destructive)] disabled:opacity-40"
-                            aria-label={`Remove link to ${item.otherName}`}
-                            onClick={() => void handleRemoveExplicit(activeNode, item.outKey)}
+                            className="mari-chrome-control mari-chrome-control--small"
+                            onClick={() => setEditingLink(null)}
                           >
-                            <Trash2 size="0.75rem" />
+                            Cancel
                           </button>
                         </div>
                       ) : null}
                     </div>
-                    {isEditing && editingLink ? (
-                      <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
-                        <select
-                          aria-label="Edit relation type"
-                          value={editingLink.relation}
-                          onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
-                          className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
-                        >
-                          {RELATION_PRESETS.map((rel) => (
-                            <option key={rel} value={rel}>
-                              {rel}
-                            </option>
-                          ))}
-                        </select>
-                        {targetCanBeBidirect ? (
-                          <label className="flex items-center gap-1">
-                            <input
-                              type="checkbox"
-                              checked={editingLink.bothWays}
-                              onChange={(event) => setEditingLink({ ...editingLink, bothWays: event.target.checked })}
-                            />
-                            <span>Both ways</span>
-                          </label>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="mari-chrome-control mari-chrome-control--small"
-                          onClick={() => void handleSaveEditedLink()}
-                        >
-                          <Check size="0.7rem" />
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="mari-chrome-control mari-chrome-control--small"
-                          onClick={() => setEditingLink(null)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
+                  );
+                })
+              }
             </CollapsibleSection>
 
             <CollapsibleSection
@@ -1140,112 +1161,120 @@ export function GraphInspector({
               open={isSectionOpen("exp-out", explicitGroups.outgoing.length)}
               onToggle={() => toggleSection("exp-out", isSectionOpen("exp-out", explicitGroups.outgoing.length))}
             >
-              {explicitGroups.outgoing.map((item) => {
-                const rowId = `out-${item.key}`;
-                const isEditing =
-                  editingLink?.ownerRef === activeNode.ref &&
-                  editingLink.section === "outgoing" &&
-                  editingLink.sourceRef === activeNode.ref &&
-                  editingLink.targetRef === item.targetRef;
-                const targetCanBeBidirect = isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
-                return (
-                  <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
-                    <div className="flex items-center justify-between gap-1">
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 truncate text-left hover:underline"
-                        onClick={() => onNavigate(item.targetRef)}
-                      >
-                        <span className="text-[var(--muted-foreground)]">{item.relation} → </span>
-                        <span className="font-medium">{item.targetName}</span>
-                      </button>
-                      {activeNode.nodeType === "lore" ? (
-                        <div className="flex shrink-0 items-center gap-0.5">
+              {() =>
+                explicitGroups.outgoing.map((item) => {
+                  const rowId = `out-${item.key}`;
+                  const isEditing =
+                    editingLink?.ownerRef === activeNode.ref &&
+                    editingLink.section === "outgoing" &&
+                    editingLink.sourceRef === activeNode.ref &&
+                    editingLink.targetRef === item.targetRef;
+                  const targetCanBeBidirect =
+                    isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
+                  return (
+                    <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 truncate text-left hover:underline"
+                          onClick={() => onNavigate(item.targetRef)}
+                        >
+                          <span className="text-[var(--muted-foreground)]">
+                            {item.relation} {isImpliedMutualLink(item.targetRef, item.relation) ? "↔" : "→"}{" "}
+                          </span>
+                          <span className="font-medium">{item.targetName}</span>
+                        </button>
+                        {activeNode.nodeType === "lore" ? (
+                          <div className="flex shrink-0 items-center gap-0.5">
+                            <button
+                              type="button"
+                              className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                              aria-label={`Edit link to ${item.targetName}`}
+                              onClick={() =>
+                                setEditingLink({
+                                  ownerRef: activeNode.ref,
+                                  section: "outgoing",
+                                  sourceRef: activeNode.ref,
+                                  targetRef: item.targetRef,
+                                  relation: item.relation,
+                                  initialRelation: item.relation,
+                                  bothWays: false,
+                                  wasBothWays: false,
+                                })
+                              }
+                            >
+                              <Pencil size="0.72rem" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={savingRef === activeNode.ref}
+                              className="p-1 text-[var(--destructive)] disabled:opacity-40"
+                              aria-label={`Remove link to ${item.targetName}`}
+                              onClick={() => void handleRemoveExplicit(activeNode, item.key)}
+                            >
+                              <Trash2 size="0.75rem" />
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      {isEditing && editingLink ? (
+                        <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
+                          <select
+                            aria-label="Edit relation type"
+                            value={editingLink.relation}
+                            onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
+                            className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
+                          >
+                            {RELATION_PRESETS.map((rel) => (
+                              <option key={rel} value={rel}>
+                                {rel}
+                              </option>
+                            ))}
+                          </select>
+                          {targetCanBeBidirect ? (
+                            <>
+                              <button
+                                type="button"
+                                title="Flip direction (make other entry own the link)"
+                                className="mari-chrome-control mari-chrome-control--small"
+                                onClick={() => void handleFlipEditedLink()}
+                              >
+                                <ArrowLeftRight size="0.7rem" />
+                                Flip
+                              </button>
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="checkbox"
+                                  checked={editingLink.bothWays}
+                                  onChange={(event) =>
+                                    setEditingLink({ ...editingLink, bothWays: event.target.checked })
+                                  }
+                                />
+                                <span>Both ways</span>
+                              </label>
+                            </>
+                          ) : null}
                           <button
                             type="button"
-                            className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                            aria-label={`Edit link to ${item.targetName}`}
-                            onClick={() =>
-                              setEditingLink({
-                                ownerRef: activeNode.ref,
-                                section: "outgoing",
-                                sourceRef: activeNode.ref,
-                                targetRef: item.targetRef,
-                                relation: item.relation,
-                                bothWays: false,
-                                wasBothWays: false,
-                              })
-                            }
+                            className="mari-chrome-control mari-chrome-control--small"
+                            onClick={() => void handleSaveEditedLink()}
                           >
-                            <Pencil size="0.72rem" />
+                            <Check size="0.7rem" />
+                            Save
                           </button>
                           <button
                             type="button"
-                            disabled={savingRef === activeNode.ref}
-                            className="p-1 text-[var(--destructive)] disabled:opacity-40"
-                            aria-label={`Remove link to ${item.targetName}`}
-                            onClick={() => void handleRemoveExplicit(activeNode, item.key)}
+                            className="mari-chrome-control mari-chrome-control--small"
+                            onClick={() => setEditingLink(null)}
                           >
-                            <Trash2 size="0.75rem" />
+                            Cancel
                           </button>
                         </div>
                       ) : null}
                     </div>
-                    {isEditing && editingLink ? (
-                      <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
-                        <select
-                          aria-label="Edit relation type"
-                          value={editingLink.relation}
-                          onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
-                          className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
-                        >
-                          {RELATION_PRESETS.map((rel) => (
-                            <option key={rel} value={rel}>
-                              {rel}
-                            </option>
-                          ))}
-                        </select>
-                        {targetCanBeBidirect ? (
-                          <>
-                            <button
-                              type="button"
-                              title="Flip direction (make other entry own the link)"
-                              className="mari-chrome-control mari-chrome-control--small"
-                              onClick={() => void handleFlipEditedLink()}
-                            >
-                              <ArrowLeftRight size="0.7rem" />
-                              Flip
-                            </button>
-                            <label className="flex items-center gap-1">
-                              <input
-                                type="checkbox"
-                                checked={editingLink.bothWays}
-                                onChange={(event) => setEditingLink({ ...editingLink, bothWays: event.target.checked })}
-                              />
-                              <span>Both ways</span>
-                            </label>
-                          </>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="mari-chrome-control mari-chrome-control--small"
-                          onClick={() => void handleSaveEditedLink()}
-                        >
-                          <Check size="0.7rem" />
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="mari-chrome-control mari-chrome-control--small"
-                          onClick={() => setEditingLink(null)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
+                  );
+                })
+              }
             </CollapsibleSection>
 
             <CollapsibleSection
@@ -1254,112 +1283,122 @@ export function GraphInspector({
               open={isSectionOpen("exp-in", explicitGroups.incoming.length)}
               onToggle={() => toggleSection("exp-in", isSectionOpen("exp-in", explicitGroups.incoming.length))}
             >
-              {explicitGroups.incoming.map((item) => {
-                const rowId = `in-${item.sourceRef}`;
-                const isEditing =
-                  editingLink?.ownerRef === activeNode.ref &&
-                  editingLink.section === "incoming" &&
-                  editingLink.sourceRef === item.sourceRef &&
-                  editingLink.targetRef === activeNode.ref;
-                const targetCanBeBidirect = isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
-                return (
-                  <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
-                    <div className="flex items-center justify-between gap-1">
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 truncate text-left hover:underline"
-                        onClick={() => onNavigate(item.sourceRef)}
-                      >
-                        <span className="font-medium">{item.sourceName}</span>
-                        <span className="text-[var(--muted-foreground)]"> — {item.relation} → this</span>
-                      </button>
-                      {item.sourceEntry ? (
-                        <div className="flex shrink-0 items-center gap-0.5">
+              {() =>
+                explicitGroups.incoming.map((item) => {
+                  const rowId = `in-${item.sourceRef}`;
+                  const isEditing =
+                    editingLink?.ownerRef === activeNode.ref &&
+                    editingLink.section === "incoming" &&
+                    editingLink.sourceRef === item.sourceRef &&
+                    editingLink.targetRef === activeNode.ref;
+                  const targetCanBeBidirect =
+                    isEditing && allNodesByRef.get(editingLink.targetRef)?.nodeType === "lore";
+                  return (
+                    <div key={rowId} className="space-y-1 rounded border border-[var(--border)] px-2 py-1 text-xs">
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 truncate text-left hover:underline"
+                          onClick={() => onNavigate(item.sourceRef)}
+                        >
+                          <span className="font-medium">{item.sourceName}</span>
+                          <span className="text-[var(--muted-foreground)]">
+                            {" "}
+                            {isImpliedMutualLink(activeNode.ref, item.relation) ? "↔" : "—"} {item.relation}{" "}
+                            {isImpliedMutualLink(activeNode.ref, item.relation) ? "↔" : "→"} this
+                          </span>
+                        </button>
+                        {item.sourceEntry ? (
+                          <div className="flex shrink-0 items-center gap-0.5">
+                            <button
+                              type="button"
+                              className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                              aria-label={`Edit link from ${item.sourceName}`}
+                              onClick={() =>
+                                setEditingLink({
+                                  ownerRef: activeNode.ref,
+                                  section: "incoming",
+                                  sourceRef: item.sourceRef,
+                                  targetRef: activeNode.ref,
+                                  relation: item.relation,
+                                  initialRelation: item.relation,
+                                  bothWays: false,
+                                  wasBothWays: false,
+                                })
+                              }
+                            >
+                              <Pencil size="0.72rem" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={savingRef === item.sourceEntry.ref}
+                              className="p-1 text-[var(--destructive)] disabled:opacity-40"
+                              aria-label={`Remove incoming link from ${item.sourceName}`}
+                              onClick={() => void handleRemoveExplicit(item.sourceEntry!, item.keyOnSource)}
+                            >
+                              <Trash2 size="0.75rem" />
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      {isEditing && editingLink ? (
+                        <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
+                          <select
+                            aria-label="Edit relation type"
+                            value={editingLink.relation}
+                            onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
+                            className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
+                          >
+                            {RELATION_PRESETS.map((rel) => (
+                              <option key={rel} value={rel}>
+                                {rel}
+                              </option>
+                            ))}
+                          </select>
+                          {targetCanBeBidirect ? (
+                            <>
+                              <button
+                                type="button"
+                                title="Flip direction"
+                                className="mari-chrome-control mari-chrome-control--small"
+                                onClick={() => void handleFlipEditedLink()}
+                              >
+                                <ArrowLeftRight size="0.7rem" />
+                                Flip
+                              </button>
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="checkbox"
+                                  checked={editingLink.bothWays}
+                                  onChange={(event) =>
+                                    setEditingLink({ ...editingLink, bothWays: event.target.checked })
+                                  }
+                                />
+                                <span>Both ways</span>
+                              </label>
+                            </>
+                          ) : null}
                           <button
                             type="button"
-                            className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                            aria-label={`Edit link from ${item.sourceName}`}
-                            onClick={() =>
-                              setEditingLink({
-                                ownerRef: activeNode.ref,
-                                section: "incoming",
-                                sourceRef: item.sourceRef,
-                                targetRef: activeNode.ref,
-                                relation: item.relation,
-                                bothWays: false,
-                                wasBothWays: false,
-                              })
-                            }
+                            className="mari-chrome-control mari-chrome-control--small"
+                            onClick={() => void handleSaveEditedLink()}
                           >
-                            <Pencil size="0.72rem" />
+                            <Check size="0.7rem" />
+                            Save
                           </button>
                           <button
                             type="button"
-                            disabled={savingRef === item.sourceEntry.ref}
-                            className="p-1 text-[var(--destructive)] disabled:opacity-40"
-                            aria-label={`Remove incoming link from ${item.sourceName}`}
-                            onClick={() => void handleRemoveExplicit(item.sourceEntry!, item.keyOnSource)}
+                            className="mari-chrome-control mari-chrome-control--small"
+                            onClick={() => setEditingLink(null)}
                           >
-                            <Trash2 size="0.75rem" />
+                            Cancel
                           </button>
                         </div>
                       ) : null}
                     </div>
-                    {isEditing && editingLink ? (
-                      <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
-                        <select
-                          aria-label="Edit relation type"
-                          value={editingLink.relation}
-                          onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
-                          className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
-                        >
-                          {RELATION_PRESETS.map((rel) => (
-                            <option key={rel} value={rel}>
-                              {rel}
-                            </option>
-                          ))}
-                        </select>
-                        {targetCanBeBidirect ? (
-                          <>
-                            <button
-                              type="button"
-                              title="Flip direction"
-                              className="mari-chrome-control mari-chrome-control--small"
-                              onClick={() => void handleFlipEditedLink()}
-                            >
-                              <ArrowLeftRight size="0.7rem" />
-                              Flip
-                            </button>
-                            <label className="flex items-center gap-1">
-                              <input
-                                type="checkbox"
-                                checked={editingLink.bothWays}
-                                onChange={(event) => setEditingLink({ ...editingLink, bothWays: event.target.checked })}
-                              />
-                              <span>Both ways</span>
-                            </label>
-                          </>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="mari-chrome-control mari-chrome-control--small"
-                          onClick={() => void handleSaveEditedLink()}
-                        >
-                          <Check size="0.7rem" />
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="mari-chrome-control mari-chrome-control--small"
-                          onClick={() => setEditingLink(null)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
+                  );
+                })
+              }
             </CollapsibleSection>
           </div>
         )}
@@ -1419,7 +1458,8 @@ export function GraphInspector({
           {addTargetNode ? (
             <div className="flex flex-wrap items-center justify-between gap-1.5 rounded border border-[var(--border)] bg-[var(--background)]/40 px-2 py-1 text-[0.6875rem]">
               <span className="min-w-0 truncate text-[var(--muted-foreground)]">
-                {addImpliedMutual ? (
+                {/* Same precedence as handleAddExplicit: implied mutual, then Both ways, then Flip. */}
+                {addImpliedMutual || (addBothWays && canBidirectTarget) ? (
                   <>
                     <strong className="text-[var(--foreground)]">{activeNode.name}</strong> ↔ {addRelation} ↔{" "}
                     <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong>
@@ -1428,11 +1468,6 @@ export function GraphInspector({
                   <>
                     <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong> — {addRelation} →{" "}
                     <strong className="text-[var(--foreground)]">{activeNode.name}</strong>
-                  </>
-                ) : addBothWays && canBidirectTarget ? (
-                  <>
-                    <strong className="text-[var(--foreground)]">{activeNode.name}</strong> ↔ {addRelation} ↔{" "}
-                    <strong className="text-[var(--foreground)]">{addTargetNode.name}</strong>
                   </>
                 ) : (
                   <>
@@ -1457,7 +1492,10 @@ export function GraphInspector({
                     <input
                       type="checkbox"
                       checked={addBothWays}
-                      onChange={(event) => setAddBothWays(event.target.checked)}
+                      onChange={(event) => {
+                        setAddBothWays(event.target.checked);
+                        if (event.target.checked) setAddFlipped(false);
+                      }}
                     />
                     <span>Both ways</span>
                   </label>

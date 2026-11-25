@@ -329,8 +329,12 @@ function sendRouteError(reply: FastifyReply, error: unknown) {
   if (error instanceof CompendiumStoreError) {
     return reply.code(error.statusCode).send({ error: error.message });
   }
-  const message = error instanceof Error ? error.message : "Unexpected server error";
-  return reply.code(500).send({ error: message });
+  try {
+    getLorebookManagerRuntime().logger.error(error, "[lorebook-manager] Unexpected route error");
+  } catch {
+    // Runtime not available; nothing to log to.
+  }
+  return reply.code(500).send({ error: "Unexpected server error" });
 }
 
 export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
@@ -378,12 +382,14 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const query = request.query as { expectedRevision?: unknown } | undefined;
       const revRaw = query?.expectedRevision;
-      const expectedRevision = typeof revRaw === "string" && revRaw.trim() ? Number(revRaw) : undefined;
-      await deleteCompendium(
-        getLorebookManagerRuntime().persistence.documents,
-        id,
-        Number.isFinite(expectedRevision) ? expectedRevision : undefined,
-      );
+      let expectedRevision: number | undefined;
+      if (revRaw !== undefined && !(typeof revRaw === "string" && !revRaw.trim())) {
+        expectedRevision = typeof revRaw === "string" ? Number(revRaw) : Number.NaN;
+        if (!Number.isInteger(expectedRevision)) {
+          throw new CompendiumStoreError("expectedRevision must be an integer", 400);
+        }
+      }
+      await deleteCompendium(getLorebookManagerRuntime().persistence.documents, id, expectedRevision);
       return { deleted: true };
     } catch (error) {
       return sendRouteError(reply, error);
@@ -403,11 +409,12 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.put("/chats/:chatId/binding", async (request, reply) => {
     try {
       const { chatId } = request.params as { chatId: string };
-      const body = (request.body ?? {}) as { compendiumId?: string | null };
+      const body = (request.body ?? {}) as { compendiumId?: string | null; ifCompendiumId?: string | null };
       const binding = await setChatCompendiumBinding(
         getLorebookManagerRuntime().persistence.documents,
         chatId,
         body.compendiumId ?? null,
+        typeof body.ifCompendiumId === "string" ? body.ifCompendiumId : null,
       );
       return { binding };
     } catch (error) {

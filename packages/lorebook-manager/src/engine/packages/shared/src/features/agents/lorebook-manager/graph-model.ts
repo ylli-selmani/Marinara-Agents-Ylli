@@ -548,13 +548,22 @@ function seededRandom(seed: number) {
  * ponytail: O(n^2) repulsion per step on the main thread, comfortable up to ~500 visible nodes.
  * Move into a Web Worker or replace with a quadtree layout if lorebooks grow past that ceiling.
  */
+const LAYOUT_PAIR_BUDGET = 15_000_000;
+const LAYOUT_MIN_STEPS_LARGE = 25;
+
 export function layoutGraph(
   graph: LmBuiltGraph,
   seed = 1,
   iterations = LAYOUT_MAX_ITERATIONS,
   spread = 1,
 ): LayoutResult {
-  const steps = Math.max(0, Math.min(Math.floor(iterations), LAYOUT_MAX_ITERATIONS));
+  // Repulsion is O(n²) per step on the UI thread; cap the total pair work so a 1,000-node library lays out
+  // in well under a second (fewer, coarser steps) instead of freezing the tab. ~220 nodes still get every step.
+  const pairBudgetSteps = Math.max(
+    LAYOUT_MIN_STEPS_LARGE,
+    Math.floor(LAYOUT_PAIR_BUDGET / Math.max(1, graph.nodes.length ** 2)),
+  );
+  const steps = Math.max(0, Math.min(Math.floor(iterations), LAYOUT_MAX_ITERATIONS, pairBudgetSteps));
   const safeSpread = Number.isFinite(spread) ? Math.min(2.5, Math.max(0.5, spread)) : 1;
   const refs = graph.nodes.map((node) => node.ref).sort();
   const count = refs.length;

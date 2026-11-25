@@ -147,6 +147,9 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const MAX_REGEX_KEY_LENGTH = 300;
+const MAX_REGEX_TEXT_LENGTH = 20_000;
+
 function parseRegexLiteral(raw: string): { pattern: string; flags: string } | null {
   if (raw.length < 3 || !raw.startsWith("/")) return null;
   const match = raw.match(/^\/(.+)\/([gimsuy]*)$/u);
@@ -165,10 +168,14 @@ function tokenMatchesText(
   if (literal || options.useRegex) {
     try {
       const pattern = literal ? literal.pattern : token;
+      // Cheap ReDoS guard: skip oversized patterns and only scan a bounded prefix of the text.
+      if (pattern.length > MAX_REGEX_KEY_LENGTH) return false;
       let flags = literal ? literal.flags : "";
       if (!options.caseSensitive && !flags.includes("i")) flags += "i";
       if (!flags.includes("u")) flags += "u";
-      return new RegExp(pattern, flags).test(text);
+      return new RegExp(pattern, flags).test(
+        text.length > MAX_REGEX_TEXT_LENGTH ? text.slice(0, MAX_REGEX_TEXT_LENGTH) : text,
+      );
     } catch {
       return false;
     }
@@ -337,6 +344,8 @@ export function simulateLorebookRetrieval(
     }
   }
 
+  const disabledBookIds = new Set(payload.lorebooks.filter((book) => book.enabled === false).map((book) => book.id));
+
   const entriesByRef = new Map(scopedEntries.map((entry) => [entry.ref, entry]));
   const eligibleEntries: LmEntryNode[] = [];
   const eligibleSet = new Set<string>();
@@ -344,6 +353,10 @@ export function simulateLorebookRetrieval(
 
   for (const entry of scopedEntries) {
     const tokens = estimateEntryTokens(entry);
+    if (disabledBookIds.has(entry.lorebookId)) {
+      suppressed.push({ entry, tokens, reason: "disabled", detail: "Lorebook is disabled" });
+      continue;
+    }
     if (!entry.enabled) {
       suppressed.push({ entry, tokens, reason: "disabled", detail: "Entry is disabled" });
       continue;
@@ -605,9 +618,9 @@ export function simulateLorebookRetrieval(
   const rankedDirect = [...directCandidates.values()]
     .filter((item) => item.tier === "direct")
     .sort((a, b) => b.score - a.score || (a.entry.order ?? 100) - (b.entry.order ?? 100));
-  const rankedOneHop = [...oneHopByRef.values()]
-    .sort((a, b) => b.score - a.score || (a.entry.order ?? 100) - (b.entry.order ?? 100))
-    .slice(0, Math.max(0, input.maxOneHop));
+  const rankedOneHop = [...oneHopByRef.values()].sort(
+    (a, b) => b.score - a.score || (a.entry.order ?? 100) - (b.entry.order ?? 100),
+  );
 
   const orderedPool: LmRetrievalActivatedItem[] = [
     ...rankedConstants.map((item) => ({
@@ -640,8 +653,19 @@ export function simulateLorebookRetrieval(
   const usedByBook = new Map<string, number>();
   const activated: LmRetrievalActivatedItem[] = [];
   let totalTokens = 0;
+  let oneHopCount = 0;
+  const maxOneHop = Math.max(0, input.maxOneHop);
 
   for (const candidate of orderedPool) {
+    if (candidate.tier === "graph_1hop" && oneHopCount >= maxOneHop) {
+      suppressed.push({
+        entry: candidate.entry,
+        tokens: candidate.tokens,
+        reason: "over_budget",
+        detail: `One-hop limit reached (${maxOneHop} neighbours)`,
+      });
+      continue;
+    }
     if (totalTokens + candidate.tokens > budget) {
       suppressed.push({
         entry: candidate.entry,
@@ -665,6 +689,7 @@ export function simulateLorebookRetrieval(
     totalTokens += candidate.tokens;
     usedByBook.set(candidate.entry.lorebookId, currentBookUsed + candidate.tokens);
     activated.push(candidate);
+    if (candidate.tier === "graph_1hop") oneHopCount += 1;
   }
 
   return {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { Loader2, Save, Sparkles, Trash2, X } from "lucide-react";
@@ -71,6 +71,9 @@ export function CompendiumModal({
   const [lorebookIds, setLorebookIds] = useState<string[]>([]);
   const [characterIds, setCharacterIds] = useState<string[]>([]);
   const [personaIds, setPersonaIds] = useState<string[]>([]);
+  // Latest committed ids, read after the awaited cast scan so the "added N" counts match what the setters merge into.
+  const latestCastRef = useRef({ characterIds: [] as string[], personaIds: [] as string[] });
+  latestCastRef.current = { characterIds, personaIds };
   const [tokenBudget, setTokenBudget] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget);
   const [maxOneHop, setMaxOneHop] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop);
   const [maxTextHits, setMaxTextHits] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits);
@@ -154,12 +157,11 @@ export function CompendiumModal({
         ];
       }
       const linked = collectLinkedCastForLorebooks(lorebooks, lorebookIds, scanEntries);
-      const nextChars = addUniqueIds(characterIds, linked.characterIds);
-      const nextPersonas = addUniqueIds(personaIds, linked.personaIds);
-      const addedChars = nextChars.length - characterIds.length;
-      const addedPersonas = nextPersonas.length - personaIds.length;
-      setCharacterIds(nextChars);
-      setPersonaIds(nextPersonas);
+      const latest = latestCastRef.current;
+      const addedChars = addUniqueIds(latest.characterIds, linked.characterIds).length - latest.characterIds.length;
+      const addedPersonas = addUniqueIds(latest.personaIds, linked.personaIds).length - latest.personaIds.length;
+      setCharacterIds((prev) => addUniqueIds(prev, linked.characterIds));
+      setPersonaIds((prev) => addUniqueIds(prev, linked.personaIds));
       if (addedChars === 0 && addedPersonas === 0) {
         toast.info("No additional linked Character Cards or Personas found for those lorebooks.");
       } else {
@@ -393,7 +395,7 @@ export function CompendiumModal({
                 type="number"
                 min={100}
                 max={128000}
-                step={100}
+                step={1}
                 disabled={saving}
                 value={tokenBudget}
                 onChange={(event) => {
@@ -470,7 +472,7 @@ export function CompendiumModal({
                         type="number"
                         min={50}
                         max={128000}
-                        step={50}
+                        step={1}
                         disabled={saving}
                         value={overrideValue}
                         placeholder="Default"

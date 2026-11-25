@@ -14,6 +14,7 @@ import {
   layoutGraph,
   neighbourhood,
 } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/graph-model.js";
+import { simulateLorebookRetrieval } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
   LmGraphEdge,
   LmGraphNode,
@@ -391,6 +392,227 @@ const dist = (p: Map<string, { x: number; y: number }>, a: string, b: string) =>
 assert.ok(
   dist(layoutWide.positions, "lore:e1", "lore:e2") > dist(layoutA.positions, "lore:e1", "lore:e2"),
   "Higher spread factor must increase distance between connected nodes",
+);
+
+// ── Stage 1 retrieval simulation: keywords, selective, card inheritance, 1-hop, budgets ──
+const simNodes: LmGraphNode[] = [
+  {
+    nodeType: "character",
+    ref: "char:izuku",
+    id: "izuku",
+    name: "Izuku Midoriya",
+    description: "",
+    aliases: ["Deku"],
+    family: "character",
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:const",
+    id: "const",
+    lorebookId: "b-sim",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "World Rules",
+    description: "",
+    content: "Quirks are superpowers.",
+    keys: [],
+    secondaryKeys: [],
+    tag: "lore",
+    family: "lore",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: true,
+    locked: false,
+    order: 10,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: {},
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:deku-lore",
+    id: "deku-lore",
+    lorebookId: "b-sim",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "Izuku Entry",
+    description: "",
+    content: "Deku summary entry.",
+    keys: ["Deku", "Izuku"],
+    secondaryKeys: [],
+    tag: "character",
+    family: "character",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "exclude",
+    characterFilterIds: ["izuku"],
+    relationships: {
+      "char:izuku": "represents",
+      allmight: "ally_of",
+    },
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:allmight",
+    id: "allmight",
+    lorebookId: "b-sim",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "All Might",
+    description: "",
+    content: "Symbol of Peace.",
+    keys: ["All Might"],
+    secondaryKeys: [],
+    tag: "character",
+    family: "character",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: {},
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:class1a",
+    id: "class1a",
+    lorebookId: "b-sim",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "Class 1-A",
+    description: "",
+    content: "Hero course class.",
+    keys: ["Class 1-A"],
+    secondaryKeys: [],
+    tag: "faction",
+    family: "faction",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: {},
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:unrelated-student",
+    id: "unrelated-student",
+    lorebookId: "b-sim",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "Minoru Mineta",
+    description: "",
+    content: "Grape juice quirk.",
+    keys: ["Mineta"],
+    secondaryKeys: [],
+    tag: "character",
+    family: "character",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: { class1a: "member_of" },
+  },
+  {
+    nodeType: "lore",
+    ref: "lore:shie-selective",
+    id: "shie-selective",
+    lorebookId: "b-sim",
+    lorebookName: "MHA",
+    lorebookCategory: "world",
+    name: "Overhaul Raid",
+    description: "",
+    content: "Hero operation.",
+    keys: ["Overhaul"],
+    secondaryKeys: ["Villain"],
+    selective: true,
+    selectiveLogic: "notAny",
+    tag: "quest",
+    family: "quest",
+    secondaryFamilies: [],
+    inferredFamily: null,
+    enabled: true,
+    constant: false,
+    locked: false,
+    characterFilterMode: "any",
+    characterFilterIds: [],
+    relationships: {},
+  },
+];
+
+const simPayload: LmGraphPayload = {
+  lorebooks: [
+    {
+      id: "b-sim",
+      name: "MHA",
+      description: "",
+      category: "world",
+      enabled: true,
+      entryCount: 6,
+      tokenBudget: 200,
+      characterIds: [],
+      personaIds: [],
+      loaded: true,
+    },
+  ],
+  nodes: simNodes,
+  explicitEdges: [],
+  mentionEdges: [],
+  danglingRelationshipCount: 0,
+};
+
+const simRes = simulateLorebookRetrieval(simPayload, {
+  queryText: "We meet Class 1-A before the Overhaul mission.",
+  activeCharacterIds: ["izuku"],
+  tokenBudget: 2000,
+  maxOneHop: 6,
+});
+
+assert.ok(
+  simRes.activated.some((a) => a.entry.ref === "lore:const"),
+  "Constant entry must activate",
+);
+assert.ok(
+  simRes.activated.some((a) => a.entry.ref === "lore:class1a"),
+  "Keyword Class 1-A must activate",
+);
+assert.ok(
+  simRes.activated.some((a) => a.entry.ref === "lore:shie-selective"),
+  "Selective notAny triggers when Overhaul present and Villain absent",
+);
+assert.ok(
+  simRes.suppressed.some((s) => s.entry.ref === "lore:deku-lore" && s.reason === "excluded_by_card"),
+  "Izuku Entry must be suppressed while Izuku card is active",
+);
+assert.ok(
+  simRes.activated.some((a) => a.entry.ref === "lore:allmight" && a.reasons.some((r) => r.kind === "card_inherited")),
+  "Active Izuku card must inherit explicit 1-hop links from suppressed represents entry",
+);
+assert.ok(
+  !simRes.activated.some((a) => a.entry.ref === "lore:unrelated-student"),
+  "Incoming member_of links from Class 1-A must not flood unrelated students",
+);
+
+const tightBudgetRes = simulateLorebookRetrieval(simPayload, {
+  queryText: "We meet Class 1-A before the Overhaul mission.",
+  activeCharacterIds: ["izuku"],
+  tokenBudget: 15,
+  maxOneHop: 6,
+});
+assert.ok(
+  tightBudgetRes.suppressed.some((s) => s.reason === "over_budget"),
+  "Entries exceeding token budget must move to suppressed over_budget",
 );
 
 console.log("lorebook-manager-graph.regression: all assertions passed");

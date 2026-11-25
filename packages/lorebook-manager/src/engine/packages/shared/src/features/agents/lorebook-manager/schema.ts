@@ -20,6 +20,7 @@ export interface LmLorebookSummary {
   category: string;
   enabled: boolean;
   entryCount: number;
+  tokenBudget?: number | null;
   characterIds: string[];
   personaIds: string[];
   loaded: boolean;
@@ -44,6 +45,12 @@ export interface LmEntryNode {
   enabled: boolean;
   constant: boolean;
   locked: boolean;
+  selective?: boolean;
+  selectiveLogic?: "andAny" | "andAll" | "notAny" | "notAll";
+  useRegex?: boolean;
+  matchWholeWords?: boolean;
+  caseSensitive?: boolean;
+  order?: number;
   characterFilterMode: LorebookFilterMode;
   characterFilterIds: string[];
   relationships: Record<string, string>;
@@ -108,4 +115,51 @@ export interface LmGraphFilters {
 export interface LmBuiltGraph {
   nodes: Array<LmGraphNode & { degree: number }>;
   edges: LmGraphEdge[];
+}
+
+export type LmRetrievalReasonKind = "constant" | "keyword" | "bm25" | "location" | "graph_1hop" | "card_inherited";
+
+export interface LmRetrievalReason {
+  kind: LmRetrievalReasonKind;
+  detail: string;
+  score: number;
+  fromRef?: string;
+  relation?: string;
+}
+
+export interface LmRetrievalActivatedItem {
+  entry: LmEntryNode;
+  tokens: number;
+  score: number;
+  tier: "constant" | "direct" | "graph_1hop";
+  reasons: LmRetrievalReason[];
+  viaRefs: string[];
+}
+
+export type LmRetrievalSuppressedReason = "disabled" | "excluded_by_card" | "not_included_by_card" | "over_budget";
+
+export interface LmRetrievalSuppressedItem {
+  entry: LmEntryNode;
+  tokens: number;
+  reason: LmRetrievalSuppressedReason;
+  detail: string;
+}
+
+export interface LmRetrievalInput {
+  queryText: string;
+  activeCharacterIds: string[];
+  activePersonaId?: string | null;
+  activeLocationText?: string;
+  tokenBudget: number;
+  maxOneHop: number;
+  respectBookBudgets?: boolean;
+}
+
+export interface LmRetrievalResult {
+  activated: LmRetrievalActivatedItem[];
+  suppressed: LmRetrievalSuppressedItem[];
+  totalTokens: number;
+  tokenBudget: number;
+  durationMs: number;
+  cardInheritedSeedRefs: string[];
 }

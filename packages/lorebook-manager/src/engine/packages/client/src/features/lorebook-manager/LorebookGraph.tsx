@@ -49,6 +49,7 @@ import {
 import type { LmEntryPatch } from "./api";
 import { EntryReaderModal } from "./EntryReaderModal";
 import { GraphInspector } from "./GraphInspector";
+import type { SimGraphHighlight } from "./SimulatePanel";
 
 const FOCUS_HOPS = 2;
 const MIN_ZOOM = 0.12;
@@ -319,6 +320,8 @@ type GraphNodeViewProps = {
   lit: boolean;
   selected: boolean;
   pinned: boolean;
+  simRole?: "direct" | "1hop" | "suppressed" | "seed";
+  dimmedBySim?: boolean;
   showLabel: boolean;
   actions: NodeActions;
 };
@@ -330,6 +333,8 @@ const GraphNodeView = memo(function GraphNodeView({
   lit,
   selected,
   pinned,
+  simRole,
+  dimmedBySim,
   showLabel,
   actions,
 }: GraphNodeViewProps) {
@@ -351,7 +356,7 @@ const GraphNodeView = memo(function GraphNodeView({
       role="button"
       tabIndex={0}
       aria-label={`${node.name} (${node.nodeType === "lore" ? node.family : node.nodeType})`}
-      opacity={disabled ? 0.5 : 1}
+      opacity={disabled ? 0.5 : dimmedBySim ? 0.22 : 1}
       style={{ cursor: "grab" }}
       data-lm-graph-node={node.ref}
       data-lm-graph-near={near || undefined}
@@ -389,6 +394,25 @@ const GraphNodeView = memo(function GraphNodeView({
             vectorEffect="non-scaling-stroke"
           />
         )
+      ) : null}
+
+      {simRole ? (
+        <circle
+          r={radius + 6}
+          fill="none"
+          stroke={
+            simRole === "direct"
+              ? "#22c55e"
+              : simRole === "1hop"
+                ? "#a855f7"
+                : simRole === "suppressed"
+                  ? "#f43f5e"
+                  : "#06b6d4"
+          }
+          strokeWidth={2}
+          strokeDasharray={simRole === "suppressed" || simRole === "seed" ? "3 2" : undefined}
+          vectorEffect="non-scaling-stroke"
+        />
       ) : null}
 
       {secondaryColour ? (
@@ -498,6 +522,9 @@ export interface LorebookGraphProps {
   search: string;
   selectedNodeRef: string | null;
   onSelectNodeRef: (ref: string | null) => void;
+  simHighlight?: SimGraphHighlight | null;
+  onClearSimHighlight?: () => void;
+  onBackToSimulate?: () => void;
   savingRef: string | null;
   onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<void>;
   onBatchSaveRelationships: (
@@ -517,6 +544,9 @@ export function LorebookGraph({
   search,
   selectedNodeRef,
   onSelectNodeRef,
+  simHighlight,
+  onClearSimHighlight,
+  onBackToSimulate,
   savingRef,
   onSaveRelationships,
   onBatchSaveRelationships,
@@ -924,7 +954,18 @@ export function LorebookGraph({
         const gapFrom = (nodeRadius(fromNode) + 2) * edgeScale;
         const gapTo = (nodeRadius(toNode) + 2) * edgeScale;
         const hasRoom = length > gapFrom + gapTo;
-        const dimmed = hoverRef && !(edge.sourceRef === hoverRef || edge.targetRef === hoverRef);
+        const inSim =
+          simHighlight &&
+          !hoverRef &&
+          (simHighlight.directRefs.has(edge.sourceRef) ||
+            simHighlight.oneHopRefs.has(edge.sourceRef) ||
+            simHighlight.seedRefs.has(edge.sourceRef)) &&
+          (simHighlight.directRefs.has(edge.targetRef) ||
+            simHighlight.oneHopRefs.has(edge.targetRef) ||
+            simHighlight.seedRefs.has(edge.targetRef));
+        const dimmed = hoverRef
+          ? !(edge.sourceRef === hoverRef || edge.targetRef === hoverRef)
+          : Boolean(simHighlight && !inSim);
 
         if (edge.kind === "book_link") {
           return (
@@ -1043,7 +1084,7 @@ export function LorebookGraph({
           </line>
         );
       }),
-    [shown.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale],
+    [shown.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale, simHighlight],
   );
 
   const nodeLayer = useMemo(
@@ -1052,6 +1093,18 @@ export function LorebookGraph({
         if (!effectivePositions.has(node.ref)) return null;
         const lit = activeNear?.has(node.ref) ?? false;
         const selected = node.ref === selectedNodeRef;
+        const simRole: GraphNodeViewProps["simRole"] = simHighlight
+          ? simHighlight.directRefs.has(node.ref)
+            ? "direct"
+            : simHighlight.oneHopRefs.has(node.ref)
+              ? "1hop"
+              : simHighlight.suppressedRefs.has(node.ref)
+                ? "suppressed"
+                : simHighlight.seedRefs.has(node.ref)
+                  ? "seed"
+                  : undefined
+          : undefined;
+        const dimmedBySim = Boolean(simHighlight && !hoverRef && !simRole);
         return (
           <GraphNodeView
             key={node.ref}
@@ -1061,7 +1114,11 @@ export function LorebookGraph({
             lit={lit}
             selected={selected}
             pinned={node.ref in pinnedPositions}
-            showLabel={labelEveryNode || node.ref === focusRef || selected || lit || node.nodeType !== "lore"}
+            simRole={simRole}
+            dimmedBySim={dimmedBySim}
+            showLabel={
+              labelEveryNode || Boolean(simRole) || node.ref === focusRef || selected || lit || node.nodeType !== "lore"
+            }
             actions={nodeActions}
           />
         );
@@ -1073,6 +1130,8 @@ export function LorebookGraph({
       activeNear,
       pointNear,
       selectedNodeRef,
+      simHighlight,
+      hoverRef,
       focusRef,
       labelEveryNode,
       nodeActions,
@@ -1247,20 +1306,49 @@ export function LorebookGraph({
             className="relative min-w-0 flex-1 overflow-hidden select-none"
             data-lm-graph-canvas
             data-lm-graph-pointing={hoverRef ? "1" : undefined}
-            data-lm-graph-has-banner={!whole && focusNodeName ? "1" : undefined}
+            data-lm-graph-has-banner={(!whole && focusNodeName) || simHighlight ? "1" : undefined}
           >
-            {!whole && focusNodeName ? (
+            {(!whole && focusNodeName) || simHighlight ? (
               <div data-lm-graph-banner>
-                <span>
-                  Focused on <strong>{focusNodeName}</strong>
-                </span>
-                <button
-                  type="button"
-                  className="mari-chrome-control mari-chrome-control--small"
-                  onClick={() => setWhole(true)}
-                >
-                  Show all
-                </button>
+                {!whole && focusNodeName ? (
+                  <>
+                    <span>
+                      Focused on <strong>{focusNodeName}</strong>
+                    </span>
+                    <button
+                      type="button"
+                      className="mari-chrome-control mari-chrome-control--small"
+                      onClick={() => setWhole(true)}
+                    >
+                      Show all
+                    </button>
+                  </>
+                ) : null}
+                {simHighlight ? (
+                  <>
+                    <span>
+                      Sim: <strong>{simHighlight.summary}</strong>
+                    </span>
+                    {onBackToSimulate ? (
+                      <button
+                        type="button"
+                        className="mari-chrome-control mari-chrome-control--small"
+                        onClick={onBackToSimulate}
+                      >
+                        Simulate
+                      </button>
+                    ) : null}
+                    {onClearSimHighlight ? (
+                      <button
+                        type="button"
+                        className="mari-chrome-control mari-chrome-control--small"
+                        onClick={onClearSimHighlight}
+                      >
+                        Clear highlight
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
               </div>
             ) : null}
 

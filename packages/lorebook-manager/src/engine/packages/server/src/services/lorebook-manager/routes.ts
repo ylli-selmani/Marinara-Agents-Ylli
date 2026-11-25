@@ -65,6 +65,10 @@ function parseFilterMode(value: unknown): LorebookFilterMode {
   return value === "include" || value === "exclude" ? value : "any";
 }
 
+function parseSelectiveLogic(value: unknown): "andAny" | "andAll" | "notAny" | "notAll" {
+  return value === "andAll" || value === "notAny" || value === "notAll" ? value : "andAny";
+}
+
 function uniqueNonEmpty(single: unknown, list: unknown): string[] {
   const result = new Set<string>();
   const one = asString(single).trim();
@@ -173,6 +177,7 @@ export async function buildLorebookManagerGraphPayload(
       category: bookCategory,
       enabled: bookData.enabled !== false,
       entryCount: entries.length,
+      tokenBudget: typeof bookData.tokenBudget === "number" && bookData.tokenBudget > 0 ? bookData.tokenBudget : null,
       characterIds: uniqueNonEmpty(bookData.characterId, bookData.characterIds),
       personaIds: uniqueNonEmpty(bookData.personaId, bookData.personaIds),
       loaded,
@@ -205,6 +210,12 @@ export async function buildLorebookManagerGraphPayload(
         enabled: entry.enabled !== false,
         constant: entry.constant === true,
         locked: entry.locked === true,
+        selective: entry.selective === true,
+        selectiveLogic: parseSelectiveLogic(entry.selectiveLogic),
+        useRegex: entry.useRegex === true,
+        matchWholeWords: entry.matchWholeWords !== false,
+        caseSensitive: entry.caseSensitive === true,
+        order: typeof entry.order === "number" ? entry.order : 100,
         characterFilterMode: parseFilterMode(entry.characterFilterMode),
         characterFilterIds: parseStringArray(entry.characterFilterIds),
         relationships: parseRelationships(entry.relationships),

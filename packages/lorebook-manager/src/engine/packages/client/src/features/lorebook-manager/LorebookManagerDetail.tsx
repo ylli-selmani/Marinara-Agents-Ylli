@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Focus, List, Maximize2, Minimize2, Network, RefreshCw, Search } from "lucide-react";
+import { FlaskConical, Focus, List, Maximize2, Minimize2, Network, RefreshCw, Search } from "lucide-react";
 import { parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
   buildLorebookGraph,
@@ -11,6 +11,7 @@ import type {
   LmEntryNode,
   LmGraphEdge,
   LmGraphPayload,
+  LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
   fetchLorebookManagerGraph,
@@ -20,6 +21,7 @@ import {
   type LmEntryPatch,
 } from "./api";
 import { FAMILY_META, LorebookGraph } from "./LorebookGraph";
+import { SimulatePanel, type SimGraphHighlight } from "./SimulatePanel";
 import type { CapabilityProps } from "./types";
 
 const MANAGED_BOOKS_STORAGE_KEY = "lm:managed-books:v1";
@@ -116,12 +118,22 @@ function writeStoredManagedBooks(ids: readonly string[]): void {
 
 export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const queryClient = useQueryClient();
-  const [view, setView] = useState<"graph" | "list">("graph");
+  const [view, setView] = useState<"graph" | "list" | "simulate">("graph");
   const [search, setSearch] = useState("");
   const [managedLorebookIds, setManagedLorebookIds] = useState<string[] | null>(() => readStoredManagedBooks());
   const [collapsedLorebookIds, setCollapsedLorebookIds] = useState<Set<string>>(() => new Set());
   const [selectedNodeRef, setSelectedNodeRef] = useState<string | null>(null);
   const [savingRef, setSavingRef] = useState<string | null>(null);
+  const [simConfig, setSimConfig] = useState<LmRetrievalInput>({
+    queryText: "",
+    activeCharacterIds: [],
+    activePersonaId: null,
+    activeLocationText: "",
+    tokenBudget: 2000,
+    maxOneHop: 6,
+    respectBookBudgets: true,
+  });
+  const [simHighlight, setSimHighlight] = useState<SimGraphHighlight | null>(null);
 
   const requestedIds = managedLorebookIds ?? [];
   const scopeKey = managedLorebookIds === null ? "__init__" : [...requestedIds].sort().join(",") || "__none__";
@@ -348,6 +360,15 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
             <List aria-hidden="true" size="0.875rem" />
             List
           </button>
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small"
+            aria-pressed={view === "simulate"}
+            onClick={() => setView("simulate")}
+          >
+            <FlaskConical aria-hidden="true" size="0.875rem" />
+            Simulate
+          </button>
         </div>
       </div>
 
@@ -430,10 +451,28 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
             search={search}
             selectedNodeRef={selectedNodeRef}
             onSelectNodeRef={setSelectedNodeRef}
+            simHighlight={simHighlight}
+            onClearSimHighlight={() => setSimHighlight(null)}
+            onBackToSimulate={() => setView("simulate")}
             savingRef={savingRef}
             onSaveRelationships={handleSaveRelationships}
             onBatchSaveRelationships={handleBatchSaveRelationships}
             onUpdateEntry={handleUpdateEntry}
+          />
+        ) : view === "simulate" ? (
+          <SimulatePanel
+            payload={payload}
+            managedLorebookIds={managedSet}
+            config={simConfig}
+            onChangeConfig={setSimConfig}
+            onHighlightOnGraph={(highlight) => {
+              setSimHighlight(highlight);
+              setView("graph");
+            }}
+            onInspectNode={(ref) => {
+              setSelectedNodeRef(ref);
+              setView("graph");
+            }}
           />
         ) : (
           <div className="flex flex-col divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">

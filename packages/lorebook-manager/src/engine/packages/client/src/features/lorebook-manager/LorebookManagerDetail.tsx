@@ -416,6 +416,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   }, [payload]);
 
   const openCompendiumWorkbench = (compendium: LmCompendium | null) => {
+    // Opened by hand: it stays open when the chat changes (only binding-opened ones close).
+    autoOpenedCompendiumIdRef.current = null;
     setSelectedCompendiumId(compendium?.id ?? null);
     setCollapsedLorebookIds(new Set());
     setSelectedNodeRef(null);

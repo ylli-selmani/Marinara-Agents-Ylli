@@ -746,6 +746,30 @@ assert.ok(
   "One-hop cap must hold under a tight token budget",
 );
 
+// Backfill: inflate the top-ranked neighbour past the budget; the next neighbour must take the single slot.
+{
+  const ranked = oneHopFull.activated.filter((a) => a.tier === "graph_1hop");
+  const top = ranked[0]!;
+  const second = ranked[1]!;
+  const inflated: LmGraphPayload = {
+    ...oneHopPayload,
+    nodes: oneHopPayload.nodes.map((n) =>
+      n.ref === top.entry.ref && n.nodeType === "lore" ? { ...n, content: n.content + " lore".repeat(4000) } : n,
+    ),
+  };
+  const nonHopTokens = oneHopFull.activated
+    .filter((a) => a.tier !== "graph_1hop")
+    .reduce((sum, a) => sum + a.tokens, 0);
+  const backfill = simulateLorebookRetrieval(inflated, {
+    ...simQuery,
+    maxOneHop: 1,
+    tokenBudget: nonHopTokens + second.tokens + 5,
+  });
+  const backfillHops = backfill.activated.filter((a) => a.tier === "graph_1hop");
+  assert.equal(backfillHops.length, 1, "One slot must still be filled when the top neighbour is over budget");
+  assert.notEqual(backfillHops[0]!.entry.ref, top.entry.ref, "The over-budget top neighbour must not activate");
+}
+
 const disabledBookRes = simulateLorebookRetrieval(
   { ...simPayload, lorebooks: simPayload.lorebooks.map((b) => ({ ...b, enabled: false })) },
   { ...simQuery, maxOneHop: 6 },

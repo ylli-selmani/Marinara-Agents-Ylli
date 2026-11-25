@@ -204,7 +204,12 @@ export async function deleteCompendium(
 
   // Clear every chat binding that still points at the deleted Compendium. Best effort per binding:
   // getChatCompendiumBinding also treats a dangling id as unbound, so a lost race here is harmless.
-  const bindingDocs = await documents.list(LOREBOOK_MANAGER_PACKAGE_ID, CHAT_BINDING_DOC_KIND);
+  let bindingDocs: Awaited<ReturnType<typeof documents.list>> = [];
+  try {
+    bindingDocs = await documents.list(LOREBOOK_MANAGER_PACKAGE_ID, CHAT_BINDING_DOC_KIND);
+  } catch {
+    // The delete already succeeded; the dangling-id guard covers bindings we couldn't list.
+  }
   for (const bindingDoc of bindingDocs) {
     if (bindingDoc.kind !== CHAT_BINDING_DOC_KIND) continue;
     const bindingData = asRecord(bindingDoc.data);
@@ -258,16 +263,6 @@ export async function setChatCompendiumBinding(
   const cleanChatId = chatId.trim();
   if (!cleanChatId) throw new CompendiumStoreError("Chat id is required", 400);
 
-  // Conditional clear: only unbind when the chat is still bound to the Compendium the caller saw.
-  const cleanIfId = typeof ifCompendiumId === "string" && ifCompendiumId.trim() ? ifCompendiumId.trim() : null;
-  if (cleanIfId && !(typeof compendiumId === "string" && compendiumId.trim())) {
-    const current = asRecord(
-      (await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, chatBindingDocId(cleanChatId)))?.data,
-    );
-    const currentId = typeof current.compendiumId === "string" ? current.compendiumId.trim() : null;
-    if (currentId !== cleanIfId) return getChatCompendiumBinding(documents, cleanChatId);
-  }
-
   const cleanCompendiumId = typeof compendiumId === "string" && compendiumId.trim() ? compendiumId.trim() : null;
   if (cleanCompendiumId) {
     const target = await getCompendium(documents, cleanCompendiumId);
@@ -277,6 +272,16 @@ export async function setChatCompendiumBinding(
   const docId = chatBindingDocId(cleanChatId);
   const now = new Date().toISOString();
   const existing = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, docId);
+
+  // Conditional clear: only unbind when the chat is still bound to the Compendium the caller saw. Checked on the
+  // same read whose revision guards the update below, so a rebind in between surfaces as a 409, not a lost bind.
+  const cleanIfId = typeof ifCompendiumId === "string" && ifCompendiumId.trim() ? ifCompendiumId.trim() : null;
+  if (cleanIfId && !cleanCompendiumId) {
+    const current = asRecord(existing?.data);
+    const currentId = typeof current.compendiumId === "string" ? current.compendiumId.trim() : null;
+    if (currentId !== cleanIfId) return getChatCompendiumBinding(documents, cleanChatId);
+  }
+
   if (!existing) {
     const created = await documents.create({
       id: docId,

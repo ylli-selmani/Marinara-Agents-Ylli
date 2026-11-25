@@ -1,50 +1,210 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Focus, List, Network, RefreshCw, Search } from "lucide-react";
-import { buildLorebookGraph } from "../../../../shared/src/features/agents/lorebook-manager/graph-model.js";
-import type { LmEntryNode } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { fetchLorebookManagerGraph, lmQueryKeys, patchEntryRelationships } from "./api";
+import { Focus, List, Maximize2, Minimize2, Network, RefreshCw, Search } from "lucide-react";
+import { parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
+import {
+  buildLorebookGraph,
+  classifyEntryWithFallback,
+} from "../../../../shared/src/features/agents/lorebook-manager/graph-model.js";
+import type {
+  LmEntryNode,
+  LmGraphEdge,
+  LmGraphPayload,
+} from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import {
+  fetchLorebookManagerGraph,
+  lmQueryKeys,
+  patchEntryRelationships,
+  patchLorebookEntry,
+  type LmEntryPatch,
+} from "./api";
 import { FAMILY_META, LorebookGraph } from "./LorebookGraph";
 import type { CapabilityProps } from "./types";
+
+const MANAGED_BOOKS_STORAGE_KEY = "lm:managed-books:v1";
+const AUTO_SELECT_ENTRY_CEILING = 400;
+
+function pairKey(a: string, b: string): string {
+  return a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+}
+
+function applyOptimisticEntryUpdate(
+  payload: LmGraphPayload | undefined,
+  entryId: string,
+  patch: LmEntryPatch,
+): LmGraphPayload | undefined {
+  if (!payload) return payload;
+  let changed = false;
+  const nodes = payload.nodes.map((node) => {
+    if (node.nodeType !== "lore" || node.id !== entryId) return node;
+    changed = true;
+    const nextTag = patch.tag !== undefined ? patch.tag.trim() : node.tag;
+    const classification = classifyEntryWithFallback(nextTag, node.lorebookCategory);
+    return {
+      ...node,
+      name: patch.name !== undefined ? patch.name : node.name,
+      description: patch.description !== undefined ? patch.description : node.description,
+      content: patch.content !== undefined ? patch.content : node.content,
+      keys: patch.keys !== undefined ? patch.keys : node.keys,
+      secondaryKeys: patch.secondaryKeys !== undefined ? patch.secondaryKeys : node.secondaryKeys,
+      tag: nextTag,
+      family: classification.family,
+      secondaryFamilies: classification.secondaryFamilies,
+      inferredFamily: classification.inferredFamily,
+      enabled: patch.enabled !== undefined ? patch.enabled : node.enabled,
+      constant: patch.constant !== undefined ? patch.constant : node.constant,
+      relationships: patch.relationships !== undefined ? patch.relationships : node.relationships,
+    };
+  });
+  return changed ? { ...payload, nodes } : payload;
+}
+
+function applyOptimisticRelationships(
+  payload: LmGraphPayload | undefined,
+  updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
+): LmGraphPayload | undefined {
+  if (!payload || updates.length === 0) return payload;
+  const relByRef = new Map(updates.map((item) => [item.entry.ref, item.relationships]));
+  const nodes = payload.nodes.map((node) => {
+    if (node.nodeType !== "lore") return node;
+    const nextRels = relByRef.get(node.ref);
+    return nextRels ? { ...node, relationships: nextRels } : node;
+  });
+
+  const nodeRefs = new Set(nodes.map((node) => node.ref));
+  const explicitEdges: LmGraphEdge[] = payload.explicitEdges.filter((edge) => !relByRef.has(edge.sourceRef));
+  for (const [sourceRef, rels] of relByRef) {
+    for (const [rawTarget, relation] of Object.entries(rels)) {
+      const parsed = parseEntityRef(rawTarget);
+      if (!parsed || !nodeRefs.has(parsed.ref)) continue;
+      explicitEdges.push({ kind: "explicit", sourceRef, targetRef: parsed.ref, relation });
+    }
+  }
+
+  const explicitPairs = new Set(explicitEdges.map((edge) => pairKey(edge.sourceRef, edge.targetRef)));
+  const mentionEdges = payload.mentionEdges.filter(
+    (edge) => !explicitPairs.has(pairKey(edge.sourceRef, edge.targetRef)),
+  );
+
+  return { ...payload, nodes, explicitEdges, mentionEdges };
+}
+
+function readStoredManagedBooks(): string[] | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(MANAGED_BOOKS_STORAGE_KEY);
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredManagedBooks(ids: readonly string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MANAGED_BOOKS_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // Ignore storage quota / private-browsing errors.
+  }
+}
 
 export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const queryClient = useQueryClient();
   const [view, setView] = useState<"graph" | "list">("graph");
   const [search, setSearch] = useState("");
-  const [selectedLorebookIds, setSelectedLorebookIds] = useState<Set<string>>(() => new Set());
+  const [managedLorebookIds, setManagedLorebookIds] = useState<string[] | null>(() => readStoredManagedBooks());
+  const [collapsedLorebookIds, setCollapsedLorebookIds] = useState<Set<string>>(() => new Set());
   const [selectedNodeRef, setSelectedNodeRef] = useState<string | null>(null);
   const [savingRef, setSavingRef] = useState<string | null>(null);
 
+  const requestedIds = managedLorebookIds ?? [];
+  const scopeKey = managedLorebookIds === null ? "__init__" : [...requestedIds].sort().join(",") || "__none__";
+
   const graphQuery = useQuery({
-    queryKey: lmQueryKeys.graph,
-    queryFn: fetchLorebookManagerGraph,
+    queryKey: lmQueryKeys.graph(scopeKey),
+    queryFn: () => fetchLorebookManagerGraph(requestedIds),
   });
 
   const payload = graphQuery.data;
 
-  const listNodes = useMemo(() => {
-    if (!payload) return [];
-    return buildLorebookGraph(payload, {
-      lorebookIds: selectedLorebookIds,
-      search,
-    }).nodes.sort((a, b) => a.name.localeCompare(b.name));
-  }, [payload, selectedLorebookIds, search]);
+  // On first visit (no saved selection yet), inspect library size from the metadata-only probe:
+  // auto-load small libraries (<= 400 entries or single book), otherwise keep opt-in empty.
+  useEffect(() => {
+    if (managedLorebookIds !== null || !payload) return;
+    const totalEntries = payload.lorebooks.reduce((sum, book) => sum + book.entryCount, 0);
+    const initial =
+      totalEntries <= AUTO_SELECT_ENTRY_CEILING || payload.lorebooks.length <= 1
+        ? payload.lorebooks.map((book) => book.id)
+        : [];
+    writeStoredManagedBooks(initial);
+    setManagedLorebookIds(initial);
+  }, [managedLorebookIds, payload]);
 
-  const toggleLorebook = (lorebookId: string) => {
-    setSelectedLorebookIds((current) => {
+  const managedSet = useMemo(() => new Set(managedLorebookIds ?? []), [managedLorebookIds]);
+
+  const updateManagedBooks = (nextIds: string[]) => {
+    const deduped = [...new Set(nextIds)];
+    writeStoredManagedBooks(deduped);
+    setManagedLorebookIds(deduped);
+  };
+
+  const toggleManagedBook = (lorebookId: string) => {
+    const current = managedLorebookIds ?? [];
+    if (managedSet.has(lorebookId)) {
+      updateManagedBooks(current.filter((id) => id !== lorebookId));
+      setCollapsedLorebookIds((prev) => {
+        if (!prev.has(lorebookId)) return prev;
+        const next = new Set(prev);
+        next.delete(lorebookId);
+        return next;
+      });
+    } else {
+      updateManagedBooks([...current, lorebookId]);
+    }
+  };
+
+  const toggleCollapseLorebook = (lorebookId: string) => {
+    setCollapsedLorebookIds((current) => {
       const next = new Set(current);
       if (!next.delete(lorebookId)) next.add(lorebookId);
       return next;
     });
   };
 
-  const handleSaveRelationships = async (entry: LmEntryNode, nextRelationships: Record<string, string>) => {
-    setSavingRef(entry.ref);
+  const listNodes = useMemo(() => {
+    if (!payload) return [];
+    return buildLorebookGraph(payload, {
+      lorebookIds: managedSet,
+      collapsedLorebookIds,
+      search,
+    }).nodes.sort((a, b) => a.name.localeCompare(b.name));
+  }, [payload, managedSet, collapsedLorebookIds, search]);
+
+  const handleBatchSaveRelationships = async (
+    updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
+  ) => {
+    if (updates.length === 0) return;
+    const hadRemoved = updates.some(({ entry, relationships }) =>
+      Object.keys(entry.relationships).some((key) => !(key in relationships)),
+    );
+    setSavingRef(updates[0]!.entry.ref);
     try {
-      await patchEntryRelationships(entry.lorebookId, entry.id, nextRelationships);
-      await queryClient.invalidateQueries({ queryKey: lmQueryKeys.root });
-      toast.success(`Updated links for ${entry.name}`);
+      await Promise.all(
+        updates.map(({ entry, relationships }) => patchEntryRelationships(entry.lorebookId, entry.id, relationships)),
+      );
+      queryClient.setQueriesData<LmGraphPayload>({ queryKey: lmQueryKeys.root }, (current) =>
+        applyOptimisticRelationships(current, updates),
+      );
+      if (hadRemoved) {
+        void queryClient.invalidateQueries({ queryKey: lmQueryKeys.root });
+      }
+      void props.onLorebooksChanged?.();
+      toast.success(
+        updates.length === 1 ? `Updated links for ${updates[0]!.entry.name}` : "Updated bidirectional link",
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save lorebook links");
     } finally {
@@ -52,8 +212,39 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     }
   };
 
+  const handleSaveRelationships = async (entry: LmEntryNode, nextRelationships: Record<string, string>) => {
+    await handleBatchSaveRelationships([{ entry, relationships: nextRelationships }]);
+  };
+
+  const handleUpdateEntry = async (entry: LmEntryNode, patch: LmEntryPatch) => {
+    const needsMentionRescan =
+      patch.name !== undefined ||
+      patch.keys !== undefined ||
+      patch.content !== undefined ||
+      patch.description !== undefined;
+    setSavingRef(entry.ref);
+    try {
+      await patchLorebookEntry(entry.lorebookId, entry.id, patch);
+      queryClient.setQueriesData<LmGraphPayload>({ queryKey: lmQueryKeys.root }, (current) =>
+        applyOptimisticEntryUpdate(current, entry.id, patch),
+      );
+      if (needsMentionRescan) {
+        void queryClient.invalidateQueries({ queryKey: lmQueryKeys.root });
+      }
+      void props.onLorebooksChanged?.();
+      toast.success(`Saved ${patch.name ?? entry.name}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save lorebook entry");
+      throw error;
+    } finally {
+      setSavingRef(null);
+    }
+  };
+
+  const totalLibraryEntries = payload?.lorebooks.reduce((sum, book) => sum + book.entryCount, 0) ?? 0;
+
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 p-4">
+    <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 p-4">
       {!props.engineHeader ? (
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -121,30 +312,61 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
 
       {payload && payload.lorebooks.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-medium text-[var(--muted-foreground)]">Lorebooks:</span>
-          <button
-            type="button"
-            className="mari-chrome-control mari-chrome-control--small"
-            aria-pressed={selectedLorebookIds.size === 0}
-            onClick={() => setSelectedLorebookIds(new Set())}
-          >
-            All ({payload.lorebooks.length})
-          </button>
+          <span className="text-xs font-medium text-[var(--muted-foreground)]">Managed lorebooks:</span>
+          {payload.lorebooks.length > 1 ? (
+            <button
+              type="button"
+              className="mari-chrome-control mari-chrome-control--small"
+              onClick={() => {
+                if (managedSet.size === payload.lorebooks.length) {
+                  updateManagedBooks([]);
+                } else {
+                  updateManagedBooks(payload.lorebooks.map((book) => book.id));
+                }
+              }}
+            >
+              {managedSet.size === payload.lorebooks.length
+                ? `Unload all (${payload.lorebooks.length})`
+                : `Load all (${payload.lorebooks.length})`}
+            </button>
+          ) : null}
           {payload.lorebooks.map((book) => {
-            const active = selectedLorebookIds.has(book.id);
+            const active = managedSet.has(book.id);
+            const collapsed = collapsedLorebookIds.has(book.id);
             return (
-              <button
-                key={book.id}
-                type="button"
-                className="mari-chrome-control mari-chrome-control--small"
-                aria-pressed={active}
-                onClick={() => toggleLorebook(book.id)}
-              >
-                {book.name}
-                <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{book.entryCount}</span>
-              </button>
+              <div key={book.id} className="inline-flex items-center gap-0.5">
+                <button
+                  type="button"
+                  className="mari-chrome-control mari-chrome-control--small"
+                  aria-pressed={active}
+                  title={active ? `Click to unload ${book.name}` : `Click to opt ${book.name} into Lorebook Manager`}
+                  onClick={() => toggleManagedBook(book.id)}
+                >
+                  <span>{book.name}</span>
+                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{book.entryCount}</span>
+                </button>
+                {active ? (
+                  <button
+                    type="button"
+                    className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+                    aria-pressed={collapsed}
+                    aria-label={collapsed ? `Expand ${book.name} entries` : `Collapse ${book.name} into hub node`}
+                    title={collapsed ? `Expand ${book.name} entries` : `Collapse ${book.name} into hub node`}
+                    onClick={() => toggleCollapseLorebook(book.id)}
+                  >
+                    {collapsed ? <Maximize2 size="0.75rem" /> : <Minimize2 size="0.75rem" />}
+                  </button>
+                ) : null}
+              </div>
             );
           })}
+        </div>
+      ) : null}
+
+      {payload && payload.lorebooks.length > 0 && managedLorebookIds !== null && managedSet.size === 0 ? (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--card)]/60 px-3 py-2 text-xs text-[var(--muted-foreground)]">
+          No lorebooks opted into Lorebook Manager ({payload.lorebooks.length} books, {totalLibraryEntries} entries
+          available). Click a lorebook pill above to load it without loading the entire library.
         </div>
       ) : null}
 
@@ -160,12 +382,17 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
         view === "graph" ? (
           <LorebookGraph
             payload={payload}
-            selectedLorebookIds={selectedLorebookIds}
+            selectedLorebookIds={managedSet}
+            collapsedLorebookIds={collapsedLorebookIds}
+            onToggleCollapseLorebook={toggleCollapseLorebook}
+            onOpenLorebook={props.onOpenLorebook}
             search={search}
             selectedNodeRef={selectedNodeRef}
             onSelectNodeRef={setSelectedNodeRef}
             savingRef={savingRef}
             onSaveRelationships={handleSaveRelationships}
+            onBatchSaveRelationships={handleBatchSaveRelationships}
+            onUpdateEntry={handleUpdateEntry}
           />
         ) : (
           <div className="flex flex-col divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
@@ -183,11 +410,13 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                   <div key={node.ref} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-medium truncate">{node.name}</span>
+                        <span className="truncate font-medium">{node.name}</span>
                         <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
                           {node.nodeType === "lore"
                             ? `${node.lorebookName} · ${FAMILY_META[node.family].label}`
-                            : node.nodeType}
+                            : node.nodeType === "lorebook"
+                              ? `Lorebook (${node.entryCount})`
+                              : node.nodeType}
                         </span>
                       </div>
                       {node.description ? (

@@ -3,7 +3,10 @@ import { createPortal } from "react-dom";
 import {
   BookOpen,
   Compass,
+  EyeOff,
   Focus,
+  Ghost,
+  Globe,
   Link2,
   LocateFixed,
   MapPin,
@@ -12,22 +15,22 @@ import {
   Minus,
   Package,
   Plus,
+  RotateCcw,
   ScrollText,
   Shield,
   Sparkles,
-  Trash2,
   User,
   UserCheck,
-  X,
+  UserCog,
+  Users,
+  Wand2,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 import {
-  parseEntityRef,
-  toRelationshipKey,
-} from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
-import {
   buildLorebookGraph,
   defaultFocus,
+  LAYOUT_MAX_ITERATIONS,
   layoutGraph,
   neighbourhood,
   nodeAtPoint,
@@ -39,10 +42,12 @@ import {
   ENTITY_FAMILIES,
   type EntityFamily,
   type LmEntryNode,
-  type LmGraphEdge,
   type LmGraphNode,
   type LmGraphPayload,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import type { LmEntryPatch } from "./api";
+import { EntryReaderModal } from "./EntryReaderModal";
+import { GraphInspector } from "./GraphInspector";
 
 const FOCUS_HOPS = 2;
 const MIN_ZOOM = 0.12;
@@ -59,22 +64,35 @@ const NODE_MIN_ZOOM = 0.6;
 const NODE_MAX_ZOOM = 1.3;
 const ARROW_EXPLICIT_ID = "lm-graph-arrow-explicit";
 const ARROW_EXPLICIT_LIT_ID = "lm-graph-arrow-explicit-lit";
+const ARROW_MENTION_ID = "lm-graph-arrow-mention";
+const ARROW_MENTION_LIT_ID = "lm-graph-arrow-mention-lit";
 
-export const RELATION_PRESETS = [
-  "related_to",
-  "located_in",
-  "member_of",
-  "ally_of",
-  "rival_of",
-  "owns",
-  "part_of",
-] as const;
+const RELATION_COLORS: Record<string, string> = {
+  ally_of: "#22c55e",
+  rival_of: "#ef4444",
+  located_in: "#14b8a6",
+  part_of: "#a855f7",
+  member_of: "#6366f1",
+  owns: "#f59e0b",
+};
+
+function relationMarkerId(relation: string): string | null {
+  const base = relation.split(" / ")[0]?.trim() ?? "";
+  return base in RELATION_COLORS ? `lm-graph-arrow-rel-${base}` : null;
+}
+
+function relationStroke(relation: string): string {
+  const base = relation.split(" / ")[0]?.trim() ?? "";
+  return RELATION_COLORS[base] ?? "var(--lm-graph-ink)";
+}
 
 export const FAMILY_META: Record<EntityFamily, { label: string; icon: LucideIcon }> = {
   character: { label: "Characters", icon: User },
   location: { label: "Locations", icon: MapPin },
   faction: { label: "Factions", icon: Shield },
   item: { label: "Items", icon: Package },
+  creature: { label: "Creatures", icon: Ghost },
+  ability: { label: "Abilities", icon: Zap },
   quest: { label: "Quests", icon: Compass },
   lore: { label: "Lore", icon: BookOpen },
 };
@@ -83,41 +101,76 @@ const nodeScreenScale = (k: number) => Math.min(NODE_MAX_ZOOM, Math.max(NODE_MIN
 const nodeScale = (k: number) => nodeScreenScale(k) / k;
 const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 
+function hexPoints(radius: number): string {
+  const points: string[] = [];
+  for (let i = 0; i < 6; i += 1) {
+    const angle = (Math.PI / 3) * i - Math.PI / 2;
+    points.push(`${(radius * Math.cos(angle)).toFixed(2)},${(radius * Math.sin(angle)).toFixed(2)}`);
+  }
+  return points.join(" ");
+}
+
 function nodeRadius(node: LmGraphNode & { degree: number }): number {
-  const base = node.nodeType === "character" ? 13 : node.nodeType === "persona" ? 12.5 : 10;
+  const base =
+    node.nodeType === "lorebook" ? 16 : node.nodeType === "character" ? 13 : node.nodeType === "persona" ? 12.5 : 10;
   return base + Math.min(4, node.degree * 0.5);
 }
 
 function nodeIcon(node: LmGraphNode): LucideIcon {
+  if (node.nodeType === "lorebook") {
+    const category = node.category.trim().toLowerCase();
+    if (category === "world") return Globe;
+    if (category === "character") return Users;
+    if (category === "npc") return UserCog;
+    if (category === "spellbook") return Wand2;
+    return BookOpen;
+  }
   if (node.nodeType === "persona") return UserCheck;
   if (node.nodeType === "character") return User;
-  return FAMILY_META[node.family]?.icon ?? ScrollText;
+  return FAMILY_META[node.inferredFamily ?? node.family]?.icon ?? ScrollText;
 }
 
 const familyColour = (family: EntityFamily) => `var(--lm-graph-${family})`;
 
+function nodeColour(node: LmGraphNode): string {
+  if (node.nodeType === "lorebook") return "var(--primary)";
+  if (node.nodeType === "character") return "var(--lm-graph-card)";
+  if (node.nodeType === "persona") return "var(--lm-graph-persona)";
+  return familyColour(node.inferredFamily ?? node.family);
+}
+
 export const GRAPH_STYLE = `
 [data-lm-graph] {
   --lm-graph-character: #3b82f6;
+  --lm-graph-card: #0891b2;
+  --lm-graph-persona: #db2777;
   --lm-graph-location: #16a56e;
   --lm-graph-faction: #ef4444;
   --lm-graph-item: #d97706;
+  --lm-graph-creature: #ea580c;
+  --lm-graph-ability: #6366f1;
   --lm-graph-quest: #8b5cf6;
   --lm-graph-lore: #64748b;
   --lm-graph-canvas: color-mix(in srgb, var(--background) 94%, var(--primary) 2%);
   --lm-graph-grid-dot: color-mix(in srgb, var(--foreground) 12%, transparent);
   --lm-graph-surface: #ffffff;
-  --lm-graph-edge: color-mix(in srgb, var(--foreground) 34%, transparent);
-  --lm-graph-mention: color-mix(in srgb, var(--foreground) 20%, transparent);
+  --lm-graph-edge: color-mix(in srgb, var(--foreground) 40%, transparent);
+  --lm-graph-mention: color-mix(in srgb, var(--foreground) 24%, transparent);
+  --lm-graph-mention-mutual: color-mix(in srgb, var(--foreground) 42%, transparent);
+  --lm-graph-book-link: color-mix(in srgb, var(--primary) 55%, transparent);
   --lm-graph-ink: var(--foreground);
   --lm-graph-divider: color-mix(in srgb, var(--primary) 14%, transparent);
   --lm-graph-overlay-shadow: 0 10px 30px -12px rgb(26 16 37 / 0.35), 0 2px 6px -2px rgb(26 16 37 / 0.18);
 }
 [data-theme="dark"] [data-lm-graph] {
   --lm-graph-character: #60a5fa;
+  --lm-graph-card: #22d3ee;
+  --lm-graph-persona: #f472b6;
   --lm-graph-location: #34d399;
   --lm-graph-faction: #f87171;
   --lm-graph-item: #fbbf24;
+  --lm-graph-creature: #fb923c;
+  --lm-graph-ability: #818cf8;
   --lm-graph-quest: #a78bfa;
   --lm-graph-lore: #94a3b8;
   --lm-graph-canvas: #0b0a16;
@@ -169,24 +222,31 @@ export const GRAPH_STYLE = `
   transform: translateX(-50%);
 }
 [data-lm-graph-card] {
-  position: absolute;
-  right: 0.6rem;
-  bottom: 0.6rem;
-  z-index: 2;
   display: flex;
   flex-direction: column;
   gap: 0.625rem;
-  width: 22rem;
-  max-height: calc(100% - 1.2rem);
   padding: 0.875rem;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 0.5rem;
   background: var(--card);
-  box-shadow: var(--lm-graph-overlay-shadow);
 }
-[data-lm-graph-has-banner] [data-lm-graph-card] {
-  max-height: calc(100% - 4.25rem);
+[data-lm-graph-card][data-lm-graph-docked] {
+  width: 100%;
+  max-height: clamp(24rem, 64vh, 42rem);
+}
+@media (min-width: 64rem) {
+  [data-lm-graph-card][data-lm-graph-docked] {
+    width: 24rem;
+    flex-shrink: 0;
+  }
+}
+[data-lm-graph-card][data-lm-graph-floating] {
+  position: absolute;
+  z-index: 3;
+  width: min(24rem, calc(100% - 1.2rem));
+  max-height: calc(100% - 1.2rem);
+  box-shadow: var(--lm-graph-overlay-shadow);
 }
 [data-lm-graph-pointing] [data-lm-graph-node]:not([data-lm-graph-near]) {
   opacity: 0.2;
@@ -202,13 +262,17 @@ export const GRAPH_STYLE = `
   overscroll-behavior: contain;
   background: var(--background);
 }
-[data-lm-graph-expanded] [data-lm-graph-canvas] {
-  height: auto;
+[data-lm-graph-expanded] [data-lm-graph-workspace] {
+  min-height: 0;
+}
+[data-lm-graph-expanded] [data-lm-graph-canvas],
+[data-lm-graph-expanded] [data-lm-graph-card][data-lm-graph-docked] {
+  height: 100%;
+  max-height: 100%;
   min-height: 0;
 }
 @media (max-width: 52rem) {
-  [data-lm-graph-card],
-  [data-lm-graph-has-banner] [data-lm-graph-card] {
+  [data-lm-graph-card][data-lm-graph-floating] {
     right: 0.5rem;
     bottom: 0.5rem;
     left: 0.5rem;
@@ -235,7 +299,8 @@ type NodeActions = {
   register: (ref: string, element: SVGGElement | null) => void;
   hover: (ref: string | null, from?: string) => void;
   open: (ref: string) => void;
-  focusHere: (ref: string) => void;
+  doubleClick: (node: LmGraphNode) => void;
+  pointerDownNode: (ref: string, event: React.PointerEvent<SVGGElement>) => void;
 };
 
 type GraphNodeViewProps = {
@@ -244,6 +309,7 @@ type GraphNodeViewProps = {
   near: boolean;
   lit: boolean;
   selected: boolean;
+  pinned: boolean;
   showLabel: boolean;
   actions: NodeActions;
 };
@@ -254,14 +320,21 @@ const GraphNodeView = memo(function GraphNodeView({
   near,
   lit,
   selected,
+  pinned,
   showLabel,
   actions,
 }: GraphNodeViewProps) {
   const radius = nodeRadius(node);
   const Icon = nodeIcon(node);
-  const colour = familyColour(node.family);
-  const isCardOrPersona = node.nodeType === "character" || node.nodeType === "persona";
-  const disabled = node.nodeType === "lore" && !node.enabled;
+  const colour = nodeColour(node);
+  const isBook = node.nodeType === "lorebook";
+  const isCard = node.nodeType === "character";
+  const isPersona = node.nodeType === "persona";
+  const inferred = node.nodeType === "lore" ? node.inferredFamily : null;
+  const secondaryColour =
+    node.nodeType === "lore" && node.secondaryFamilies.length > 0 ? familyColour(node.secondaryFamilies[0]!) : null;
+  const disabled = (node.nodeType === "lore" || node.nodeType === "lorebook") && !node.enabled;
+  const fill = inferred ? `url(#lm-hatch-${inferred})` : `color-mix(in srgb, ${colour} 22%, var(--lm-graph-surface))`;
 
   return (
     <g
@@ -270,15 +343,15 @@ const GraphNodeView = memo(function GraphNodeView({
       tabIndex={0}
       aria-label={`${node.name} (${node.nodeType === "lore" ? node.family : node.nodeType})`}
       opacity={disabled ? 0.5 : 1}
-      style={{ cursor: "pointer", outline: "none" }}
+      style={{ cursor: "grab", outline: "none" }}
       data-lm-graph-node={node.ref}
       data-lm-graph-near={near || undefined}
       onPointerEnter={(event) => {
         if (event.pointerType !== "touch") actions.hover(node.ref);
       }}
       onPointerLeave={() => actions.hover(null, node.ref)}
-      onClick={() => actions.open(node.ref)}
-      onDoubleClick={() => actions.focusHere(node.ref)}
+      onPointerDown={(event) => actions.pointerDownNode(node.ref, event)}
+      onDoubleClick={() => actions.doubleClick(node)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -287,31 +360,96 @@ const GraphNodeView = memo(function GraphNodeView({
       }}
     >
       {selected ? (
-        <circle
-          r={radius + 4}
-          fill="none"
-          stroke="var(--primary)"
-          strokeWidth={2.5}
-          vectorEffect="non-scaling-stroke"
-        />
+        isBook ? (
+          <rect
+            x={-(radius + 4)}
+            y={-(radius + 4)}
+            width={(radius + 4) * 2}
+            height={(radius + 4) * 2}
+            rx={8}
+            fill="none"
+            stroke="var(--primary)"
+            strokeWidth={2.5}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : (
+          <circle
+            r={radius + 4}
+            fill="none"
+            stroke="var(--primary)"
+            strokeWidth={2.5}
+            vectorEffect="non-scaling-stroke"
+          />
+        )
       ) : null}
-      {isCardOrPersona ? (
+
+      {secondaryColour ? (
         <circle
           r={radius + 2}
           fill="none"
-          stroke={colour}
-          strokeWidth={1.2}
-          strokeDasharray="2 2"
+          stroke={secondaryColour}
+          strokeWidth={1.6}
+          strokeDasharray="4 2"
           vectorEffect="non-scaling-stroke"
         />
       ) : null}
-      <circle
-        r={radius}
-        fill={`color-mix(in srgb, ${colour} 22%, var(--lm-graph-surface))`}
-        stroke={colour}
-        strokeWidth={2}
-        vectorEffect="non-scaling-stroke"
-      />
+
+      {isBook ? (
+        <rect
+          x={-radius}
+          y={-radius}
+          width={radius * 2}
+          height={radius * 2}
+          rx={6}
+          fill={fill}
+          stroke={colour}
+          strokeWidth={2}
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : isCard ? (
+        <polygon
+          points={hexPoints(radius + 1)}
+          fill={fill}
+          stroke={colour}
+          strokeWidth={2.2}
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : isPersona ? (
+        <rect
+          x={-radius * 0.85}
+          y={-radius * 0.85}
+          width={radius * 1.7}
+          height={radius * 1.7}
+          rx={3}
+          transform="rotate(45)"
+          fill={fill}
+          stroke={colour}
+          strokeWidth={2.2}
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : (
+        <circle
+          r={radius}
+          fill={fill}
+          stroke={colour}
+          strokeWidth={2}
+          strokeDasharray={inferred ? "3 2" : undefined}
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
+
+      {pinned ? (
+        <circle
+          cx={radius * 0.72}
+          cy={-radius * 0.72}
+          r={2.8}
+          fill="var(--primary)"
+          stroke="var(--lm-graph-canvas)"
+          strokeWidth={1.2}
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : null}
+
       <Icon
         aria-hidden="true"
         x={-radius * 0.55}
@@ -325,7 +463,7 @@ const GraphNodeView = memo(function GraphNodeView({
           y={14}
           textAnchor="middle"
           fontSize={NODE_LABEL_SIZE}
-          fontWeight={lit || selected ? 650 : undefined}
+          fontWeight={lit || selected || isBook ? 650 : undefined}
           fill="var(--foreground)"
           stroke="var(--lm-graph-canvas)"
           strokeWidth={4}
@@ -334,7 +472,7 @@ const GraphNodeView = memo(function GraphNodeView({
           pointerEvents="none"
           data-lm-graph-label
         >
-          {title}
+          {isBook ? `${title} (${node.entryCount})` : title}
         </text>
       ) : null}
     </g>
@@ -344,36 +482,52 @@ const GraphNodeView = memo(function GraphNodeView({
 export interface LorebookGraphProps {
   payload: LmGraphPayload;
   selectedLorebookIds: ReadonlySet<string>;
+  collapsedLorebookIds: ReadonlySet<string>;
+  onToggleCollapseLorebook: (lorebookId: string) => void;
+  onOpenLorebook?: (lorebookId: string) => void;
   search: string;
   selectedNodeRef: string | null;
   onSelectNodeRef: (ref: string | null) => void;
   savingRef: string | null;
   onSaveRelationships: (entry: LmEntryNode, nextRelationships: Record<string, string>) => Promise<void>;
+  onBatchSaveRelationships: (
+    updates: Array<{ entry: LmEntryNode; relationships: Record<string, string> }>,
+  ) => Promise<void>;
+  onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
 }
 
 export function LorebookGraph({
   payload,
   selectedLorebookIds,
+  collapsedLorebookIds,
+  onToggleCollapseLorebook,
+  onOpenLorebook,
   search,
   selectedNodeRef,
   onSelectNodeRef,
   savingRef,
   onSaveRelationships,
+  onBatchSaveRelationships,
+  onUpdateEntry,
 }: LorebookGraphProps) {
   const [whole, setWhole] = useState(true);
   const [expanded, setExpanded] = useState(false);
+  const [floating, setFloating] = useState(false);
   const [hiddenFamilies, setHiddenFamilies] = useState<ReadonlySet<EntityFamily>>(() => new Set());
   const [showCharacters, setShowCharacters] = useState(true);
   const [showPersonas, setShowPersonas] = useState(true);
   const [showExplicit, setShowExplicit] = useState(true);
   const [showMentions, setShowMentions] = useState(true);
+  const [hideOrphans, setHideOrphans] = useState(false);
+  const [layoutSpread, setLayoutSpread] = useState(1);
+  const [pinnedPositions, setPinnedPositions] = useState<Record<string, GraphPoint>>({});
   const [focusPick, setFocusPick] = useState<string | null>(null);
   const [hoverRef, setHoverRef] = useState<string | null>(null);
   const [view, setView] = useState<GraphView>({ k: 1, x: 0, y: 0 });
   const [size, setSize] = useState({ w: 800, h: 520 });
-  const [relationDraft, setRelationDraft] = useState<string>("related_to");
-  const [addTargetRef, setAddTargetRef] = useState<string>("");
-  const [addRelation, setAddRelation] = useState<string>("related_to");
+  const [navHistory, setNavHistory] = useState<string[]>([]);
+  const [navIndex, setNavIndex] = useState(-1);
+  const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
 
   const [wrap, setWrap] = useState<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -381,23 +535,99 @@ export function LorebookGraph({
   const nodeRefs = useRef(new Map<string, SVGGElement>());
   const pointers = useRef(new Map<number, GraphPoint>());
   const press = useRef({ start: { x: 0, y: 0 }, moved: false });
+  const layoutCacheRef = useRef<{ key: string; positions: Map<string, GraphPoint> } | null>(null);
+  const hasFittedRef = useRef(false);
+  const lastFitTriggerRef = useRef("");
+  const dragNode = useRef<{
+    ref: string;
+    pointerId: number;
+    startScreen: GraphPoint;
+    startGraph: GraphPoint;
+    moved: boolean;
+  } | null>(null);
+
+  const navigateTo = useCallback(
+    (ref: string | null, mode: "push" | "history" = "push") => {
+      if (!ref) {
+        onSelectNodeRef(null);
+        return;
+      }
+      if (mode === "push") {
+        setNavHistory((prev) => {
+          if (prev[navIndex] === ref) return prev;
+          const next = [...prev.slice(0, navIndex + 1), ref];
+          setNavIndex(next.length - 1);
+          return next;
+        });
+      }
+      onSelectNodeRef(ref);
+    },
+    [navIndex, onSelectNodeRef],
+  );
+
+  useEffect(() => {
+    if (!selectedNodeRef) return;
+    setNavHistory((prev) => {
+      if (prev.length === 0) {
+        setNavIndex(0);
+        return [selectedNodeRef];
+      }
+      if (prev[navIndex] === selectedNodeRef) return prev;
+      return prev;
+    });
+  }, [selectedNodeRef, navIndex]);
+
+  useEffect(() => {
+    if (!readerState && !expanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (readerState) {
+        event.preventDefault();
+        setReaderState(null);
+      } else if (expanded) {
+        event.preventDefault();
+        setExpanded(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [readerState, expanded]);
 
   const graph = useMemo(
     () =>
       buildLorebookGraph(payload, {
         lorebookIds: selectedLorebookIds,
+        collapsedLorebookIds,
         hiddenFamilies,
         showCharacters,
         showPersonas,
         showExplicit,
         showMentions,
+        hideOrphans,
         search,
       }),
-    [payload, selectedLorebookIds, hiddenFamilies, showCharacters, showPersonas, showExplicit, showMentions, search],
+    [
+      payload,
+      selectedLorebookIds,
+      collapsedLorebookIds,
+      hiddenFamilies,
+      showCharacters,
+      showPersonas,
+      showExplicit,
+      showMentions,
+      hideOrphans,
+      search,
+    ],
   );
 
   const nodesByRef = useMemo(() => new Map(graph.nodes.map((node) => [node.ref, node])), [graph.nodes]);
-  const allNodesByRef = useMemo(() => new Map(payload.nodes.map((node) => [node.ref, node])), [payload.nodes]);
+  const allNodesByRef = useMemo(() => {
+    const map = new Map<string, LmGraphNode>(payload.nodes.map((node) => [node.ref, node]));
+    for (const node of graph.nodes) {
+      if (node.nodeType === "lorebook" && !map.has(node.ref)) map.set(node.ref, node);
+    }
+    return map;
+  }, [payload.nodes, graph.nodes]);
 
   const focusRef = useMemo(
     () => (focusPick && nodesByRef.has(focusPick) ? focusPick : defaultFocus(graph, selectedNodeRef)),
@@ -413,8 +643,41 @@ export function LorebookGraph({
     };
   }, [graph, whole, focusRef]);
 
-  const positions = useMemo(() => layoutGraph(shown).positions, [shown]);
-  const shownRefs = useMemo(() => new Set(shown.nodes.map((node) => node.ref)), [shown.nodes]);
+  const sortedNodeRefsKey = useMemo(
+    () =>
+      shown.nodes
+        .map((node) => node.ref)
+        .sort()
+        .join("|"),
+    [shown.nodes],
+  );
+
+  const topologyKey = useMemo(() => {
+    const edgePairs = new Set<string>();
+    for (const edge of shown.edges) {
+      edgePairs.add(
+        edge.sourceRef < edge.targetRef ? `${edge.sourceRef}~${edge.targetRef}` : `${edge.targetRef}~${edge.sourceRef}`,
+      );
+    }
+    return `${sortedNodeRefsKey}::${[...edgePairs].sort().join("|")}::${layoutSpread}`;
+  }, [sortedNodeRefsKey, shown.edges, layoutSpread]);
+
+  const computedPositions = useMemo(() => {
+    if (layoutCacheRef.current?.key === topologyKey) {
+      return layoutCacheRef.current.positions;
+    }
+    const positions = layoutGraph(shown, 1, LAYOUT_MAX_ITERATIONS, layoutSpread).positions;
+    layoutCacheRef.current = { key: topologyKey, positions };
+    return positions;
+  }, [topologyKey, shown, layoutSpread]);
+
+  const effectivePositions = useMemo(() => {
+    const merged = new Map(computedPositions);
+    for (const [ref, point] of Object.entries(pinnedPositions)) {
+      if (merged.has(ref)) merged.set(ref, point);
+    }
+    return merged;
+  }, [computedPositions, pinnedPositions]);
 
   const adjacency = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -440,7 +703,7 @@ export function LorebookGraph({
   }, [wrap]);
 
   const fit = useCallback(() => {
-    const points = [...positions.values()];
+    const points = [...effectivePositions.values()];
     if (!points.length) return;
     const xs = points.map((point) => point.x);
     const ys = points.map((point) => point.y);
@@ -453,12 +716,19 @@ export function LorebookGraph({
       Math.max(MIN_ZOOM, Math.min(size.w / (maxX - minX + 2 * FIT_PADDING), size.h / (maxY - minY + 2 * FIT_PADDING))),
     );
     setView({ k, x: size.w / 2 - ((minX + maxX) / 2) * k, y: size.h / 2 - ((minY + maxY) / 2) * k });
-  }, [positions, size.w, size.h]);
+  }, [effectivePositions, size.w, size.h]);
 
   const fitRef = useRef(fit);
   fitRef.current = fit;
-  const shownKey = shown.nodes.map((node) => node.ref).join("|");
-  useEffect(() => fitRef.current(), [shownKey, size.w, size.h]);
+  const fitTrigger = `${sortedNodeRefsKey}::${layoutSpread}`;
+  useEffect(() => {
+    if (effectivePositions.size === 0 || size.w <= 0 || size.h <= 0) return;
+    if (!hasFittedRef.current || lastFitTriggerRef.current !== fitTrigger) {
+      hasFittedRef.current = true;
+      lastFitTriggerRef.current = fitTrigger;
+      fitRef.current();
+    }
+  }, [fitTrigger, effectivePositions.size, size.w, size.h]);
 
   const zoomAt = useCallback(
     (factor: number, px = size.w / 2, py = size.h / 2) =>
@@ -489,7 +759,7 @@ export function LorebookGraph({
 
   const nodeAt = (event: { clientX: number; clientY: number }) =>
     nodeAtPoint(
-      positions,
+      effectivePositions,
       (ref) => {
         const node = nodesByRef.get(ref);
         return node ? nodeRadius(node) * nodeScale(view.k) : 0;
@@ -499,6 +769,9 @@ export function LorebookGraph({
       TAP_TARGET,
     );
 
+  const effectivePositionsRef = useRef(effectivePositions);
+  effectivePositionsRef.current = effectivePositions;
+
   const nodeActions = useMemo<NodeActions>(
     () => ({
       register: (ref, element) => {
@@ -506,16 +779,31 @@ export function LorebookGraph({
         else nodeRefs.current.delete(ref);
       },
       hover: (ref, from) => setHoverRef((current) => (ref === null && current !== from ? current : ref)),
-      open: (ref) => {
-        setAddTargetRef("");
-        onSelectNodeRef(ref);
-      },
-      focusHere: (ref) => {
-        setFocusPick(ref);
+      open: (ref) => navigateTo(ref),
+      doubleClick: (node) => {
+        if (node.nodeType === "lorebook") {
+          onToggleCollapseLorebook(node.id);
+          return;
+        }
+        setFocusPick(node.ref);
         setWhole(false);
       },
+      pointerDownNode: (ref, event) => {
+        if (event.button !== 0 && event.pointerType === "mouse") return;
+        event.stopPropagation();
+        const startGraph = effectivePositionsRef.current.get(ref);
+        if (!startGraph) return;
+        svgRef.current?.setPointerCapture(event.pointerId);
+        dragNode.current = {
+          ref,
+          pointerId: event.pointerId,
+          startScreen: screenPoint(event),
+          startGraph,
+          moved: false,
+        };
+      },
     }),
-    [onSelectNodeRef],
+    [navigateTo, onToggleCollapseLorebook],
   );
 
   const activeNode = selectedNodeRef
@@ -535,10 +823,14 @@ export function LorebookGraph({
     const familyCounts = new Map<EntityFamily, number>();
     const filterByBooks = selectedLorebookIds.size > 0;
     for (const node of payload.nodes) {
+      if (node.nodeType === "lorebook") continue;
       if (node.nodeType === "lore" && filterByBooks && !selectedLorebookIds.has(node.lorebookId)) continue;
       if (node.nodeType === "character" && !showCharacters) continue;
       if (node.nodeType === "persona" && !showPersonas) continue;
-      familyCounts.set(node.family, (familyCounts.get(node.family) ?? 0) + 1);
+      const families = node.nodeType === "lore" ? [node.family, ...node.secondaryFamilies] : [node.family];
+      for (const family of families) {
+        familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
+      }
     }
     return familyCounts;
   }, [payload.nodes, selectedLorebookIds, showCharacters, showPersonas]);
@@ -549,8 +841,8 @@ export function LorebookGraph({
   const edgeLayer = useMemo(
     () =>
       shown.edges.map((edge, index) => {
-        const from = positions.get(edge.sourceRef);
-        const to = positions.get(edge.targetRef);
+        const from = effectivePositions.get(edge.sourceRef);
+        const to = effectivePositions.get(edge.targetRef);
         const fromNode = nodesByRef.get(edge.sourceRef);
         const toNode = nodesByRef.get(edge.targetRef);
         if (!from || !to || !fromNode || !toNode) return null;
@@ -560,7 +852,65 @@ export function LorebookGraph({
         const length = Math.hypot(dx, dy) || 1;
         const gapFrom = (nodeRadius(fromNode) + 2) * edgeScale;
         const gapTo = (nodeRadius(toNode) + 2) * edgeScale;
+        const hasRoom = length > gapFrom + gapTo;
+        const dimmed = hoverRef && !(edge.sourceRef === hoverRef || edge.targetRef === hoverRef);
+
+        if (edge.kind === "book_link") {
+          return (
+            <line
+              key={`book|${edge.sourceRef}|${edge.targetRef}|${index}`}
+              x1={from.x + (dx / length) * gapFrom}
+              y1={from.y + (dy / length) * gapFrom}
+              x2={to.x - (dx / length) * gapTo}
+              y2={to.y - (dy / length) * gapTo}
+              stroke={lit ? "var(--lm-graph-ink)" : "var(--lm-graph-book-link)"}
+              strokeWidth={lit ? 1.8 : 1.2}
+              strokeDasharray="2 3"
+              vectorEffect="non-scaling-stroke"
+              opacity={dimmed ? 0.12 : 0.85}
+            >
+              <title>{`${fromNode.name} — linked lorebook — ${toNode.name}`}</title>
+            </line>
+          );
+        }
+
         const isExplicit = edge.kind === "explicit";
+        const isMutual = edge.bidirectional === true;
+        const relArrow = isExplicit && lit ? relationMarkerId(edge.relation) : null;
+        const arrowId = isExplicit
+          ? (relArrow ?? (lit ? ARROW_EXPLICIT_LIT_ID : ARROW_EXPLICIT_ID))
+          : lit
+            ? ARROW_MENTION_LIT_ID
+            : ARROW_MENTION_ID;
+        const stroke = lit
+          ? isExplicit
+            ? relationStroke(edge.relation)
+            : "var(--lm-graph-ink)"
+          : isExplicit
+            ? "var(--lm-graph-edge)"
+            : isMutual
+              ? "var(--lm-graph-mention-mutual)"
+              : "var(--lm-graph-mention)";
+        const strokeWidth = isExplicit
+          ? isMutual
+            ? lit
+              ? 3
+              : 2.2
+            : lit
+              ? 2.2
+              : 1.5
+          : isMutual
+            ? lit
+              ? 2.2
+              : 1.5
+            : lit
+              ? 1.5
+              : 1.1;
+        const strokeDasharray = isExplicit ? undefined : isMutual ? "8 3" : "5 4";
+        const tooltip = isMutual
+          ? `${fromNode.name} ↔ ${toNode.name} (${edge.relation}${edge.matchedText ? `: "${edge.matchedText}" / "${edge.reverseMatchedText ?? edge.matchedText}"` : ""})`
+          : `${fromNode.name} → ${toNode.name} (${edge.relation}${edge.matchedText ? `: "${edge.matchedText}"` : ""})`;
+
         return (
           <line
             key={`${edge.kind}|${edge.sourceRef}|${edge.targetRef}|${edge.relation}|${index}`}
@@ -568,26 +918,25 @@ export function LorebookGraph({
             y1={from.y + (dy / length) * gapFrom}
             x2={to.x - (dx / length) * gapTo}
             y2={to.y - (dy / length) * gapTo}
-            stroke={lit ? "var(--lm-graph-ink)" : isExplicit ? "var(--lm-graph-edge)" : "var(--lm-graph-mention)"}
-            strokeWidth={isExplicit ? (lit ? 2 : 1.4) : 1.1}
-            strokeDasharray={isExplicit ? undefined : "5 4"}
+            stroke={stroke}
+            strokeWidth={strokeWidth}
+            strokeDasharray={strokeDasharray}
             vectorEffect="non-scaling-stroke"
-            opacity={hoverRef && !(edge.sourceRef === hoverRef || edge.targetRef === hoverRef) ? 0.12 : 1}
-            markerEnd={
-              isExplicit && length > gapFrom + gapTo
-                ? `url(#${lit ? ARROW_EXPLICIT_LIT_ID : ARROW_EXPLICIT_ID})`
-                : undefined
-            }
-          />
+            opacity={dimmed ? 0.12 : 1}
+            markerStart={hasRoom && isMutual ? `url(#${arrowId})` : undefined}
+            markerEnd={hasRoom ? `url(#${arrowId})` : undefined}
+          >
+            <title>{tooltip}</title>
+          </line>
         );
       }),
-    [shown.edges, positions, nodesByRef, activeId, hoverRef, edgeScale],
+    [shown.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale],
   );
 
   const nodeLayer = useMemo(
     () =>
       shown.nodes.map((node) => {
-        if (!positions.has(node.ref)) return null;
+        if (!effectivePositions.has(node.ref)) return null;
         const lit = activeNear?.has(node.ref) ?? false;
         const selected = node.ref === selectedNodeRef;
         return (
@@ -598,12 +947,23 @@ export function LorebookGraph({
             near={pointNear?.has(node.ref) ?? false}
             lit={lit}
             selected={selected}
+            pinned={node.ref in pinnedPositions}
             showLabel={labelEveryNode || node.ref === focusRef || selected || lit || node.nodeType !== "lore"}
             actions={nodeActions}
           />
         );
       }),
-    [shown.nodes, positions, activeNear, pointNear, selectedNodeRef, focusRef, labelEveryNode, nodeActions],
+    [
+      shown.nodes,
+      effectivePositions,
+      pinnedPositions,
+      activeNear,
+      pointNear,
+      selectedNodeRef,
+      focusRef,
+      labelEveryNode,
+      nodeActions,
+    ],
   );
 
   const labelScale = 1 / nodeScreenScale(view.k);
@@ -612,14 +972,14 @@ export function LorebookGraph({
       if (element.getAttribute("transform") !== value) element.setAttribute("transform", value);
     };
     for (const [ref, element] of nodeRefs.current) {
-      const point = positions.get(ref);
+      const point = effectivePositions.get(ref);
       const node = nodesByRef.get(ref);
       if (!point || !node) continue;
       write(element, `translate(${point.x} ${point.y}) scale(${edgeScale})`);
       const label = element.querySelector("[data-lm-graph-label]");
       if (label) write(label, `translate(0 ${nodeRadius(node)}) scale(${labelScale})`);
     }
-  }, [nodeLayer, positions, nodesByRef, edgeScale, labelScale]);
+  }, [nodeLayer, effectivePositions, nodesByRef, edgeScale, labelScale]);
 
   const toggleFamily = (family: EntityFamily) =>
     setHiddenFamilies((current) => {
@@ -628,65 +988,50 @@ export function LorebookGraph({
       return next;
     });
 
-  const activeExplicitOutgoing = useMemo(() => {
-    if (!activeNode || activeNode.nodeType !== "lore") return [];
-    const items: Array<{ key: string; targetRef: string; targetName: string; relation: string }> = [];
-    for (const [key, relation] of Object.entries(activeNode.relationships)) {
-      const parsed = parseEntityRef(key);
-      if (!parsed) continue;
-      items.push({
-        key,
-        targetRef: parsed.ref,
-        targetName: allNodesByRef.get(parsed.ref)?.name ?? key,
-        relation,
-      });
-    }
-    return items;
-  }, [activeNode, allNodesByRef]);
-
-  const activeExplicitIncoming = useMemo(() => {
-    if (!activeNode) return [];
-    return payload.explicitEdges.filter((edge) => edge.targetRef === activeNode.ref);
-  }, [activeNode, payload.explicitEdges]);
-
-  const activeMentions = useMemo(() => {
-    if (!activeNode) return [];
-    return payload.mentionEdges.filter(
-      (edge) => edge.sourceRef === activeNode.ref || edge.targetRef === activeNode.ref,
-    );
-  }, [activeNode, payload.mentionEdges]);
-
-  const linkableTargets = useMemo(() => {
-    if (!activeNode || activeNode.nodeType !== "lore") return [];
-    const existingRefs = new Set(activeExplicitOutgoing.map((item) => item.targetRef));
-    return payload.nodes
-      .filter((candidate) => candidate.ref !== activeNode.ref && !existingRefs.has(candidate.ref))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [activeNode, activeExplicitOutgoing, payload.nodes]);
-
-  const handlePromoteMention = async (edge: LmGraphEdge) => {
-    const entryNode = activeNode?.nodeType === "lore" && edge.sourceRef === activeNode.ref ? activeNode : null;
-    if (!entryNode) return;
-    const key = toRelationshipKey(edge.targetRef);
-    const nextRelationships = { ...entryNode.relationships, [key]: relationDraft.trim() || "related_to" };
-    await onSaveRelationships(entryNode, nextRelationships);
-  };
-
-  const handleRemoveExplicit = async (entryNode: LmEntryNode, key: string) => {
-    const nextRelationships = { ...entryNode.relationships };
-    delete nextRelationships[key];
-    await onSaveRelationships(entryNode, nextRelationships);
-  };
-
-  const handleAddExplicit = async () => {
-    if (!activeNode || activeNode.nodeType !== "lore" || !addTargetRef) return;
-    const key = toRelationshipKey(addTargetRef);
-    const nextRelationships = { ...activeNode.relationships, [key]: addRelation.trim() || "related_to" };
-    await onSaveRelationships(activeNode, nextRelationships);
-    setAddTargetRef("");
-  };
-
+  const canGoBack = navIndex > 0;
+  const canGoForward = navIndex >= 0 && navIndex < navHistory.length - 1;
   const focusNodeName = focusRef ? allNodesByRef.get(focusRef)?.name : null;
+  const pinnedCount = Object.keys(pinnedPositions).length;
+  const readerNode = readerState ? (allNodesByRef.get(readerState.ref) ?? null) : null;
+
+  const inspectorCard = activeNode ? (
+    <GraphInspector
+      activeNode={activeNode}
+      nodeColour={nodeColour(activeNode)}
+      familyLabel={FAMILY_META[activeNode.family].label}
+      payload={payload}
+      allNodesByRef={allNodesByRef}
+      canvasWrap={wrap}
+      floating={floating}
+      onToggleFloating={() => setFloating((value) => !value)}
+      canGoBack={canGoBack}
+      canGoForward={canGoForward}
+      onGoBack={() => {
+        if (!canGoBack) return;
+        const prevIndex = navIndex - 1;
+        setNavIndex(prevIndex);
+        navigateTo(navHistory[prevIndex] ?? null, "history");
+      }}
+      onGoForward={() => {
+        if (!canGoForward) return;
+        const nextIdx = navIndex + 1;
+        setNavIndex(nextIdx);
+        navigateTo(navHistory[nextIdx] ?? null, "history");
+      }}
+      onFocusHere={(ref) => {
+        setFocusPick(ref);
+        setWhole(false);
+      }}
+      onNavigate={(ref) => navigateTo(ref)}
+      onOpenReader={(node, mode) => setReaderState({ ref: node.ref, mode })}
+      onOpenLorebook={onOpenLorebook}
+      onToggleCollapseLorebook={onToggleCollapseLorebook}
+      savingRef={savingRef}
+      onSaveRelationships={onSaveRelationships}
+      onBatchSaveRelationships={onBatchSaveRelationships}
+      onUpdateEntry={onUpdateEntry}
+    />
+  ) : null;
 
   const content = (
     <div
@@ -764,6 +1109,11 @@ export function LorebookGraph({
           aria-pressed={showCharacters}
           onClick={() => setShowCharacters((value) => !value)}
         >
+          <span
+            aria-hidden="true"
+            className="inline-block size-2.5 shrink-0 rounded-sm"
+            style={{ background: "var(--lm-graph-card)" }}
+          />
           Cards
         </button>
         <button
@@ -772,8 +1122,38 @@ export function LorebookGraph({
           aria-pressed={showPersonas}
           onClick={() => setShowPersonas((value) => !value)}
         >
+          <span
+            aria-hidden="true"
+            className="inline-block size-2.5 shrink-0 rotate-45 rounded-[2px]"
+            style={{ background: "var(--lm-graph-persona)" }}
+          />
           Personas
         </button>
+        <button
+          type="button"
+          className="mari-chrome-control mari-chrome-control--small whitespace-nowrap"
+          aria-pressed={hideOrphans}
+          onClick={() => setHideOrphans((value) => !value)}
+        >
+          <EyeOff aria-hidden="true" size="0.875rem" />
+          Hide unlinked
+        </button>
+
+        <span aria-hidden="true" data-lm-graph-divider />
+
+        <label className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2 py-1 text-xs text-[var(--muted-foreground)]">
+          <span>Spacing</span>
+          <input
+            type="range"
+            aria-label="Node spacing"
+            min={0.5}
+            max={2.4}
+            step={0.1}
+            value={layoutSpread}
+            onChange={(event) => setLayoutSpread(Number(event.target.value))}
+            className="h-1.5 w-20 accent-[var(--primary)]"
+          />
+        </label>
       </div>
 
       {shown.nodes.length === 0 ? (
@@ -781,371 +1161,280 @@ export function LorebookGraph({
           No nodes match the current lorebook or filter selection.
         </div>
       ) : (
-        <div
-          ref={setWrap}
-          className="relative overflow-hidden select-none"
-          data-lm-graph-canvas
-          data-lm-graph-pointing={hoverRef ? "1" : undefined}
-          data-lm-graph-has-banner={!whole && focusNodeName ? "1" : undefined}
-        >
-          {!whole && focusNodeName ? (
-            <div data-lm-graph-banner>
-              <span>
-                Focused on <strong>{focusNodeName}</strong>
-              </span>
+        <div data-lm-graph-workspace className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start">
+          <div
+            ref={setWrap}
+            className="relative min-w-0 flex-1 overflow-hidden select-none"
+            data-lm-graph-canvas
+            data-lm-graph-pointing={hoverRef ? "1" : undefined}
+            data-lm-graph-has-banner={!whole && focusNodeName ? "1" : undefined}
+          >
+            {!whole && focusNodeName ? (
+              <div data-lm-graph-banner>
+                <span>
+                  Focused on <strong>{focusNodeName}</strong>
+                </span>
+                <button
+                  type="button"
+                  className="mari-chrome-control mari-chrome-control--small"
+                  onClick={() => setWhole(true)}
+                >
+                  Show all
+                </button>
+              </div>
+            ) : null}
+
+            <div data-lm-graph-zoom>
               <button
                 type="button"
-                className="mari-chrome-control mari-chrome-control--small"
-                onClick={() => setWhole(true)}
+                className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+                aria-label="Zoom in"
+                onClick={() => zoomAt(1.3)}
               >
-                Show all
+                <Plus size="0.875rem" />
+              </button>
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+                aria-label="Zoom out"
+                onClick={() => zoomAt(1 / 1.3)}
+              >
+                <Minus size="0.875rem" />
+              </button>
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+                aria-label="Fit graph"
+                onClick={fit}
+              >
+                <LocateFixed size="0.875rem" />
+              </button>
+              {pinnedCount > 0 ? (
+                <button
+                  type="button"
+                  className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+                  title="Reset dragged node positions"
+                  aria-label="Reset dragged node positions"
+                  onClick={() => setPinnedPositions({})}
+                >
+                  <RotateCcw size="0.875rem" />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
+                aria-label={expanded ? "Exit full screen" : "Full screen"}
+                onClick={() => setExpanded((value) => !value)}
+              >
+                {expanded ? <Minimize size="0.875rem" /> : <Maximize size="0.875rem" />}
               </button>
             </div>
-          ) : null}
 
-          <div data-lm-graph-zoom>
-            <button
-              type="button"
-              className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
-              aria-label="Zoom in"
-              onClick={() => zoomAt(1.3)}
-            >
-              <Plus size="0.875rem" />
-            </button>
-            <button
-              type="button"
-              className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
-              aria-label="Zoom out"
-              onClick={() => zoomAt(1 / 1.3)}
-            >
-              <Minus size="0.875rem" />
-            </button>
-            <button
-              type="button"
-              className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
-              aria-label="Fit graph"
-              onClick={fit}
-            >
-              <LocateFixed size="0.875rem" />
-            </button>
-            <button
-              type="button"
-              className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
-              aria-label={expanded ? "Exit full screen" : "Full screen"}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              {expanded ? <Minimize size="0.875rem" /> : <Maximize size="0.875rem" />}
-            </button>
-          </div>
-
-          <svg
-            ref={svgRef}
-            width="100%"
-            height="100%"
-            style={{ touchAction: "none", display: "block" }}
-            onPointerDown={(event) => {
-              if (event.button !== 0 && event.pointerType === "mouse") return;
-              event.currentTarget.setPointerCapture(event.pointerId);
-              const point = screenPoint(event);
-              pointers.current.set(event.pointerId, point);
-              if (pointers.current.size === 1) {
-                press.current = { start: point, moved: false };
-              } else {
-                press.current.moved = true;
-              }
-            }}
-            onPointerMove={(event) => {
-              const prev = pointers.current.get(event.pointerId);
-              if (!prev) return;
-              const next = screenPoint(event);
-              if (pointers.current.size === 1) {
-                const dx = next.x - prev.x;
-                const dy = next.y - prev.y;
-                if (
-                  !press.current.moved &&
-                  Math.hypot(next.x - press.current.start.x, next.y - press.current.start.y) > TAP_SLOP
-                ) {
+            <svg
+              ref={svgRef}
+              width="100%"
+              height="100%"
+              style={{ touchAction: "none", display: "block" }}
+              onPointerDown={(event) => {
+                if (event.button !== 0 && event.pointerType === "mouse") return;
+                event.currentTarget.setPointerCapture(event.pointerId);
+                const point = screenPoint(event);
+                pointers.current.set(event.pointerId, point);
+                if (pointers.current.size === 1) {
+                  press.current = { start: point, moved: false };
+                } else {
                   press.current.moved = true;
                 }
-                if (press.current.moved) {
-                  setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy }));
+              }}
+              onPointerMove={(event) => {
+                if (dragNode.current && dragNode.current.pointerId === event.pointerId) {
+                  const next = screenPoint(event);
+                  const dxScreen = next.x - dragNode.current.startScreen.x;
+                  const dyScreen = next.y - dragNode.current.startScreen.y;
+                  if (!dragNode.current.moved && Math.hypot(dxScreen, dyScreen) > TAP_SLOP) {
+                    dragNode.current.moved = true;
+                  }
+                  if (dragNode.current.moved) {
+                    const ref = dragNode.current.ref;
+                    const pos = {
+                      x: dragNode.current.startGraph.x + dxScreen / view.k,
+                      y: dragNode.current.startGraph.y + dyScreen / view.k,
+                    };
+                    setPinnedPositions((prev) => ({ ...prev, [ref]: pos }));
+                  }
+                  return;
                 }
-              } else if (pointers.current.size === 2) {
-                const other = [...pointers.current.entries()].find(([id]) => id !== event.pointerId)?.[1];
-                if (other) {
-                  setView((current) => pinchView(current, [prev, other], [next, other], MIN_ZOOM, MAX_ZOOM));
+
+                const prev = pointers.current.get(event.pointerId);
+                if (!prev) return;
+                const next = screenPoint(event);
+                if (pointers.current.size === 1) {
+                  const dx = next.x - prev.x;
+                  const dy = next.y - prev.y;
+                  if (
+                    !press.current.moved &&
+                    Math.hypot(next.x - press.current.start.x, next.y - press.current.start.y) > TAP_SLOP
+                  ) {
+                    press.current.moved = true;
+                  }
+                  if (press.current.moved) {
+                    setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy }));
+                  }
+                } else if (pointers.current.size === 2) {
+                  const other = [...pointers.current.entries()].find(([id]) => id !== event.pointerId)?.[1];
+                  if (other) {
+                    setView((current) => pinchView(current, [prev, other], [next, other], MIN_ZOOM, MAX_ZOOM));
+                  }
                 }
-              }
-              pointers.current.set(event.pointerId, next);
-            }}
-            onPointerUp={(event) => {
-              const wasSingle = pointers.current.size === 1;
-              pointers.current.delete(event.pointerId);
-              if (wasSingle && !press.current.moved) {
-                const target = event.target as Element | null;
-                if (!target?.closest("[data-lm-graph-node]")) {
-                  const hit = nodeAt(event);
-                  if (hit) onSelectNodeRef(hit);
-                  else onSelectNodeRef(null);
+                pointers.current.set(event.pointerId, next);
+              }}
+              onPointerUp={(event) => {
+                if (dragNode.current && dragNode.current.pointerId === event.pointerId) {
+                  const finished = dragNode.current;
+                  dragNode.current = null;
+                  if (!finished.moved) navigateTo(finished.ref);
+                  return;
                 }
-              }
-            }}
-            onPointerCancel={(event) => {
-              pointers.current.delete(event.pointerId);
-            }}
-          >
-            <defs>
-              <marker
-                id={ARROW_EXPLICIT_ID}
-                viewBox="0 0 10 10"
-                refX="8"
-                refY="5"
-                markerWidth="5"
-                markerHeight="5"
-                orient="auto-start-reverse"
-              >
-                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="var(--lm-graph-edge)" />
-              </marker>
-              <marker
-                id={ARROW_EXPLICIT_LIT_ID}
-                viewBox="0 0 10 10"
-                refX="8"
-                refY="5"
-                markerWidth="6"
-                markerHeight="6"
-                orient="auto-start-reverse"
-              >
-                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="var(--lm-graph-ink)" />
-              </marker>
-            </defs>
-            <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-              <g>{edgeLayer}</g>
-              <g>{nodeLayer}</g>
-            </g>
-          </svg>
-
-          {activeNode ? (
-            <aside data-lm-graph-card aria-label="Selected node details">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
-                    <span
-                      className="inline-block size-2 rounded-full"
-                      style={{ background: familyColour(activeNode.family) }}
-                    />
-                    <span>
-                      {activeNode.nodeType === "lore"
-                        ? `${activeNode.lorebookName} · ${FAMILY_META[activeNode.family].label}`
-                        : activeNode.nodeType === "character"
-                          ? "Character card"
-                          : "Persona"}
-                    </span>
-                  </div>
-                  <h3 className="mt-0.5 break-words text-sm font-semibold">{activeNode.name}</h3>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
-                    title="Focus on this node"
-                    aria-label="Focus on this node"
-                    onClick={() => {
-                      setFocusPick(activeNode.ref);
-                      setWhole(false);
-                    }}
+                const wasSingle = pointers.current.size === 1;
+                pointers.current.delete(event.pointerId);
+                if (wasSingle && !press.current.moved) {
+                  const target = event.target as Element | null;
+                  if (!target?.closest("[data-lm-graph-node]")) {
+                    const hit = nodeAt(event);
+                    if (hit) navigateTo(hit);
+                    else navigateTo(null);
+                  }
+                }
+              }}
+              onPointerCancel={(event) => {
+                if (dragNode.current?.pointerId === event.pointerId) dragNode.current = null;
+                pointers.current.delete(event.pointerId);
+              }}
+            >
+              <defs>
+                <pattern
+                  id="lm-hatch-character"
+                  patternUnits="userSpaceOnUse"
+                  width="6"
+                  height="6"
+                  patternTransform="rotate(45)"
+                >
+                  <rect width="6" height="6" fill="var(--lm-graph-surface)" />
+                  <line
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="6"
+                    stroke="var(--lm-graph-character)"
+                    strokeOpacity="0.45"
+                    strokeWidth="2.5"
+                  />
+                </pattern>
+                <pattern
+                  id="lm-hatch-item"
+                  patternUnits="userSpaceOnUse"
+                  width="6"
+                  height="6"
+                  patternTransform="rotate(45)"
+                >
+                  <rect width="6" height="6" fill="var(--lm-graph-surface)" />
+                  <line
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="6"
+                    stroke="var(--lm-graph-item)"
+                    strokeOpacity="0.45"
+                    strokeWidth="2.5"
+                  />
+                </pattern>
+                <pattern
+                  id="lm-hatch-ability"
+                  patternUnits="userSpaceOnUse"
+                  width="6"
+                  height="6"
+                  patternTransform="rotate(45)"
+                >
+                  <rect width="6" height="6" fill="var(--lm-graph-surface)" />
+                  <line
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="6"
+                    stroke="var(--lm-graph-ability)"
+                    strokeOpacity="0.45"
+                    strokeWidth="2.5"
+                  />
+                </pattern>
+                <marker
+                  id={ARROW_EXPLICIT_ID}
+                  viewBox="0 0 10 10"
+                  refX="8.5"
+                  refY="5"
+                  markerWidth="7.5"
+                  markerHeight="7.5"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 1 L 9 5 L 0 9 L 2.2 5 z" fill="var(--lm-graph-edge)" />
+                </marker>
+                <marker
+                  id={ARROW_EXPLICIT_LIT_ID}
+                  viewBox="0 0 10 10"
+                  refX="8.5"
+                  refY="5"
+                  markerWidth="8.5"
+                  markerHeight="8.5"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 1 L 9 5 L 0 9 L 2.2 5 z" fill="var(--lm-graph-ink)" />
+                </marker>
+                {Object.entries(RELATION_COLORS).map(([rel, color]) => (
+                  <marker
+                    key={rel}
+                    id={`lm-graph-arrow-rel-${rel}`}
+                    viewBox="0 0 10 10"
+                    refX="8.5"
+                    refY="5"
+                    markerWidth="8.5"
+                    markerHeight="8.5"
+                    orient="auto-start-reverse"
                   >
-                    <Focus size="0.875rem" />
-                  </button>
-                  <button
-                    type="button"
-                    className="mari-chrome-control mari-chrome-control--small mari-chrome-control--icon"
-                    aria-label="Close inspector"
-                    onClick={() => onSelectNodeRef(null)}
-                  >
-                    <X size="0.875rem" />
-                  </button>
-                </div>
-              </div>
+                    <path d="M 0 1 L 9 5 L 0 9 L 2.2 5 z" fill={color} />
+                  </marker>
+                ))}
+                <marker
+                  id={ARROW_MENTION_ID}
+                  viewBox="0 0 10 10"
+                  refX="8.5"
+                  refY="5"
+                  markerWidth="6.5"
+                  markerHeight="6.5"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 1.2 L 9 5 L 0 8.8 L 2 5 z" fill="var(--lm-graph-mention)" />
+                </marker>
+                <marker
+                  id={ARROW_MENTION_LIT_ID}
+                  viewBox="0 0 10 10"
+                  refX="8.5"
+                  refY="5"
+                  markerWidth="7.5"
+                  markerHeight="7.5"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 1.2 L 9 5 L 0 8.8 L 2 5 z" fill="var(--lm-graph-ink)" />
+                </marker>
+              </defs>
+              <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+                <g>{edgeLayer}</g>
+                <g>{nodeLayer}</g>
+              </g>
+            </svg>
 
-              {activeNode.description || (activeNode.nodeType === "lore" && activeNode.content) ? (
-                <p className="line-clamp-4 text-xs text-[var(--muted-foreground)]">
-                  {activeNode.description || (activeNode.nodeType === "lore" ? activeNode.content : "")}
-                </p>
-              ) : null}
+            {floating ? inspectorCard : null}
+          </div>
 
-              {activeNode.nodeType === "lore" && activeNode.keys.length > 0 ? (
-                <div className="flex flex-wrap gap-1">
-                  {activeNode.keys.slice(0, 6).map((key) => (
-                    <span
-                      key={key}
-                      className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]"
-                    >
-                      {key}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span>ID links ({activeExplicitOutgoing.length + activeExplicitIncoming.length})</span>
-                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">Solid edges</span>
-                </div>
-                {activeExplicitOutgoing.length === 0 && activeExplicitIncoming.length === 0 ? (
-                  <p className="text-[0.6875rem] text-[var(--muted-foreground)]">No explicit ID links yet.</p>
-                ) : (
-                  <div className="flex flex-col gap-1">
-                    {activeExplicitOutgoing.map((item) => (
-                      <div
-                        key={item.key}
-                        className="flex items-center justify-between gap-1 rounded border border-[var(--border)] px-2 py-1 text-xs"
-                      >
-                        <button
-                          type="button"
-                          className="min-w-0 flex-1 truncate text-left hover:underline"
-                          onClick={() => {
-                            if (shownRefs.has(item.targetRef)) onSelectNodeRef(item.targetRef);
-                          }}
-                        >
-                          <span className="text-[var(--muted-foreground)]">{item.relation} → </span>
-                          <span className="font-medium">{item.targetName}</span>
-                        </button>
-                        {activeNode.nodeType === "lore" ? (
-                          <button
-                            type="button"
-                            disabled={savingRef === activeNode.ref}
-                            className="shrink-0 p-1 text-[var(--destructive)] disabled:opacity-40"
-                            aria-label={`Remove link to ${item.targetName}`}
-                            onClick={() => void handleRemoveExplicit(activeNode, item.key)}
-                          >
-                            <Trash2 size="0.75rem" />
-                          </button>
-                        ) : null}
-                      </div>
-                    ))}
-                    {activeExplicitIncoming.map((edge, idx) => (
-                      <button
-                        key={`${edge.sourceRef}|${idx}`}
-                        type="button"
-                        className="truncate rounded border border-[var(--border)] px-2 py-1 text-left text-xs hover:bg-[var(--accent)]/30"
-                        onClick={() => {
-                          if (shownRefs.has(edge.sourceRef)) onSelectNodeRef(edge.sourceRef);
-                        }}
-                      >
-                        <span className="font-medium">{allNodesByRef.get(edge.sourceRef)?.name ?? edge.sourceRef}</span>
-                        <span className="text-[var(--muted-foreground)]"> — {edge.relation} → this</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {activeNode.nodeType === "lore" ? (
-                <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
-                  <div className="flex items-center justify-between gap-2 text-xs font-medium">
-                    <span>Detected mentions ({activeMentions.length})</span>
-                    <select
-                      aria-label="Promotion relation"
-                      value={relationDraft}
-                      onChange={(event) => setRelationDraft(event.target.value)}
-                      className="mari-chrome-field h-6 rounded px-1.5 text-[0.6875rem]"
-                    >
-                      {RELATION_PRESETS.map((rel) => (
-                        <option key={rel} value={rel}>
-                          {rel}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  {activeMentions.length === 0 ? (
-                    <p className="text-[0.6875rem] text-[var(--muted-foreground)]">No unlinked mentions detected.</p>
-                  ) : (
-                    <div className="flex flex-col gap-1">
-                      {activeMentions.map((edge, index) => {
-                        const isOutgoing = edge.sourceRef === activeNode.ref;
-                        const otherRef = isOutgoing ? edge.targetRef : edge.sourceRef;
-                        const otherName = allNodesByRef.get(otherRef)?.name ?? otherRef;
-                        return (
-                          <div
-                            key={`${edge.sourceRef}|${edge.targetRef}|${index}`}
-                            className="flex items-center justify-between gap-1.5 rounded border border-dashed border-[var(--border)] px-2 py-1 text-xs"
-                          >
-                            <button
-                              type="button"
-                              className="min-w-0 flex-1 truncate text-left hover:underline"
-                              onClick={() => {
-                                if (shownRefs.has(otherRef)) onSelectNodeRef(otherRef);
-                              }}
-                            >
-                              <span className="font-medium">{otherName}</span>
-                              {edge.matchedText ? (
-                                <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                                  {" "}
-                                  ({isOutgoing ? `mentions "${edge.matchedText}"` : "mentions this"})
-                                </span>
-                              ) : null}
-                            </button>
-                            {isOutgoing ? (
-                              <button
-                                type="button"
-                                disabled={savingRef === activeNode.ref}
-                                className="mari-chrome-control mari-chrome-control--small shrink-0 disabled:opacity-50"
-                                onClick={() => void handlePromoteMention(edge)}
-                              >
-                                Promote
-                              </button>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              ) : null}
-
-              {activeNode.nodeType === "lore" && linkableTargets.length > 0 ? (
-                <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
-                  <span className="block text-xs font-medium">Add ID link</span>
-                  <div className="flex gap-1.5">
-                    <select
-                      aria-label="Target entity"
-                      value={addTargetRef}
-                      onChange={(event) => setAddTargetRef(event.target.value)}
-                      className="mari-chrome-field min-w-0 flex-1 rounded px-2 py-1 text-xs"
-                    >
-                      <option value="">Pick entry, card, or persona…</option>
-                      {linkableTargets.map((target) => (
-                        <option key={target.ref} value={target.ref}>
-                          {target.name} ({target.nodeType === "lore" ? target.lorebookName : target.nodeType})
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      aria-label="New link relation"
-                      value={addRelation}
-                      onChange={(event) => setAddRelation(event.target.value)}
-                      className="mari-chrome-field w-28 rounded px-1.5 py-1 text-xs"
-                    >
-                      {RELATION_PRESETS.map((rel) => (
-                        <option key={rel} value={rel}>
-                          {rel}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={!addTargetRef || savingRef === activeNode.ref}
-                    onClick={() => void handleAddExplicit()}
-                    className="mari-chrome-control mari-chrome-control--small w-full justify-center disabled:opacity-50"
-                  >
-                    <Link2 size="0.75rem" />
-                    Link by ID
-                  </button>
-                </div>
-              ) : null}
-            </aside>
-          ) : null}
+          {!floating ? inspectorCard : null}
         </div>
       )}
 
@@ -1154,8 +1443,20 @@ export function LorebookGraph({
           {shown.nodes.length} nodes · {shown.edges.filter((e) => e.kind === "explicit").length} ID links ·{" "}
           {shown.edges.filter((e) => e.kind === "mention").length} mentions
         </span>
-        <span>Solid = explicit ID link · Dashed = text mention · Double-click node to focus</span>
+        <span>
+          Solid = ID link · Dashed = mention · Hatched = book-category hint · Drag nodes to pin · Double-click to
+          focus/expand
+        </span>
       </div>
+
+      <EntryReaderModal
+        node={readerNode}
+        initialMode={readerState?.mode ?? "read"}
+        saving={Boolean(readerNode && savingRef === readerNode.ref)}
+        onClose={() => setReaderState(null)}
+        onOpenLorebook={onOpenLorebook}
+        onUpdateEntry={onUpdateEntry}
+      />
     </div>
   );
 

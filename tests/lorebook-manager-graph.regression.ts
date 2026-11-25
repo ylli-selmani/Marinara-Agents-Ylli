@@ -7,6 +7,8 @@ import {
 import {
   buildLorebookGraph,
   classifyEntryFamily,
+  classifyEntryWithFallback,
+  collapseBidirectionalEdges,
   defaultFocus,
   extractMentionEdges,
   layoutGraph,
@@ -21,6 +23,7 @@ import type {
 // ── EntityRef parsing and relationship keys ───────────────────────────────────
 assert.deepEqual(parseEntityRef("entry-123"), { kind: "lore", id: "entry-123", ref: "lore:entry-123" });
 assert.deepEqual(parseEntityRef("char:elara"), { kind: "char", id: "elara", ref: "char:elara" });
+assert.deepEqual(parseEntityRef("book:b1"), { kind: "book", id: "b1", ref: "book:b1" });
 assert.deepEqual(parseEntityRef("loc:imperial-city"), {
   kind: "loc",
   id: "imperial-city",
@@ -28,16 +31,61 @@ assert.deepEqual(parseEntityRef("loc:imperial-city"), {
 });
 assert.equal(parseEntityRef("   "), null);
 assert.equal(formatEntityRef("persona", "p1"), "persona:p1");
+assert.equal(formatEntityRef("book", "b1"), "book:b1");
 assert.equal(toRelationshipKey("lore:entry-123"), "entry-123");
 assert.equal(toRelationshipKey("char:elara"), "char:elara");
 
-// ── Family classification ─────────────────────────────────────────────────────
+// ── Family classification, explicit lore, creatures, abilities, multi-tags ────
 assert.equal(classifyEntryFamily("location", "world"), "location");
+assert.equal(classifyEntryFamily("locations", "world"), "location");
 assert.equal(classifyEntryFamily("Guild", "world"), "faction");
-assert.equal(classifyEntryFamily("", "npc"), "character");
+assert.equal(classifyEntryFamily("Factions", "world"), "faction");
+assert.equal(classifyEntryFamily("characters", "world"), "character");
 assert.equal(classifyEntryFamily("artifact", "world"), "item");
-assert.equal(classifyEntryFamily("quest", "world"), "quest");
+assert.equal(classifyEntryFamily("Items", "world"), "item");
+assert.equal(classifyEntryFamily("creature", "world"), "creature");
+assert.equal(classifyEntryFamily("races", "world"), "creature");
+assert.equal(classifyEntryFamily("quirk", "world"), "ability");
+assert.equal(classifyEntryFamily("spell", "world"), "ability");
+assert.equal(classifyEntryFamily("quests", "world"), "quest");
 assert.equal(classifyEntryFamily("", "world"), "lore");
+
+assert.deepEqual(classifyEntryWithFallback("", "character"), {
+  family: "lore",
+  secondaryFamilies: [],
+  inferredFamily: "character",
+});
+assert.deepEqual(classifyEntryWithFallback("lore", "character"), {
+  family: "lore",
+  secondaryFamilies: [],
+  inferredFamily: null,
+});
+assert.deepEqual(classifyEntryWithFallback("", "npc"), {
+  family: "lore",
+  secondaryFamilies: [],
+  inferredFamily: "character",
+});
+assert.deepEqual(classifyEntryWithFallback("", "spellbook"), {
+  family: "lore",
+  secondaryFamilies: [],
+  inferredFamily: "ability",
+});
+assert.deepEqual(classifyEntryWithFallback("location, faction", "character"), {
+  family: "location",
+  secondaryFamilies: ["faction"],
+  inferredFamily: null,
+});
+
+// ── Mutual edge collapsing ────────────────────────────────────────────────────
+const collapsedEdges = collapseBidirectionalEdges([
+  { kind: "mention", sourceRef: "lore:a", targetRef: "lore:b", relation: "mentions", matchedText: "Alpha" },
+  { kind: "mention", sourceRef: "lore:b", targetRef: "lore:a", relation: "mentions", matchedText: "Beta" },
+  { kind: "mention", sourceRef: "lore:a", targetRef: "lore:c", relation: "mentions", matchedText: "Gamma" },
+]);
+assert.equal(collapsedEdges.length, 2);
+assert.equal(collapsedEdges[0]?.bidirectional, true);
+assert.equal(collapsedEdges[0]?.reverseMatchedText, "Beta");
+assert.equal(collapsedEdges[1]?.bidirectional, false);
 
 // ── Mention extraction & explicit-edge deduplication ──────────────────────────
 const nodes: LmGraphNode[] = [
@@ -53,8 +101,10 @@ const nodes: LmGraphNode[] = [
     content: "Tertia Plotia runs her boutique here near Arcane University.",
     keys: ["Imperial City", "IC", "/imperial\\s+city/i"],
     secondaryKeys: [],
-    tag: "location",
+    tag: "location, faction",
     family: "location",
+    secondaryFamilies: ["faction"],
+    inferredFamily: null,
     enabled: true,
     constant: false,
     locked: false,
@@ -74,6 +124,8 @@ const nodes: LmGraphNode[] = [
     secondaryKeys: [],
     tag: "location",
     family: "location",
+    secondaryFamilies: [],
+    inferredFamily: null,
     enabled: true,
     constant: false,
     locked: false,
@@ -89,6 +141,15 @@ const nodes: LmGraphNode[] = [
     family: "character",
   },
   {
+    nodeType: "character",
+    ref: "char:orphan",
+    id: "orphan",
+    name: "Orphan Card",
+    description: "Unconnected",
+    aliases: [],
+    family: "character",
+  },
+  {
     nodeType: "lore",
     ref: "lore:e3",
     id: "e3",
@@ -97,11 +158,13 @@ const nodes: LmGraphNode[] = [
     lorebookCategory: "world",
     name: "Ox",
     description: "",
-    content: "Short name should not false-match.",
+    content: "Imperial City merchant notes.",
     keys: ["ox"],
     secondaryKeys: [],
     tag: "",
     family: "lore",
+    secondaryFamilies: [],
+    inferredFamily: null,
     enabled: true,
     constant: false,
     locked: false,
@@ -114,15 +177,35 @@ const explicitEdges: LmGraphEdge[] = [
 ];
 
 const mentionEdges = extractMentionEdges(nodes, explicitEdges);
-assert.equal(mentionEdges.length, 1, "Explicit pair (e1 -> e2) and <3-char keys (Ox, IC) must be skipped");
-assert.equal(mentionEdges[0]?.sourceRef, "lore:e1");
-assert.equal(mentionEdges[0]?.targetRef, "char:c1");
+assert.equal(mentionEdges.length, 2, "Explicit pair and <3-char keys must be skipped");
+assert.ok(mentionEdges.some((edge) => edge.sourceRef === "lore:e1" && edge.targetRef === "char:c1"));
+assert.ok(mentionEdges.some((edge) => edge.sourceRef === "lore:e3" && edge.targetRef === "lore:e1"));
 
-// ── Graph filtering, neighbourhood, and deterministic layout ──────────────────
+// ── Graph filtering, multi-tag survival, card book links, collapsed books ─────
 const payload: LmGraphPayload = {
   lorebooks: [
-    { id: "b1", name: "Cyrodiil", description: "", category: "world", enabled: true, entryCount: 2 },
-    { id: "b2", name: "Misc", description: "", category: "world", enabled: true, entryCount: 1 },
+    {
+      id: "b1",
+      name: "Cyrodiil",
+      description: "",
+      category: "world",
+      enabled: true,
+      entryCount: 2,
+      characterIds: ["c1"],
+      personaIds: [],
+      loaded: true,
+    },
+    {
+      id: "b2",
+      name: "Misc",
+      description: "",
+      category: "world",
+      enabled: true,
+      entryCount: 1,
+      characterIds: [],
+      personaIds: [],
+      loaded: true,
+    },
   ],
   nodes,
   explicitEdges,
@@ -130,14 +213,49 @@ const payload: LmGraphPayload = {
   danglingRelationshipCount: 0,
 };
 
-const b1Only = buildLorebookGraph(payload, { lorebookIds: new Set(["b1"]), showMentions: false });
-assert.equal(b1Only.nodes.filter((n) => n.nodeType === "lore").length, 2);
-assert.equal(b1Only.edges.length, 1);
-assert.equal(defaultFocus(b1Only, null), "lore:e1");
-assert.deepEqual([...neighbourhood(b1Only, "lore:e1", 1)].sort(), ["lore:e1", "lore:e2"]);
+const b1NoMentions = buildLorebookGraph(payload, {
+  lorebookIds: new Set(["b1"]),
+  showMentions: false,
+  hideOrphans: true,
+});
+assert.equal(b1NoMentions.nodes.filter((n) => n.nodeType === "lore").length, 2);
+assert.ok(b1NoMentions.nodes.some((n) => n.ref === "book:b1"));
+assert.ok(!b1NoMentions.nodes.some((n) => n.ref === "char:orphan"));
+assert.ok(
+  b1NoMentions.edges.some((e) => e.kind === "book_link" && e.sourceRef === "char:c1" && e.targetRef === "book:b1"),
+);
+assert.equal(defaultFocus(b1NoMentions, null), "book:b1");
+assert.deepEqual([...neighbourhood(b1NoMentions, "lore:e1", 1)].sort(), ["lore:e1", "lore:e2"]);
 
-const layoutA = layoutGraph(b1Only, 1, 50);
-const layoutB = layoutGraph(b1Only, 1, 50);
+// Multi-tagged entry ("location, faction") survives hiding "location" while "faction" stays visible.
+const hiddenLocGraph = buildLorebookGraph(payload, {
+  lorebookIds: new Set(["b1"]),
+  hiddenFamilies: new Set(["location"]),
+});
+assert.ok(hiddenLocGraph.nodes.some((n) => n.ref === "lore:e1"));
+assert.ok(!hiddenLocGraph.nodes.some((n) => n.ref === "lore:e2"));
+
+const collapsedB1 = buildLorebookGraph(payload, {
+  lorebookIds: new Set(["b1", "b2"]),
+  collapsedLorebookIds: new Set(["b1"]),
+});
+assert.ok(!collapsedB1.nodes.some((n) => n.nodeType === "lore" && n.lorebookId === "b1"));
+assert.ok(collapsedB1.nodes.some((n) => n.ref === "book:b1" && n.nodeType === "lorebook" && n.collapsed));
+assert.ok(
+  collapsedB1.edges.some((e) => e.kind === "mention" && e.sourceRef === "lore:e3" && e.targetRef === "book:b1"),
+);
+
+// ── Layout determinism and spread scaling ─────────────────────────────────────
+const layoutA = layoutGraph(b1NoMentions, 1, 50, 1);
+const layoutB = layoutGraph(b1NoMentions, 1, 50, 1);
 assert.deepEqual([...layoutA.positions.entries()], [...layoutB.positions.entries()]);
+
+const layoutWide = layoutGraph(b1NoMentions, 1, 50, 2.2);
+const dist = (p: Map<string, { x: number; y: number }>, a: string, b: string) =>
+  Math.hypot(p.get(a)!.x - p.get(b)!.x, p.get(a)!.y - p.get(b)!.y);
+assert.ok(
+  dist(layoutWide.positions, "lore:e1", "lore:e2") > dist(layoutA.positions, "lore:e1", "lore:e2"),
+  "Higher spread factor must increase distance between connected nodes",
+);
 
 console.log("lorebook-manager-graph.regression: all assertions passed");

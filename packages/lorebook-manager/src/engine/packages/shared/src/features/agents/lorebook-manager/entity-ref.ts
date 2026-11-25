@@ -1,4 +1,4 @@
-export type EntityRefKind = "lore" | "char" | "persona" | "npc" | "item" | "itemdef" | "loc";
+export type EntityRefKind = "lore" | "char" | "persona" | "book" | "npc" | "item" | "itemdef" | "loc";
 
 export interface ParsedEntityRef {
   kind: EntityRefKind;
@@ -6,7 +6,7 @@ export interface ParsedEntityRef {
   ref: string;
 }
 
-const KNOWN_KINDS = new Set<EntityRefKind>(["lore", "char", "persona", "npc", "item", "itemdef", "loc"]);
+const KNOWN_KINDS = new Set<EntityRefKind>(["lore", "char", "persona", "book", "npc", "item", "itemdef", "loc"]);
 
 /**
  * Parse a relationship target or entity reference string. Bare non-empty IDs

@@ -1,6 +1,15 @@
-export type EntityFamily = "character" | "location" | "faction" | "item" | "quest" | "lore";
+export type EntityFamily = "character" | "location" | "faction" | "item" | "creature" | "ability" | "quest" | "lore";
 
-export const ENTITY_FAMILIES: readonly EntityFamily[] = ["character", "location", "faction", "item", "quest", "lore"];
+export const ENTITY_FAMILIES: readonly EntityFamily[] = [
+  "character",
+  "location",
+  "faction",
+  "item",
+  "creature",
+  "ability",
+  "quest",
+  "lore",
+];
 
 export interface LmLorebookSummary {
   id: string;
@@ -9,6 +18,9 @@ export interface LmLorebookSummary {
   category: string;
   enabled: boolean;
   entryCount: number;
+  characterIds: string[];
+  personaIds: string[];
+  loaded: boolean;
 }
 
 export interface LmEntryNode {
@@ -25,6 +37,7 @@ export interface LmEntryNode {
   secondaryKeys: string[];
   tag: string;
   family: EntityFamily;
+  inferredFamily: EntityFamily | null;
   enabled: boolean;
   constant: boolean;
   locked: boolean;
@@ -41,14 +54,29 @@ export interface LmEntityNode {
   family: "character";
 }
 
-export type LmGraphNode = LmEntryNode | LmEntityNode;
+export interface LmBookNode {
+  nodeType: "lorebook";
+  ref: string;
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  enabled: boolean;
+  entryCount: number;
+  collapsed: boolean;
+  family: "lore";
+}
+
+export type LmGraphNode = LmEntryNode | LmEntityNode | LmBookNode;
 
 export interface LmGraphEdge {
-  kind: "explicit" | "mention";
+  kind: "explicit" | "mention" | "book_link";
   sourceRef: string;
   targetRef: string;
   relation: string;
   matchedText?: string;
+  bidirectional?: boolean;
+  reverseMatchedText?: string;
 }
 
 export interface LmGraphPayload {
@@ -61,11 +89,14 @@ export interface LmGraphPayload {
 
 export interface LmGraphFilters {
   lorebookIds?: ReadonlySet<string>;
+  collapsedLorebookIds?: ReadonlySet<string>;
   hiddenFamilies?: ReadonlySet<EntityFamily>;
   showCharacters?: boolean;
   showPersonas?: boolean;
   showExplicit?: boolean;
   showMentions?: boolean;
+  showBookHubs?: boolean;
+  hideOrphans?: boolean;
   search?: string;
 }
 

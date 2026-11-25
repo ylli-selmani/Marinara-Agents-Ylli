@@ -8,8 +8,20 @@ export const API_ROOT = "/api/lorebook-manager";
 
 export const lmQueryKeys = {
   root: ["lorebook-manager"] as const,
-  graph: ["lorebook-manager", "graph"] as const,
+  graph: (scopeKey: string) => ["lorebook-manager", "graph", scopeKey] as const,
 };
+
+export interface LmEntryPatch {
+  name?: string;
+  description?: string;
+  content?: string;
+  keys?: string[];
+  secondaryKeys?: string[];
+  tag?: string;
+  enabled?: boolean;
+  constant?: boolean;
+  relationships?: Record<string, string>;
+}
 
 function getAdminSecretHeader(): Record<string, string> {
   if (typeof window === "undefined") return {};
@@ -35,8 +47,15 @@ async function readErrorMessage(response: Response): Promise<string> {
   return `Request failed (${response.status})`;
 }
 
-export async function fetchLorebookManagerGraph(): Promise<LmGraphPayload> {
-  const response = await fetch(`${API_ROOT}/graph`, {
+export async function fetchLorebookManagerGraph(lorebookIds?: readonly string[] | null): Promise<LmGraphPayload> {
+  let query = "";
+  if (lorebookIds != null) {
+    query =
+      lorebookIds.length === 0
+        ? "?lorebookIds=__none__"
+        : `?lorebookIds=${lorebookIds.map((id) => encodeURIComponent(id)).join(",")}`;
+  }
+  const response = await fetch(`${API_ROOT}/graph${query}`, {
     credentials: "same-origin",
     headers: getAdminSecretHeader(),
   });
@@ -44,11 +63,7 @@ export async function fetchLorebookManagerGraph(): Promise<LmGraphPayload> {
   return (await response.json()) as LmGraphPayload;
 }
 
-export async function patchEntryRelationships(
-  lorebookId: string,
-  entryId: string,
-  relationships: Record<string, string>,
-): Promise<void> {
+export async function patchLorebookEntry(lorebookId: string, entryId: string, patch: LmEntryPatch): Promise<void> {
   const response = await fetch(
     `/api/lorebooks/${encodeURIComponent(lorebookId)}/entries/${encodeURIComponent(entryId)}`,
     {
@@ -59,8 +74,16 @@ export async function patchEntryRelationships(
         [CSRF_HEADER]: CSRF_HEADER_VALUE,
         ...getAdminSecretHeader(),
       },
-      body: JSON.stringify({ relationships }),
+      body: JSON.stringify(patch),
     },
   );
   if (!response.ok) throw new Error(await readErrorMessage(response));
+}
+
+export async function patchEntryRelationships(
+  lorebookId: string,
+  entryId: string,
+  relationships: Record<string, string>,
+): Promise<void> {
+  await patchLorebookEntry(lorebookId, entryId, { relationships });
 }

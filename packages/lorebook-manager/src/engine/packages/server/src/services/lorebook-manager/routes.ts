@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { formatEntityRef, parseEntityRef } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
-  classifyEntryFamily,
+  classifyEntryWithFallback,
   extractMentionEdges,
 } from "../../../../shared/src/features/agents/lorebook-manager/graph-model.js";
 import type {
@@ -40,6 +40,17 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+function uniqueNonEmpty(single: unknown, list: unknown): string[] {
+  const result = new Set<string>();
+  const one = asString(single).trim();
+  if (one) result.add(one);
+  for (const item of asStringArray(list)) {
+    const trimmed = item.trim();
+    if (trimmed) result.add(trimmed);
+  }
+  return [...result];
+}
+
 function parseRelationships(value: unknown): Record<string, string> {
   const record = asRecord(value);
   const result: Record<string, string> = {};
@@ -74,7 +85,21 @@ function extractPersonaFields(rawData: unknown): { name: string; description: st
   return { name, description, aliases };
 }
 
-export async function buildLorebookManagerGraphPayload(): Promise<LmGraphPayload> {
+function parseLorebookIdsQuery(rawQuery: unknown): ReadonlySet<string> | null {
+  if (typeof rawQuery !== "string") return null;
+  const trimmed = rawQuery.trim();
+  if (!trimmed) return null;
+  if (trimmed === "__none__") return new Set();
+  const ids = trimmed
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return ids.length > 0 ? new Set(ids) : new Set();
+}
+
+export async function buildLorebookManagerGraphPayload(
+  requestedLorebookIds?: ReadonlySet<string> | null,
+): Promise<LmGraphPayload> {
   const runtime = getLorebookManagerRuntime();
   const [rawLorebooks, rawCharacters, rawPersonas] = await Promise.all([
     runtime.resources.listLorebooks(),
@@ -90,6 +115,7 @@ export async function buildLorebookManagerGraphPayload(): Promise<LmGraphPayload
     const bookName = asString(bookData.name, "Untitled lorebook");
     const bookCategory = asString(bookData.category, "uncategorized");
     const entries = Array.isArray(rawBook.entries) ? rawBook.entries : [];
+    const loaded = requestedLorebookIds == null || requestedLorebookIds.has(rawBook.id);
 
     lorebooks.push({
       id: rawBook.id,
@@ -98,13 +124,19 @@ export async function buildLorebookManagerGraphPayload(): Promise<LmGraphPayload
       category: bookCategory,
       enabled: bookData.enabled !== false,
       entryCount: entries.length,
+      characterIds: uniqueNonEmpty(bookData.characterId, bookData.characterIds),
+      personaIds: uniqueNonEmpty(bookData.personaId, bookData.personaIds),
+      loaded,
     });
+
+    if (!loaded) continue;
 
     for (const rawEntry of entries) {
       const entry = asRecord(rawEntry);
       const id = asString(entry.id).trim();
       if (!id) continue;
       const tag = asString(entry.tag).trim();
+      const classification = classifyEntryWithFallback(tag, bookCategory);
       entryNodes.push({
         nodeType: "lore",
         ref: formatEntityRef("lore", id),
@@ -118,7 +150,9 @@ export async function buildLorebookManagerGraphPayload(): Promise<LmGraphPayload
         keys: asStringArray(entry.keys),
         secondaryKeys: asStringArray(entry.secondaryKeys),
         tag,
-        family: classifyEntryFamily(tag, bookCategory),
+        family: classification.family,
+        secondaryFamilies: classification.secondaryFamilies,
+        inferredFamily: classification.inferredFamily,
         enabled: entry.enabled !== false,
         constant: entry.constant === true,
         locked: entry.locked === true,
@@ -187,7 +221,9 @@ export async function buildLorebookManagerGraphPayload(): Promise<LmGraphPayload
 }
 
 export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/graph", async () => {
-    return buildLorebookManagerGraphPayload();
+  app.get("/graph", async (request) => {
+    const query = request.query as { lorebookIds?: unknown } | undefined;
+    const requestedIds = parseLorebookIdsQuery(query?.lorebookIds);
+    return buildLorebookManagerGraphPayload(requestedIds);
   });
 };

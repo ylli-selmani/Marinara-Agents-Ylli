@@ -1,36 +1,191 @@
-import type { EntityFamily, LmBuiltGraph, LmGraphEdge, LmGraphFilters, LmGraphNode, LmGraphPayload } from "./schema.js";
+import { formatEntityRef } from "./entity-ref.js";
+import type {
+  EntityFamily,
+  LmBookNode,
+  LmBuiltGraph,
+  LmGraphEdge,
+  LmGraphFilters,
+  LmGraphNode,
+  LmGraphPayload,
+} from "./schema.js";
 
-const CHARACTER_TAGS = new Set(["character", "char", "npc", "person", "companion", "cast"]);
+const CHARACTER_TAGS = new Set([
+  "character",
+  "characters",
+  "char",
+  "npc",
+  "npcs",
+  "person",
+  "people",
+  "companion",
+  "companions",
+  "cast",
+]);
 const LOCATION_TAGS = new Set([
   "location",
+  "locations",
   "place",
+  "places",
   "region",
+  "regions",
   "city",
+  "cities",
   "town",
+  "towns",
   "village",
+  "villages",
   "room",
+  "rooms",
   "building",
+  "buildings",
   "area",
+  "areas",
   "map",
+  "maps",
 ]);
-const FACTION_TAGS = new Set(["faction", "guild", "org", "organization", "clan", "order", "company", "group"]);
-const ITEM_TAGS = new Set(["item", "artifact", "weapon", "armor", "gear", "equipment", "spell", "relic"]);
-const QUEST_TAGS = new Set(["quest", "plot", "event", "arc", "hook", "thread", "scene"]);
+const FACTION_TAGS = new Set([
+  "faction",
+  "factions",
+  "guild",
+  "guilds",
+  "org",
+  "orgs",
+  "organization",
+  "organizations",
+  "clan",
+  "clans",
+  "order",
+  "orders",
+  "company",
+  "companies",
+  "group",
+  "groups",
+]);
+const ITEM_TAGS = new Set([
+  "item",
+  "items",
+  "artifact",
+  "artifacts",
+  "weapon",
+  "weapons",
+  "armor",
+  "gear",
+  "equipment",
+  "relic",
+  "relics",
+]);
+const CREATURE_TAGS = new Set([
+  "creature",
+  "creatures",
+  "species",
+  "race",
+  "races",
+  "monster",
+  "monsters",
+  "beast",
+  "beasts",
+  "demon",
+  "demons",
+  "spirit",
+  "spirits",
+  "animal",
+  "animals",
+]);
+const ABILITY_TAGS = new Set([
+  "ability",
+  "abilities",
+  "power",
+  "powers",
+  "quirk",
+  "quirks",
+  "spell",
+  "spells",
+  "skill",
+  "skills",
+  "magic",
+  "technique",
+  "techniques",
+  "trait",
+  "traits",
+  "class",
+  "classes",
+]);
+const LORE_TAGS = new Set([
+  "lore",
+  "world",
+  "history",
+  "concept",
+  "concepts",
+  "setting",
+  "rule",
+  "rules",
+  "context",
+  "general",
+]);
+const QUEST_TAGS = new Set([
+  "quest",
+  "quests",
+  "plot",
+  "plots",
+  "event",
+  "events",
+  "arc",
+  "arcs",
+  "hook",
+  "hooks",
+  "thread",
+  "threads",
+  "scene",
+  "scenes",
+]);
 
-/** Map a lorebook entry's tag (with category fallback) to a graph colour family. */
-export function classifyEntryFamily(tag: string | undefined, lorebookCategory: string | undefined): EntityFamily {
-  const normalizedTag = tag?.trim().toLowerCase() ?? "";
-  if (normalizedTag) {
-    if (CHARACTER_TAGS.has(normalizedTag)) return "character";
-    if (LOCATION_TAGS.has(normalizedTag)) return "location";
-    if (FACTION_TAGS.has(normalizedTag)) return "faction";
-    if (ITEM_TAGS.has(normalizedTag)) return "item";
-    if (QUEST_TAGS.has(normalizedTag)) return "quest";
+function mapSingleTag(token: string): EntityFamily | null {
+  if (CHARACTER_TAGS.has(token)) return "character";
+  if (LOCATION_TAGS.has(token)) return "location";
+  if (FACTION_TAGS.has(token)) return "faction";
+  if (ITEM_TAGS.has(token)) return "item";
+  if (CREATURE_TAGS.has(token)) return "creature";
+  if (ABILITY_TAGS.has(token)) return "ability";
+  if (QUEST_TAGS.has(token)) return "quest";
+  if (LORE_TAGS.has(token)) return "lore";
+  return null;
+}
+
+/**
+ * Classify a lorebook entry from comma-separated explicit `tag` values.
+ * Untagged entries inside `character`, `npc`, or `spellbook` lorebooks stay in
+ * `"lore"` while returning `inferredFamily` for soft visuals; an explicit
+ * `"lore"` tag clears that fallback.
+ */
+export function classifyEntryWithFallback(
+  tag: string | undefined,
+  lorebookCategory: string | undefined,
+): { family: EntityFamily; secondaryFamilies: EntityFamily[]; inferredFamily: EntityFamily | null } {
+  const matched: EntityFamily[] = [];
+  if (tag) {
+    for (const part of tag.split(",")) {
+      const token = part.trim().toLowerCase();
+      if (!token) continue;
+      const mapped = mapSingleTag(token);
+      if (mapped && !matched.includes(mapped)) matched.push(mapped);
+    }
+  }
+  if (matched.length > 0) {
+    return { family: matched[0]!, secondaryFamilies: matched.slice(1), inferredFamily: null };
   }
   const normalizedCategory = lorebookCategory?.trim().toLowerCase() ?? "";
-  if (normalizedCategory === "character" || normalizedCategory === "npc") return "character";
-  if (normalizedCategory === "spellbook") return "item";
-  return "lore";
+  if (normalizedCategory === "character" || normalizedCategory === "npc") {
+    return { family: "lore", secondaryFamilies: [], inferredFamily: "character" };
+  }
+  if (normalizedCategory === "spellbook") {
+    return { family: "lore", secondaryFamilies: [], inferredFamily: "ability" };
+  }
+  return { family: "lore", secondaryFamilies: [], inferredFamily: null };
+}
+
+/** Map a lorebook entry's tag (with category fallback suppressed on family count) to a graph colour family. */
+export function classifyEntryFamily(tag: string | undefined, lorebookCategory: string | undefined): EntityFamily {
+  return classifyEntryWithFallback(tag, lorebookCategory).family;
 }
 
 function escapeRegExp(value: string): string {
@@ -47,6 +202,7 @@ interface SearchTerm {
 }
 
 function compileSearchTerms(node: LmGraphNode): SearchTerm[] {
+  if (node.nodeType === "lorebook") return [];
   const rawTerms = node.nodeType === "lore" ? [node.name, ...node.keys] : [node.name, ...node.aliases];
   const seen = new Set<string>();
   const compiled: SearchTerm[] = [];
@@ -110,10 +266,49 @@ export function extractMentionEdges(
   return mentions;
 }
 
+/**
+ * Collapse opposing `A -> B` and `B -> A` edges of the same kind (`explicit` or
+ * `mention`) into a single undirected-visual edge marked `bidirectional: true`,
+ * preserving both relation labels / matched terms for tooltips and inspection.
+ */
+export function collapseBidirectionalEdges(edges: readonly LmGraphEdge[]): LmGraphEdge[] {
+  const result: LmGraphEdge[] = [];
+  const pairedIndex = new Map<string, number>();
+
+  for (const edge of edges) {
+    if (edge.kind === "book_link") {
+      result.push(edge);
+      continue;
+    }
+    const key = `${edge.kind}\u0000${pairKey(edge.sourceRef, edge.targetRef)}`;
+    const existingIndex = pairedIndex.get(key);
+    if (existingIndex === undefined) {
+      pairedIndex.set(key, result.length);
+      result.push({ ...edge, bidirectional: edge.bidirectional ?? false });
+      continue;
+    }
+    const existing = result[existingIndex]!;
+    if (existing.sourceRef === edge.sourceRef && existing.targetRef === edge.targetRef) continue;
+    const combinedRelation =
+      existing.relation === edge.relation ? existing.relation : `${existing.relation} / ${edge.relation}`;
+    result[existingIndex] = {
+      ...existing,
+      relation: combinedRelation,
+      bidirectional: true,
+      reverseMatchedText: edge.matchedText ?? existing.reverseMatchedText,
+    };
+  }
+
+  return result;
+}
+
 function matchesSearch(node: LmGraphNode, query: string): boolean {
   if (!query) return true;
   if (node.name.toLocaleLowerCase().includes(query)) return true;
   if (node.description.toLocaleLowerCase().includes(query)) return true;
+  if (node.nodeType === "lorebook") {
+    return node.category.toLocaleLowerCase().includes(query);
+  }
   if (node.nodeType === "lore") {
     if (node.tag.toLocaleLowerCase().includes(query)) return true;
     if (node.lorebookName.toLocaleLowerCase().includes(query)) return true;
@@ -127,40 +322,121 @@ function matchesSearch(node: LmGraphNode, query: string): boolean {
 export function buildLorebookGraph(payload: LmGraphPayload, filters: LmGraphFilters = {}): LmBuiltGraph {
   const lorebookIds = filters.lorebookIds;
   const filterByBooks = Boolean(lorebookIds && lorebookIds.size > 0);
+  const collapsedBooks = filters.collapsedLorebookIds ?? new Set<string>();
   const showCharacters = filters.showCharacters ?? true;
   const showPersonas = filters.showPersonas ?? true;
   const showExplicit = filters.showExplicit ?? true;
   const showMentions = filters.showMentions ?? true;
+  const showBookHubs = filters.showBookHubs ?? false;
+  const hideOrphans = filters.hideOrphans ?? false;
   const query = filters.search?.trim().toLocaleLowerCase() ?? "";
 
   const kept = new Map<string, LmGraphNode & { degree: number }>();
+  const collapsedRedirect = new Map<string, string>();
+
   for (const node of payload.nodes) {
+    if (node.nodeType === "lorebook") continue;
     if (node.nodeType === "lore") {
       if (filterByBooks && !lorebookIds!.has(node.lorebookId)) continue;
+      if (collapsedBooks.has(node.lorebookId)) {
+        collapsedRedirect.set(node.ref, formatEntityRef("book", node.lorebookId));
+        continue;
+      }
     } else if (node.nodeType === "character") {
       if (!showCharacters) continue;
     } else if (node.nodeType === "persona") {
       if (!showPersonas) continue;
     }
-    if (filters.hiddenFamilies?.has(node.family)) continue;
+    if (node.nodeType === "lore") {
+      const families = [node.family, ...node.secondaryFamilies];
+      if (filters.hiddenFamilies && families.every((family) => filters.hiddenFamilies!.has(family))) continue;
+    } else if (filters.hiddenFamilies?.has(node.family)) {
+      continue;
+    }
     if (!matchesSearch(node, query)) continue;
     kept.set(node.ref, { ...node, degree: 0 });
   }
 
-  const edges: LmGraphEdge[] = [];
-  const candidateEdges = [
+  const bookLinkEdges: LmGraphEdge[] = [];
+  for (const book of payload.lorebooks) {
+    if (!book.loaded) continue;
+    if (filterByBooks && !lorebookIds!.has(book.id)) continue;
+    const isCollapsed = collapsedBooks.has(book.id);
+    const linkedRefs: string[] = [];
+    for (const cid of book.characterIds) {
+      const ref = formatEntityRef("char", cid);
+      if (kept.has(ref)) linkedRefs.push(ref);
+    }
+    for (const pid of book.personaIds) {
+      const ref = formatEntityRef("persona", pid);
+      if (kept.has(ref)) linkedRefs.push(ref);
+    }
+    if (!isCollapsed && !showBookHubs && linkedRefs.length === 0) continue;
+
+    const bookRef = formatEntityRef("book", book.id);
+    const bookNode: LmBookNode = {
+      nodeType: "lorebook",
+      ref: bookRef,
+      id: book.id,
+      name: book.name,
+      description: book.description,
+      category: book.category,
+      enabled: book.enabled,
+      entryCount: book.entryCount,
+      collapsed: isCollapsed,
+      family: "lore",
+    };
+    if (!isCollapsed && !matchesSearch(bookNode, query)) continue;
+    if (isCollapsed && query && !matchesSearch(bookNode, query)) {
+      const hasMatchingEntry = payload.nodes.some(
+        (n) => n.nodeType === "lore" && n.lorebookId === book.id && matchesSearch(n, query),
+      );
+      if (!hasMatchingEntry) continue;
+    }
+    kept.set(bookRef, { ...bookNode, degree: 0 });
+
+    for (const targetRef of linkedRefs) {
+      bookLinkEdges.push({
+        kind: "book_link",
+        sourceRef: targetRef,
+        targetRef: bookRef,
+        relation: "linked_lorebook",
+      });
+    }
+  }
+
+  const remapRef = (ref: string) => collapsedRedirect.get(ref) ?? ref;
+  const candidateEdges: LmGraphEdge[] = [];
+  const seenDirected = new Set<string>();
+  const rawCandidateEdges = [
     ...(showExplicit ? payload.explicitEdges : []),
     ...(showMentions ? payload.mentionEdges : []),
   ];
-  for (const edge of candidateEdges) {
-    if (edge.sourceRef === edge.targetRef) continue;
-    if (!kept.has(edge.sourceRef) || !kept.has(edge.targetRef)) continue;
-    edges.push(edge);
+
+  for (const edge of rawCandidateEdges) {
+    const sourceRef = remapRef(edge.sourceRef);
+    const targetRef = remapRef(edge.targetRef);
+    if (sourceRef === targetRef) continue;
+    if (!kept.has(sourceRef) || !kept.has(targetRef)) continue;
+    const directedKey = `${edge.kind}\u0000${sourceRef}\u0000${targetRef}`;
+    if (seenDirected.has(directedKey)) continue;
+    seenDirected.add(directedKey);
+    candidateEdges.push(
+      sourceRef === edge.sourceRef && targetRef === edge.targetRef ? edge : { ...edge, sourceRef, targetRef },
+    );
+  }
+
+  const edges = [...collapseBidirectionalEdges(candidateEdges), ...bookLinkEdges];
+  for (const edge of edges) {
     kept.get(edge.sourceRef)!.degree += 1;
     kept.get(edge.targetRef)!.degree += 1;
   }
 
-  return { nodes: [...kept.values()], edges };
+  const nodes = hideOrphans
+    ? [...kept.values()].filter((node) => node.degree > 0 || (node.nodeType === "lorebook" && node.collapsed))
+    : [...kept.values()];
+
+  return { nodes, edges };
 }
 
 /** Undirected BFS up to `hops` links for Focus mode. */
@@ -267,8 +543,14 @@ function seededRandom(seed: number) {
  * ponytail: O(n^2) repulsion per step on the main thread, comfortable up to ~500 visible nodes.
  * Move into a Web Worker or replace with a quadtree layout if lorebooks grow past that ceiling.
  */
-export function layoutGraph(graph: LmBuiltGraph, seed = 1, iterations = LAYOUT_MAX_ITERATIONS): LayoutResult {
+export function layoutGraph(
+  graph: LmBuiltGraph,
+  seed = 1,
+  iterations = LAYOUT_MAX_ITERATIONS,
+  spread = 1,
+): LayoutResult {
   const steps = Math.max(0, Math.min(Math.floor(iterations), LAYOUT_MAX_ITERATIONS));
+  const safeSpread = Number.isFinite(spread) ? Math.min(2.5, Math.max(0.5, spread)) : 1;
   const refs = graph.nodes.map((node) => node.ref).sort();
   const count = refs.length;
   const random = seededRandom(seed);
@@ -289,7 +571,8 @@ export function layoutGraph(graph: LmBuiltGraph, seed = 1, iterations = LAYOUT_M
     if (a !== undefined && b !== undefined) pairs.push([a, b]);
   }
 
-  const ideal = count > 0 ? Math.sqrt((LAYOUT_SIZE * LAYOUT_SIZE) / count) * 0.8 : 1;
+  const ideal = (count > 0 ? Math.sqrt((LAYOUT_SIZE * LAYOUT_SIZE) / count) * 0.8 : 1) * safeSpread;
+  const gravity = 1 / Math.max(1, safeSpread * 0.85);
   const dx = new Float64Array(count);
   const dy = new Float64Array(count);
   for (let step = 0; step < steps; step += 1) {
@@ -322,10 +605,10 @@ export function layoutGraph(graph: LmBuiltGraph, seed = 1, iterations = LAYOUT_M
       dx[b]! += (vx / distance) * pull;
       dy[b]! += (vy / distance) * pull;
     }
-    const temperature = (LAYOUT_SIZE / 10) * (1 - step / steps);
+    const temperature = ((LAYOUT_SIZE * Math.max(1, safeSpread)) / 10) * (1 - step / steps);
     for (let i = 0; i < count; i += 1) {
-      dx[i]! += LAYOUT_SIZE / 2 - xs[i]!;
-      dy[i]! += LAYOUT_SIZE / 2 - ys[i]!;
+      dx[i]! += (LAYOUT_SIZE / 2 - xs[i]!) * gravity;
+      dy[i]! += (LAYOUT_SIZE / 2 - ys[i]!) * gravity;
       const length = Math.max(Math.hypot(dx[i]!, dy[i]!), 0.01);
       const move = Math.min(length, temperature);
       xs[i] = xs[i]! + (dx[i]! / length) * move;

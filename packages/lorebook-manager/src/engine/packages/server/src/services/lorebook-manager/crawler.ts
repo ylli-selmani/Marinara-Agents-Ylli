@@ -51,6 +51,8 @@ const CRAWLER_RELATION_DEFS = LM_RELATIONS.filter(
 );
 const CRAWLER_RELATIONS = CRAWLER_RELATION_DEFS.map((relation) => relation.value);
 const AFTER_ARCHIVIST_WAIT_MS = 20_000;
+/** A steady stream of Applies can't hold the run back longer than this after the first one. */
+const AFTER_ARCHIVIST_MAX_WAITS = 3;
 
 const stateDocId = (compendiumId: string) => `crawler_state:${compendiumId}`;
 const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
@@ -481,7 +483,9 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
       const clean = cleanText(key, 60);
       const comparable = comparableFact(clean);
       if (!comparable || known.has(comparable)) continue;
-      if (addKeys.length >= MAX_KEYS_ADDED || entry.keys.length + addKeys.length >= MAX_KEYS_TOTAL) break;
+      // A removed key frees its place: a broad key can be swapped for its real alias on a full entry.
+      const total = entry.keys.length - removeKeys.length + addKeys.length;
+      if (addKeys.length >= MAX_KEYS_ADDED || total >= MAX_KEYS_TOTAL) break;
       known.add(comparable);
       addKeys.push(clean);
     }
@@ -560,7 +564,9 @@ async function compendiumOf(proposal: LmProposal): Promise<LmCompendium | null> 
 /** Applied Archivist changes waiting to be tidied together, per Compendium. */
 interface WaitingCrawl {
   entryIds: Set<string>;
+  /** null once the gathered entries come from more than one chat. */
   chatId: string | null;
+  firstAt: number;
   timer: ReturnType<typeof setTimeout> | null;
   done: Promise<CrawlerOutcome | null>;
   resolve: (outcome: CrawlerOutcome | null) => void;
@@ -573,22 +579,41 @@ function scheduleCrawl(compendiumId: string, entryId: string, chatId: string | n
   if (!waiting) {
     let resolve: (outcome: CrawlerOutcome | null) => void = () => undefined;
     const done = new Promise<CrawlerOutcome | null>((settle) => (resolve = settle));
-    waiting = { entryIds: new Set(), chatId, timer: null, done, resolve };
+    waiting = { entryIds: new Set(), chatId, firstAt: Date.now(), timer: null, done, resolve };
     waitingCrawls.set(compendiumId, waiting);
+  } else if (waiting.chatId !== chatId) {
+    // Suggestions from several chats: none of them owns the run (its connection falls back to the Crawler's own).
+    waiting.chatId = null;
   }
   const current = waiting;
   current.entryIds.add(entryId);
   if (current.timer) clearTimeout(current.timer);
-  current.timer = setTimeout(() => {
-    waitingCrawls.delete(compendiumId);
-    const entryIds = [...current.entryIds];
-    runInBackgroundQueue(() =>
-      runCrawler(compendiumId, { entryIds, trigger: "after_archivist", chatId: current.chatId }),
-    ).then(current.resolve, (error: unknown) => {
-      getLorebookManagerRuntime().logger.warn("[lorebook-manager] Crawler after Archivist changes failed: %s", error);
-      current.resolve(null);
-    });
-  }, waitMs);
+  const deadline = current.firstAt + waitMs * AFTER_ARCHIVIST_MAX_WAITS;
+  current.timer = setTimeout(
+    () => {
+      waitingCrawls.delete(compendiumId);
+      const entryIds = [...current.entryIds];
+      runInBackgroundQueue(async () => {
+        // More applied entries than one run takes: one run per batch, so each gets its tidy pass.
+        const { batchSize } = (await getSettings(getLorebookManagerRuntime().persistence.documents)).crawler;
+        let outcome: CrawlerOutcome | null = null;
+        for (let start = 0; start < entryIds.length; start += batchSize) {
+          const chunk = entryIds.slice(start, start + batchSize);
+          outcome = await runCrawler(compendiumId, {
+            entryIds: chunk,
+            trigger: "after_archivist",
+            chatId: current.chatId,
+          });
+          if (outcome.status === "failed" || outcome.status === "unavailable") break;
+        }
+        return outcome;
+      }).then(current.resolve, (error: unknown) => {
+        getLorebookManagerRuntime().logger.warn("[lorebook-manager] Crawler after Archivist changes failed: %s", error);
+        current.resolve(null);
+      });
+    },
+    Math.max(0, Math.min(waitMs, deadline - Date.now())),
+  );
   return current.done;
 }
 

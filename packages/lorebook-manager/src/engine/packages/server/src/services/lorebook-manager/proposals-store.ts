@@ -102,18 +102,22 @@ function resolveCrawlerAdditions(
     }
   }
   if (Array.isArray(addKeys) || Array.isArray(removeKeys)) {
+    // Checked again against the entry as it is now: never its current name, and never its last key.
     const removed = new Set(
       (Array.isArray(removeKeys) ? removeKeys : []).filter((key) => typeof key === "string").map(comparableFact),
     );
-    const keys = Array.isArray(current.keys)
-      ? current.keys.filter((key): key is string => typeof key === "string" && !removed.has(comparableFact(key)))
+    if (typeof current.name === "string") removed.delete(comparableFact(current.name));
+    const before = Array.isArray(current.keys)
+      ? current.keys.filter((key): key is string => typeof key === "string")
       : [];
+    const keys = before.filter((key) => !removed.has(comparableFact(key)));
     const known = new Set(keys.map(comparableFact));
     for (const key of Array.isArray(addKeys) ? addKeys : []) {
       if (typeof key !== "string" || !comparableFact(key) || known.has(comparableFact(key))) continue;
       known.add(comparableFact(key));
       keys.push(key);
     }
+    if (keys.length === 0 && before.length > 0) keys.push(before[0]!);
     resolved.keys = keys;
   }
   if (Array.isArray(addLinks)) {
@@ -312,6 +316,8 @@ export async function applyProposal(
   id: string,
   /** The suggestion as trimmed in Review; see `narrowPatch`. The applied suggestion keeps this version. */
   edits?: unknown,
+  /** The revision the edits were made on: a suggestion that grew meanwhile (more facts) is refused, not cut. */
+  editedRevision?: number,
 ): Promise<LmProposal> {
   const documents = runtime.persistence.documents;
   const { createLorebookEntry, updateLorebookEntry, listLorebooks } = runtime.resources;
@@ -319,9 +325,15 @@ export async function applyProposal(
     throw new CompendiumStoreError("Applying suggestions needs a newer Marinara Engine (Capability API 1.839)", 501);
   }
   const loaded = await loadPending(documents, id);
+  if (edits !== undefined && editedRevision !== undefined && editedRevision !== loaded.revision) {
+    throw new CompendiumStoreError("This suggestion changed while you edited it; check it again", 409);
+  }
   const proposal = edits === undefined ? loaded : { ...loaded, patch: narrowPatch(loaded.patch, edits) };
   if (Object.keys(proposal.patch).length === 0) {
     throw new CompendiumStoreError("Nothing is left to apply; dismiss the suggestion instead", 400);
+  }
+  if (proposal.kind === "create_entry" && typeof loaded.patch.content === "string" && !proposal.patch.content) {
+    throw new CompendiumStoreError("A new entry needs its content", 400);
   }
   const decidedAt = new Date().toISOString();
 

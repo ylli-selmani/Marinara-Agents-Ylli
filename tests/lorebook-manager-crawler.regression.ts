@@ -268,6 +268,11 @@ async function main() {
       /Nothing is left to apply/,
       "an edit that leaves nothing is refused",
     );
+    await assert.rejects(
+      applyProposal(runtime, courtProposal.id, { description: "Edited." }, courtProposal.revision + 1),
+      /changed while you edited/,
+      "an edit made on an older version is refused, not cut",
+    );
 
     // ── A content change makes an entry untidied again, once nothing of the Crawler's waits for it. ──
     await dismissProposal(documents, courtProposal.id);
@@ -358,6 +363,18 @@ async function main() {
     assert.equal(prompts.length, callsBefore + 1, "one model call for both");
     assert.equal(firstApply, secondApply, "both Applies share the run");
     assert.equal(firstApply!.run!.entryCount, 2);
+
+    // ── Apply checks removals again: never the entry's current name. ──
+    const strip = await createProposal(documents, {
+      kind: "update_entry",
+      lorebookId: "court",
+      targetEntryId: "syliveera",
+      entryName: "Syliveera",
+      patch: { removeKeys: [...(entry("syliveera").keys as string[])] },
+      source: "crawler",
+    });
+    await applyProposal(runtime, strip.id);
+    assert.deepEqual(entry("syliveera").keys, ["Syliveera"], "the entry's own name stays a key");
 
     const runs = await listCrawlerRuns();
     assert.ok(runs.length >= 6 && runs.some((run) => run.trigger === "after_archivist"), "runs recorded");

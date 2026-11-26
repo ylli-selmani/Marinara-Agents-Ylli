@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type {
   LmArchivistMode,
@@ -72,6 +73,14 @@ function TemperatureInput({
   disabled?: boolean;
   onChange: (value: number | null) => void;
 }) {
+  // The typed text, kept as is so "0." can become "0.7"; only a whole number is passed on. Save clamps it to 0–2.
+  const [text, setText] = useState(value === null ? "" : String(value));
+  useEffect(() => {
+    setText((current) => {
+      const shown = current.trim() ? Number(current) : null;
+      return shown === value ? current : value === null ? "" : String(value);
+    });
+  }, [value]);
   return (
     <label
       className="flex items-center gap-1.5"
@@ -79,18 +88,16 @@ function TemperatureInput({
     >
       <span className="text-[var(--muted-foreground)]">Temperature</span>
       <input
-        type="number"
-        min={0}
-        max={2}
-        step={0.05}
+        type="text"
+        inputMode="decimal"
         disabled={disabled}
         placeholder="Model default"
-        value={value ?? ""}
+        value={text}
         onChange={(event) => {
-          const raw = event.target.value;
-          const next = Number(raw);
+          const raw = event.target.value.replace(",", ".");
+          setText(raw);
           if (!raw.trim()) onChange(null);
-          else if (Number.isFinite(next)) onChange(next);
+          else if (/^\d*\.?\d+$/.test(raw.trim())) onChange(Number(raw));
         }}
         className="mari-chrome-field h-8 w-28 rounded px-2 text-xs tabular-nums"
       />

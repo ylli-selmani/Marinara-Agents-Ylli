@@ -363,12 +363,14 @@ export async function decideProposalApi(
   id: string,
   decision: "apply" | "dismiss",
   patch?: Record<string, unknown>,
+  /** The revision `patch` was edited on. */
+  revision?: number,
 ): Promise<LmProposal> {
   const response = await fetch(`${API_ROOT}/proposals/${encodeURIComponent(id)}/${decision}`, {
     method: "POST",
     credentials: "same-origin",
     headers: writeHeaders(),
-    body: JSON.stringify(decision === "apply" && patch ? { patch } : {}),
+    body: JSON.stringify(decision === "apply" && patch ? { patch, revision } : {}),
   });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   return ((await response.json()) as { proposal: LmProposal }).proposal;

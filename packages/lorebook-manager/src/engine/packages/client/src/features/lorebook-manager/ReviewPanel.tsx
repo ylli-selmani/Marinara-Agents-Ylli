@@ -291,7 +291,7 @@ function ProposalCard({
                   {FIELD_LABEL[field] ?? field}
                   {leftOut ? " · left out" : ""}
                 </span>
-                {pending && !leftOut ? (
+                {pending && !leftOut && !(isCreate && field === "content") ? (
                   <button
                     type="button"
                     title="Leave this out of the change"
@@ -399,12 +399,14 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
   const decide = async (proposal: LmProposal, decision: "apply" | "dismiss", patch?: Record<string, unknown>) => {
     setBusyId(proposal.id);
     try {
-      await decideProposalApi(proposal.id, decision, patch);
+      await decideProposalApi(proposal.id, decision, patch, patch ? proposal.revision : undefined);
       toast.success(decision === "apply" ? "Change applied" : "Suggestion dismissed");
       await queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
       if (decision === "apply") await queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update the suggestion");
+      // A suggestion that changed meanwhile shows its new version (the card's draft starts over).
+      void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
     } finally {
       setBusyId(null);
     }

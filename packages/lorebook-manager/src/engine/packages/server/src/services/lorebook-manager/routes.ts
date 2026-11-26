@@ -32,6 +32,7 @@ import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { listLiveRuns } from "./live-retrieval.js";
 import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
+import { entryVectorSource, indexLorebooks, semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value === "string") {
@@ -176,6 +177,11 @@ export interface BuildGraphOptions {
   onlyRequested?: boolean;
   /** Live retrieval doesn't read mention edges, so skip computing them. */
   skipMentions?: boolean;
+  /**
+   * Meaning match: filled with each loaded entry's embedding text and Engine vector. Kept beside the payload, never
+   * in it, because the payload goes to the client.
+   */
+  vectorSources?: EntryVectorSource[];
 }
 
 export async function buildLorebookManagerGraphPayload(
@@ -243,6 +249,10 @@ export async function buildLorebookManagerGraphPayload(
       const entry = asRecord(rawEntry);
       const id = asString(entry.id).trim();
       if (!id) continue;
+      if (options.vectorSources) {
+        const source = entryVectorSource(rawBook.id, bookData, entry);
+        if (source) options.vectorSources.push(source);
+      }
       const tag = asString(entry.tag).trim();
       const classification = classifyEntryWithFallback(tag, bookCategory);
       entryNodes.push({
@@ -379,6 +389,43 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
     return {
       liveRetrieval: liveRetrievalRegistered && typeof resources.updateLorebookEntry === "function",
     };
+  });
+
+  // Meaning match. Index now embeds every missing vector of the given books in this request.
+  app.post("/semantic/index", async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { lorebookIds?: unknown };
+      const lorebookIds = Array.isArray(body.lorebookIds)
+        ? body.lorebookIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : [];
+      if (lorebookIds.length === 0) throw new CompendiumStoreError("Pick at least one lorebook to index", 400);
+      return { status: await indexLorebooks(lorebookIds) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  // Simulate's meaning match: the same similarities a live turn computes, with a longer deadline (not on a turn).
+  app.post("/semantic/scores", async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { lorebookIds?: unknown; queryText?: unknown };
+      const lorebookIds = Array.isArray(body.lorebookIds)
+        ? body.lorebookIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : [];
+      const queryText = typeof body.queryText === "string" ? body.queryText : "";
+      const vectorSources: EntryVectorSource[] = [];
+      if (lorebookIds.length > 0) {
+        await buildLorebookManagerGraphPayload({
+          lorebookIds: new Set(lorebookIds),
+          onlyRequested: true,
+          skipMentions: true,
+          vectorSources,
+        });
+      }
+      return await semanticScoresFor(vectorSources, queryText, { timeoutMs: 5000 });
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
   });
 
   app.get("/runs", async (_request, reply) => {

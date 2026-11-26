@@ -70,6 +70,7 @@ const AD_HOC_RETRIEVAL_DEFAULTS = {
   maxTextHits: 5,
   respectBookBudgets: true,
   bookTokenBudgets: undefined,
+  semanticThreshold: undefined,
 } satisfies Partial<LmRetrievalInput>;
 
 const LIBRARY_STYLE = `
@@ -253,6 +254,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       maxOneHop: compendium.retrievalSettings.maxOneHop,
       maxTextHits: compendium.retrievalSettings.maxTextHits,
       respectBookBudgets: compendium.retrievalSettings.respectBookBudgets,
+      semanticThreshold: compendium.retrievalSettings.semanticThreshold,
       bookTokenBudgets:
         Object.keys(compendium.retrievalSettings.bookTokenBudgets).length > 0
           ? compendium.retrievalSettings.bookTokenBudgets
@@ -1171,6 +1173,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                   setSimHighlight(highlight);
                   setView("graph");
                 }}
+                semanticEnabled={activeCompendium?.retrievalSettings.semanticEnabled ?? false}
                 onInspectNode={(ref) => {
                   setSelectedNodeRef(ref);
                   setView("graph");

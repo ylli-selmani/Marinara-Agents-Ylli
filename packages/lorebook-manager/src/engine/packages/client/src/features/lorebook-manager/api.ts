@@ -8,6 +8,8 @@ import type {
   LmCompendiumRetrievalSettings,
   LmGraphPayload,
   LorebookFilterMode,
+  LmSemanticIndexStatus,
+  LmSemanticRunInfo,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 
 const CSRF_HEADER = "x-marinara-csrf";
@@ -26,6 +28,8 @@ export const lmQueryKeys = {
   runs: ["lorebook-manager", "runs"] as const,
   proposalsRoot: ["lorebook-manager", "proposals"] as const,
   proposals: (status: LmProposalStatus) => ["lorebook-manager", "proposals", status] as const,
+  semanticScores: (scopeKey: string, queryText: string) =>
+    ["lorebook-manager", "semantic-scores", scopeKey, queryText] as const,
 };
 
 export interface LmEntryPatch {
@@ -205,6 +209,33 @@ export async function fetchLiveStatus(): Promise<LmLiveStatus> {
 export async function fetchLiveRuns(): Promise<LmChatRuns[]> {
   const payload = await readJson<{ chats?: LmChatRuns[] }>("/runs");
   return Array.isArray(payload.chats) ? payload.chats : [];
+}
+
+/** Vectorize the given books' missing entries for meaning match, and report what is indexed. */
+export async function indexSemanticApi(lorebookIds: string[]): Promise<LmSemanticIndexStatus> {
+  const response = await fetch(`${API_ROOT}/semantic/index`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ lorebookIds }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return ((await response.json()) as { status: LmSemanticIndexStatus }).status;
+}
+
+/** Simulate's meaning match: each entry's similarity to the query, as a live turn computes it. */
+export async function fetchSemanticScores(
+  lorebookIds: string[],
+  queryText: string,
+): Promise<{ scores: Record<string, number>; info: LmSemanticRunInfo }> {
+  const response = await fetch(`${API_ROOT}/semantic/scores`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ lorebookIds, queryText }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return (await response.json()) as { scores: Record<string, number>; info: LmSemanticRunInfo };
 }
 
 export async function fetchProposals(status: LmProposalStatus): Promise<LmProposal[]> {

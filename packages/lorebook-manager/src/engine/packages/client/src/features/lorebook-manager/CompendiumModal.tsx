@@ -13,8 +13,9 @@ import type {
   LmEntityNode,
   LmEntryNode,
   LmLorebookSummary,
+  LmSemanticIndexStatus,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { fetchLorebookManagerGraph, type LmCompendiumSavePayload } from "./api";
+import { fetchLorebookManagerGraph, indexSemanticApi, type LmCompendiumSavePayload } from "./api";
 import { confirmWithHostOrBrowser, getHostComponents } from "./host-components";
 
 const MODAL_STYLE = `
@@ -82,6 +83,10 @@ export function CompendiumModal({
     DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.respectBookBudgets,
   );
   const [bookTokenBudgets, setBookTokenBudgets] = useState<Record<string, number>>({});
+  const [semanticEnabled, setSemanticEnabled] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticEnabled);
+  const [semanticThreshold, setSemanticThreshold] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold);
+  const [indexing, setIndexing] = useState(false);
+  const [indexStatus, setIndexStatus] = useState<LmSemanticIndexStatus | null>(null);
   const [discoveringCast, setDiscoveringCast] = useState(false);
 
   useEffect(() => {
@@ -98,6 +103,8 @@ export function CompendiumModal({
       setMaxTextHits(compendium.retrievalSettings.maxTextHits);
       setRespectBookBudgets(compendium.retrievalSettings.respectBookBudgets);
       setBookTokenBudgets(compendium.retrievalSettings.bookTokenBudgets);
+      setSemanticEnabled(compendium.retrievalSettings.semanticEnabled);
+      setSemanticThreshold(compendium.retrievalSettings.semanticThreshold);
     } else {
       setName("");
       setDescription("");
@@ -110,8 +117,28 @@ export function CompendiumModal({
       setMaxTextHits(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits);
       setRespectBookBudgets(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.respectBookBudgets);
       setBookTokenBudgets({});
+      setSemanticEnabled(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticEnabled);
+      setSemanticThreshold(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold);
     }
+    setIndexStatus(null);
   }, [open, compendium]);
+
+  const vectorizeMissing = async () => {
+    setIndexing(true);
+    try {
+      const status = await indexSemanticApi(lorebookIds);
+      setIndexStatus(status);
+      if (status.failed > 0) toast.error(`${status.failed} entries could not be vectorized. Check the server log.`);
+      else
+        toast.success(
+          status.embedded > 0 ? `Vectorized ${status.embedded} entries` : "Every entry is already vectorized",
+        );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not vectorize these lorebooks");
+    } finally {
+      setIndexing(false);
+    }
+  };
 
   const lorebooksById = useMemo(() => new Map(lorebooks.map((book) => [book.id, book])), [lorebooks]);
 
@@ -212,6 +239,8 @@ export function CompendiumModal({
       maxTextHits: Math.max(0, Math.min(25, Math.round(maxTextHits))),
       respectBookBudgets,
       bookTokenBudgets: filteredBookBudgets,
+      semanticEnabled,
+      semanticThreshold: Math.max(0.05, Math.min(0.95, Math.round(semanticThreshold * 100) / 100)),
     };
     await onSave(
       {
@@ -471,6 +500,72 @@ export function CompendiumModal({
             />
             <span>Respect each lorebook&apos;s own token budget when no override is set</span>
           </label>
+
+          <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
+            <label className="flex items-center gap-2 text-[var(--muted-foreground)]">
+              <input
+                type="checkbox"
+                disabled={saving}
+                checked={semanticEnabled}
+                onChange={(event) => setSemanticEnabled(event.target.checked)}
+              />
+              <span>Also find entries by meaning, not just keywords (needs an embedding model)</span>
+            </label>
+            {semanticEnabled ? (
+              <div className="flex flex-wrap items-center gap-3">
+                <label
+                  className="flex items-center gap-1.5"
+                  title="How close in meaning an entry has to be (0–1). Lower finds more, higher finds less."
+                >
+                  <span className="text-[var(--muted-foreground)]">Min. similarity</span>
+                  <input
+                    type="number"
+                    min={0.05}
+                    max={0.95}
+                    step={0.05}
+                    disabled={saving}
+                    value={semanticThreshold}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      if (Number.isFinite(next)) setSemanticThreshold(next);
+                    }}
+                    className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={saving || indexing || lorebookIds.length === 0}
+                  className="mari-chrome-control mari-chrome-control--small disabled:opacity-45"
+                  onClick={() => void vectorizeMissing()}
+                >
+                  {indexing ? (
+                    <Loader2 aria-hidden="true" size="0.8rem" className="animate-spin" />
+                  ) : (
+                    <Sparkles aria-hidden="true" size="0.8rem" />
+                  )}
+                  Vectorize missing
+                </button>
+                {indexStatus ? (
+                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                    {indexStatus.indexed}/{indexStatus.total - indexStatus.excluded} entries vectorized ·{" "}
+                    {indexStatus.spaceLabel}
+                    {indexStatus.engineVectors > 0 ? ` · ${indexStatus.engineVectors} reused from the lorebooks` : ""}
+                  </span>
+                ) : null}
+                {indexStatus && indexStatus.excludedBooks.length > 0 ? (
+                  <span className="basis-full text-[0.6875rem] text-amber-400">
+                    Vectors are off in {indexStatus.excludedBooks.join(", ")}, so those entries only match by keyword.
+                    Turn on Vectors in the lorebook editor to include them.
+                  </span>
+                ) : null}
+                {!indexStatus ? (
+                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                    Missing vectors also fill in by themselves after the first turns.
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
 
           {selectedBookRows.length > 0 ? (
             <div className="space-y-1.5 border-t border-[var(--border)] pt-2">

@@ -5,11 +5,13 @@ import type {
   LmGraphPayload,
   LmLiveRunRecord,
   LmRetrievalResult,
+  LmSemanticRunInfo,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { compendiumForChat } from "./live-claims.js";
 import { getLorebookManagerRuntime, type LorebookManagerMessageRecord } from "./package-runtime.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
+import { semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
 
 export const LIVE_RUN_DOC_KIND = "live_run";
 const MAX_RECORDED_RUNS = 20;
@@ -86,7 +88,20 @@ export function formatLiveLore(
   return wrapLore(fillNameMacros(parts.join("\n\n"), names), options.wrapFormat);
 }
 
-export function toLiveRunRecord(compendium: LmCompendium, result: LmRetrievalResult, at: string): LmLiveRunRecord {
+const SEMANTIC_OFF: LmSemanticRunInfo = {
+  status: "off",
+  embedMs: 0,
+  vectorCount: 0,
+  engineVectorCount: 0,
+  missingCount: 0,
+};
+
+export function toLiveRunRecord(
+  compendium: LmCompendium,
+  result: LmRetrievalResult,
+  at: string,
+  semantic?: LmSemanticRunInfo,
+): LmLiveRunRecord {
   return {
     at,
     compendiumId: compendium.id,
@@ -104,6 +119,7 @@ export function toLiveRunRecord(compendium: LmCompendium, result: LmRetrievalRes
       reasons: item.reasons.map((reason) => ({ kind: reason.kind, detail: reason.detail.slice(0, 120) })),
     })),
     suppressedCount: result.suppressed.length,
+    ...(semantic ? { semantic } : {}),
   };
 }
 
@@ -188,18 +204,26 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   const activeCharacterIds = [...new Set([...(request.targetCharacterIds ?? []), ...(chat?.characterIds ?? [])])];
   const personaId = request.personaId ?? chat?.personaId ?? null;
   const lorebookIds = new Set(compendium.lorebookIds);
+  const settings = compendium.retrievalSettings;
+  const vectorSources: EntryVectorSource[] | undefined = settings.semanticEnabled ? [] : undefined;
   const payload = await buildLorebookManagerGraphPayload({
     lorebookIds,
     characterIds: new Set([...compendium.characterIds, ...activeCharacterIds]),
     personaIds: new Set(personaId ? [personaId] : []),
     onlyRequested: true,
     skipMentions: true,
+    vectorSources,
   });
-  const settings = compendium.retrievalSettings;
+  const queryText = recentQueryText(messages, settings.queryMessageCount);
+  // Meaning match never fails the turn: on a timeout or error Stage 1 runs on text alone, and the run says why.
+  const semantic = vectorSources ? await semanticScoresFor(vectorSources, queryText) : null;
   const result = simulateLorebookRetrieval(
     payload,
     {
-      queryText: recentQueryText(messages, settings.queryMessageCount),
+      queryText,
+      ...(semantic?.info.status === "used"
+        ? { semanticScores: semantic.scores, semanticThreshold: settings.semanticThreshold }
+        : {}),
       activeCharacterIds,
       activePersonaId: personaId,
       tokenBudget: settings.tokenBudget,
@@ -211,7 +235,10 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     lorebookIds,
   );
 
-  void recordLiveRun(request.chatId, toLiveRunRecord(compendium, result, new Date().toISOString())).catch((error) =>
+  void recordLiveRun(
+    request.chatId,
+    toLiveRunRecord(compendium, result, new Date().toISOString(), semantic?.info ?? { ...SEMANTIC_OFF }),
+  ).catch((error) =>
     runtime.logger.warn("[lorebook-manager] Could not record the retrieval run for chat %s: %s", request.chatId, error),
   );
 

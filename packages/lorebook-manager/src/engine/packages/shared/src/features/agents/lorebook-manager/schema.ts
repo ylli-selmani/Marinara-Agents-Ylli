@@ -121,7 +121,8 @@ export interface LmBuiltGraph {
   edges: LmGraphEdge[];
 }
 
-export type LmRetrievalReasonKind = "constant" | "keyword" | "bm25" | "location" | "graph_1hop" | "card_inherited";
+export type LmRetrievalReasonKind =
+  "constant" | "keyword" | "bm25" | "semantic" | "location" | "graph_1hop" | "card_inherited";
 
 export interface LmRetrievalReason {
   kind: LmRetrievalReasonKind;
@@ -160,6 +161,13 @@ export interface LmRetrievalInput {
   maxTextHits?: number;
   respectBookBudgets?: boolean;
   bookTokenBudgets?: Record<string, number>;
+  /**
+   * Meaning match: calibrated similarity (0–1) of each entry ref to the query, computed by the caller from
+   * embeddings. Absent = text matching only, exactly as before the semantic lane.
+   */
+  semanticScores?: Readonly<Record<string, number>>;
+  /** Minimum calibrated similarity for a meaning match (default 0.3, the Engine's own lorebook default). */
+  semanticThreshold?: number;
 }
 
 export interface LmRetrievalResult {
@@ -179,6 +187,39 @@ export interface LmCompendiumRetrievalSettings {
   maxTextHits: number;
   respectBookBudgets: boolean;
   bookTokenBudgets: Record<string, number>;
+  /** Meaning match: also pick entries whose embeddings are close to the recent messages. Off by default. */
+  semanticEnabled: boolean;
+  /** Minimum calibrated similarity for a meaning match (0.05–0.95). */
+  semanticThreshold: number;
+}
+
+/** How the meaning-match lane went on one turn. "used" is the only state where similarities reached Stage 1. */
+export type LmSemanticRunStatus = "off" | "used" | "no_vectors" | "timeout" | "error";
+
+export interface LmSemanticRunInfo {
+  status: LmSemanticRunStatus;
+  /** Time spent on the query embedding, in ms. */
+  embedMs: number;
+  /** Entries with a usable vector, and how many came from the Engine's own lorebook vectors. */
+  vectorCount: number;
+  engineVectorCount: number;
+  /** Entries still waiting for a vector (indexed in the background). */
+  missingCount: number;
+  detail?: string;
+}
+
+/** The meaning-match index of one Compendium, as Index now and the Compendium modal show it. */
+export interface LmSemanticIndexStatus {
+  spaceLabel: string;
+  total: number;
+  indexed: number;
+  engineVectors: number;
+  excluded: number;
+  /** Books whose Vectors switch (`excludeFromVectorization`) is off: never matched by meaning, as in the Engine. */
+  excludedBooks: string[];
+  embedded: number;
+  failed: number;
+  detail?: string;
 }
 
 export interface LmCompendium {
@@ -213,6 +254,8 @@ export interface LmLiveRunRecord {
     reasons: Array<{ kind: LmRetrievalReasonKind; detail: string }>;
   }>;
   suppressedCount: number;
+  /** Absent on runs recorded before the semantic lane. */
+  semantic?: LmSemanticRunInfo;
 }
 
 export interface LmChatRuns {

@@ -23,7 +23,16 @@ function formatWhen(iso: string): string {
   return at.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+const SEMANTIC_STATUS_LABEL: Record<NonNullable<LmLiveRunRecord["semantic"]>["status"], string> = {
+  off: "",
+  used: "Meaning match",
+  no_vectors: "Meaning match: no vectors yet",
+  timeout: "Meaning match: timed out, keywords only",
+  error: "Meaning match failed, keywords only",
+};
+
 function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: (ref: string) => void }) {
+  const semantic = run.semantic && run.semantic.status !== "off" ? run.semantic : null;
   return (
     <div className="space-y-1.5 rounded border border-[var(--border)] bg-[var(--background)]/40 px-2.5 py-2 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -43,6 +52,14 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
           <span>{run.durationMs} ms</span>
         </div>
       </div>
+      {semantic ? (
+        <p className="text-[0.6875rem] text-[var(--muted-foreground)]" title={semantic.detail ?? undefined}>
+          {SEMANTIC_STATUS_LABEL[semantic.status]}
+          {semantic.status === "used" || semantic.status === "timeout" ? ` · ${semantic.embedMs} ms` : ""}
+          {semantic.vectorCount > 0 ? ` · ${semantic.vectorCount} vectors` : ""}
+          {semantic.missingCount > 0 ? ` · ${semantic.missingCount} still vectorizing` : ""}
+        </p>
+      ) : null}
       {run.activated.length === 0 ? (
         <p className="text-[var(--muted-foreground)]">
           Nothing matched the last {run.queryMessageCount} {run.queryMessageCount === 1 ? "message" : "messages"}.

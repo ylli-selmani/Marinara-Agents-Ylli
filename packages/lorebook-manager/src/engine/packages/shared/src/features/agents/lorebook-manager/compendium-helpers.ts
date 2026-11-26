@@ -8,7 +8,15 @@ export const DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS: LmCompendiumRetrievalSetting
   maxTextHits: 5,
   respectBookBudgets: true,
   bookTokenBudgets: {},
+  semanticEnabled: false,
+  semanticThreshold: 0.3,
 };
+
+function clampFloat(value: unknown, fallback: number, min: number, max: number): number {
+  const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(num * 100) / 100));
+}
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
@@ -44,6 +52,13 @@ export function normalizeCompendiumRetrievalSettings(raw: unknown): LmCompendium
     maxTextHits: clampInt(record.maxTextHits, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits, 0, 25),
     respectBookBudgets: record.respectBookBudgets !== false,
     bookTokenBudgets: normalizeBookTokenBudgets(record.bookTokenBudgets),
+    semanticEnabled: record.semanticEnabled === true,
+    semanticThreshold: clampFloat(
+      record.semanticThreshold,
+      DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold,
+      0.05,
+      0.95,
+    ),
   };
 }
 

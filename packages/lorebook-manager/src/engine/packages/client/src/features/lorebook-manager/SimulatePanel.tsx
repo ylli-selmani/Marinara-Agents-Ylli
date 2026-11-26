@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, FileText, Network, RotateCcw, Sparkles } from "lucide-react";
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
@@ -8,7 +9,7 @@ import type {
   LmRetrievalActivatedItem,
   LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import type { LmEntryPatch } from "./api";
+import { fetchSemanticScores, lmQueryKeys, type LmEntryPatch } from "./api";
 import { EntryReaderModal } from "./EntryReaderModal";
 
 export type SimGraphHighlight = {
@@ -29,6 +30,8 @@ export interface SimulatePanelProps {
   onUpdateEntry: (entry: LmEntryNode, patch: LmEntryPatch) => Promise<void>;
   onHighlightOnGraph: (highlight: SimGraphHighlight) => void;
   onInspectNode: (ref: string) => void;
+  /** The Compendium's meaning-match switch; Simulate then asks the server for the same similarities a turn uses. */
+  semanticEnabled?: boolean;
 }
 
 const SIM_STYLE = `
@@ -59,6 +62,7 @@ export const REASON_BADGE_STYLE: Record<string, { border: string; text: string }
   keyword: { border: "#22c55e", text: "#22c55e" },
   location: { border: "#14b8a6", text: "#14b8a6" },
   bm25: { border: "#3b82f6", text: "#60a5fa" },
+  semantic: { border: "#f59e0b", text: "#fbbf24" },
   graph_1hop: { border: "#a855f7", text: "#c084fc" },
   card_inherited: { border: "#06b6d4", text: "#22d3ee" },
 };
@@ -116,6 +120,7 @@ export function SimulatePanel({
   onUpdateEntry,
   onHighlightOnGraph,
   onInspectNode,
+  semanticEnabled = false,
 }: SimulatePanelProps) {
   const [showSuppressed, setShowSuppressed] = useState(true);
   const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
@@ -149,9 +154,29 @@ export function SimulatePanel({
     [payload.nodes, managedLorebookIds],
   );
 
+  // Wait for a pause in typing before embedding the scene text.
+  const [settledQuery, setSettledQuery] = useState(config.queryText);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledQuery(config.queryText), 500);
+    return () => clearTimeout(timer);
+  }, [config.queryText]);
+  const semanticBookIds = useMemo(() => [...managedLorebookIds].sort(), [managedLorebookIds]);
+  const semanticQuery = useQuery({
+    queryKey: lmQueryKeys.semanticScores(semanticBookIds.join(","), settledQuery.trim()),
+    queryFn: () => fetchSemanticScores(semanticBookIds, settledQuery),
+    enabled: semanticEnabled && semanticBookIds.length > 0 && settledQuery.trim().length > 0,
+    staleTime: 60_000,
+  });
+  const semanticInfo = semanticEnabled ? semanticQuery.data?.info : undefined;
+
   const result = useMemo(
-    () => simulateLorebookRetrieval(payload, config, managedLorebookIds),
-    [payload, config, managedLorebookIds],
+    () =>
+      simulateLorebookRetrieval(
+        payload,
+        semanticInfo?.status === "used" ? { ...config, semanticScores: semanticQuery.data!.scores } : config,
+        managedLorebookIds,
+      ),
+    [payload, config, managedLorebookIds, semanticInfo, semanticQuery.data],
   );
 
   const activeCardSet = useMemo(() => new Set(config.activeCharacterIds), [config.activeCharacterIds]);

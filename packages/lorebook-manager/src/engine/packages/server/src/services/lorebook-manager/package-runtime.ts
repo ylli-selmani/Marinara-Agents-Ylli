@@ -55,8 +55,19 @@ export interface LorebookManagerChatRecord {
   personaId: string | null;
 }
 
+/** The Engine's `CapabilityEmbeddingHost`. `embed` answers null (it doesn't throw) when it can't embed. */
+export interface LorebookManagerEmbeddingHost {
+  spaceId: string;
+  label: string;
+  embed(texts: string[], signal?: AbortSignal, inputType?: "query" | "document"): Promise<number[][] | null>;
+}
+
 export interface LorebookManagerRuntimeHost {
   capabilityApi?: { readonly major: number; readonly minor: number };
+  /** The embedding source configured when the package activated. */
+  embeddings?: LorebookManagerEmbeddingHost;
+  /** Capability API 1.15. The package's current embedding source (its agent connection, else the app default). */
+  resolveEmbeddings?(): Promise<LorebookManagerEmbeddingHost>;
   logger: {
     debug(message: string, ...args: unknown[]): void;
     info(message: string, ...args: unknown[]): void;

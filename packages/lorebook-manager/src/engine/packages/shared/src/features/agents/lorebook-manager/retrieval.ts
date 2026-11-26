@@ -425,6 +425,14 @@ export function simulateLorebookRetrieval(
   }
   const bm25Floor = queryTokenCount <= 1 ? 1.8 : Math.max(4.0, topBm25 * 0.45);
   const maxTextHits = Math.max(0, input.maxTextHits ?? 5);
+  const semanticScores = input.semanticScores ?? null;
+  const semanticThreshold = Math.max(0, Math.min(1, input.semanticThreshold ?? 0.3));
+  const semanticHit = (ref: string): number | null => {
+    const similarity = semanticScores?.[ref];
+    return typeof similarity === "number" && Number.isFinite(similarity) && similarity >= semanticThreshold
+      ? similarity
+      : null;
+  };
 
   const directCandidates = new Map<
     string,
@@ -488,30 +496,93 @@ export function simulateLorebookRetrieval(
     };
   };
 
+  // A meaning match adds at most SEMANTIC_WEIGHT to the score: evidence, but below the 2.2 that seeds 1-hop links,
+  // so an entry found by meaning alone never pulls its neighbours in.
+  const SEMANTIC_WEIGHT = 2;
+  const formatSemanticReason = (similarity: number): LmRetrievalReason => ({
+    kind: "semantic",
+    detail: `Meaning match ${similarity.toFixed(2)}`,
+    score: similarity * SEMANTIC_WEIGHT,
+  });
+
   for (const [ref, direct] of directCandidates) {
     const bm25Hit = bm25Scores.get(ref);
     if (bm25Hit && bm25Hit.score >= 2.0) {
       direct.score += bm25Hit.score;
       direct.reasons.push(formatBm25Reason(bm25Hit));
     }
+    const similarity = semanticHit(ref);
+    if (similarity !== null) {
+      direct.score += similarity * SEMANTIC_WEIGHT;
+      direct.reasons.push(formatSemanticReason(similarity));
+    }
   }
 
   if (maxTextHits > 0) {
-    const textOnlyRanked = eligibleEntries
-      .filter((entry) => !directCandidates.has(entry.ref))
+    const textPool = eligibleEntries.filter((entry) => !directCandidates.has(entry.ref));
+    const bm25Ranked = textPool
       .map((entry) => ({ entry, hit: bm25Scores.get(entry.ref) }))
       .filter((item): item is { entry: LmEntryNode; hit: { score: number; matchedTerms: string[] } } =>
         Boolean(item.hit && item.hit.score >= bm25Floor),
       )
-      .sort((a, b) => b.hit.score - a.hit.score)
-      .slice(0, maxTextHits);
+      .sort((a, b) => b.hit.score - a.hit.score);
+    const semanticRanked = semanticScores
+      ? textPool
+          .map((entry) => ({ entry, similarity: semanticHit(entry.ref) }))
+          .filter((item): item is { entry: LmEntryNode; similarity: number } => item.similarity !== null)
+          .sort((a, b) => b.similarity - a.similarity)
+      : [];
 
-    for (const { entry, hit } of textOnlyRanked) {
-      directCandidates.set(entry.ref, {
-        entry,
+    // Reciprocal rank fusion only orders the pool; scores stay on the text-score scale the rest of Stage 1 compares.
+    // Without semantic scores this is the BM25 order, so the result is the same as text matching alone.
+    const RRF_K = 60;
+    const fused = new Map<
+      string,
+      { entry: LmEntryNode; rrf: number; bm25?: { score: number; matchedTerms: string[] }; similarity?: number }
+    >();
+    bm25Ranked.forEach(({ entry, hit }, index) => {
+      fused.set(entry.ref, { entry, rrf: 1 / (RRF_K + index + 1), bm25: hit });
+    });
+    semanticRanked.forEach(({ entry, similarity }, index) => {
+      const existing = fused.get(entry.ref);
+      if (existing) {
+        existing.rrf += 1 / (RRF_K + index + 1);
+        existing.similarity = similarity;
+      } else {
+        fused.set(entry.ref, { entry, rrf: 1 / (RRF_K + index + 1), similarity });
+      }
+    });
+
+    // Meaning-only picks get at most half the text slots, so they can't push every text match out.
+    const maxMeaningOnly = Math.ceil(maxTextHits / 2);
+    let taken = 0;
+    let meaningOnlyTaken = 0;
+    const ordered = [...fused.values()].sort(
+      (a, b) =>
+        b.rrf - a.rrf || (b.bm25?.score ?? 0) - (a.bm25?.score ?? 0) || (b.similarity ?? 0) - (a.similarity ?? 0),
+    );
+    for (const item of ordered) {
+      if (taken >= maxTextHits) break;
+      if (!item.bm25) {
+        if (meaningOnlyTaken >= maxMeaningOnly) continue;
+        meaningOnlyTaken += 1;
+      }
+      taken += 1;
+      const reasons: LmRetrievalReason[] = [];
+      let score = 0;
+      if (item.bm25) {
+        score += item.bm25.score;
+        reasons.push(formatBm25Reason(item.bm25));
+      }
+      if (item.similarity !== undefined) {
+        score += item.similarity * SEMANTIC_WEIGHT;
+        reasons.push(formatSemanticReason(item.similarity));
+      }
+      directCandidates.set(item.entry.ref, {
+        entry: item.entry,
         tier: "direct",
-        score: hit.score,
-        reasons: [formatBm25Reason(hit)],
+        score,
+        reasons,
         matchedLocation: false,
       });
     }

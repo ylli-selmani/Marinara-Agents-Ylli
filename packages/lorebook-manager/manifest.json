@@ -16,7 +16,9 @@
     "min": "2.5.2",
     "maxExclusive": "4.0.0"
   },
-  "kind": ["agent"],
+  "kind": [
+    "agent"
+  ],
   "entrypoints": {
     "agents": "agents.json",
     "server": "server.mjs",
@@ -24,7 +26,9 @@
   },
   "contributions": {
     "agentDetail": {
-      "agentIds": ["lorebook-manager"],
+      "agentIds": [
+        "lorebook-manager"
+      ],
       "header": "engine"
     }
   },
@@ -36,15 +40,21 @@
     },
     {
       "path": "server.mjs",
-      "sha256": "b8318be24a2d00c55f239464ca1b959cb10190cc8768d76a1dd5fa399524f763",
-      "bytes": 85051
+      "sha256": "31ccd07dbdbf3dc773a72ea6a19fd3ebe6487ed82cdfe30cc785f6b9b8b74a07",
+      "bytes": 85932
     },
     {
       "path": "client.js",
-      "sha256": "a97537602696d6cf90e9714629ddc79b1ddde1616456c1350c6419926a68791f",
-      "bytes": 220951
+      "sha256": "5abb20bb539abdf009117d39fc56a613dc3198900129479e0b7980e2c1c1b1d8",
+      "bytes": 220981
     }
   ],
-  "permissions": ["chat-read", "prompt-context", "routes", "storage", "ui"],
+  "permissions": [
+    "chat-read",
+    "prompt-context",
+    "routes",
+    "storage",
+    "ui"
+  ],
   "restartRequired": true
 }

@@ -412,16 +412,14 @@ function oneHopPolicy(
   if (base === "located_in") {
     return { weight: 0.85, floor: seedMatchedLocation || viaCardInherited ? 0 : 0.4 };
   }
-  if (base === "is_a") {
-    // Child → kind is free (Shiza pulls Dark Fae); kind → every instance needs evidence (High Elf ≠ all elves).
-    return { weight: 0.75, floor: viaCardInherited || direction === "out" ? 0 : 1.0 };
+  if (base === "is_a" || base === "member_of") {
+    // Outgoing only: a child brings its kind (Shiza pulls Dark Fae), a member its group. Never the other way: "Jutsu"
+    // pulled every jutsu under it (Ylli's round 4); an instance needs its own match to come in.
+    return { weight: 0.75, floor: direction === "out" ? 0 : Number.POSITIVE_INFINITY };
   }
   if (base === "leads") {
     // A leader and their group travel together both ways (mentioning the court brings its queen).
     return { weight: 0.8, floor: 0 };
-  }
-  if (base === "member_of") {
-    return { weight: 0.75, floor: viaCardInherited || direction === "out" ? 0 : 1.0 };
   }
   if (base === "owns") {
     return { weight: 0.7, floor: viaCardInherited || direction === "out" ? 0 : 0.6 };

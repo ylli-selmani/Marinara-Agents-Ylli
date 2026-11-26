@@ -18,6 +18,7 @@ import {
   contributeLiveLore,
   listLiveRuns,
   meaningQueryText,
+  meaningReplyText,
   recentQueryText,
   resolveLiveLocation,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
@@ -176,6 +177,9 @@ async function main() {
       "The bell rings.",
       "without a user message it falls back to the replies",
     );
+    // Include character context: the replies on their own (round 5).
+    assert.equal(meaningReplyText(window, 2), "We walk on.");
+    assert.equal(meaningReplyText(window, 2, "2"), "", "a swipe of the only reply has no reply before it");
 
     const compendium = await createCompendium(documents, {
       name: "Fae",

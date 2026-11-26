@@ -340,6 +340,20 @@ async function serverLane() {
     assert.deepEqual(calls, [{ count: 1, inputType: "query" }], "one query text per turn");
     assert.ok((second.scores["lore:forge"] ?? 1) < 0.1, "fire is not a storm");
 
+    // Include character context: two queries in one embed call, each entry keeps its stronger score (round 5).
+    const userOnly = await semanticScoresFor(sources(), "A tempest");
+    const repliesOnly = await semanticScoresFor(sources(), "Ships in the harbor water");
+    calls.length = 0;
+    const both = await semanticScoresFor(sources(), ["A tempest", "Ships in the harbor water", "  "]);
+    assert.deepEqual(calls, [{ count: 2, inputType: "query" }], "both texts in one call, blanks dropped");
+    for (const ref of Object.keys(userOnly.scores)) {
+      assert.equal(
+        both.scores[ref],
+        Math.max(userOnly.scores[ref]!, repliesOnly.scores[ref] ?? 0),
+        `${ref} keeps the stronger score`,
+      );
+    }
+
     // An edited entry's text no longer matches its cached hash: re-embedded, not served stale.
     books[0]!.entries[2]!.content = "Flame, fire and a storm of sparks.";
     const edited = await semanticScoresFor(sources(), "storm");

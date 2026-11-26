@@ -204,6 +204,11 @@ export interface LmRecallSettings {
   semanticEnabled: boolean;
   /** Minimum calibrated similarity for a meaning match (0.05–0.95). */
   semanticThreshold: number;
+  /**
+   * Also match the replies' meaning, separately from the user's messages, and keep the stronger score (the Engine's
+   * "Include character context"). On by default here: a scene's places and people are mostly in the replies.
+   */
+  meaningIncludeReplies: boolean;
   /** Stage 2: how meaning-only picks are checked before they reach the prompt. `instant` = not at all. */
   stage2Gate: LmStage2Gate;
   /** The Librarian's connection. null = the agents' default connection, then the chat's. */

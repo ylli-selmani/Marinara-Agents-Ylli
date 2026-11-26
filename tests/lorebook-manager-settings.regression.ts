@@ -10,6 +10,7 @@ import {
 } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/retrieval.js";
 import {
   DEFAULT_RECALL_SETTINGS,
+  migrateLegacyRetrievalSettings,
   diffRecallSettings,
   normalizeCompendiumOverrides,
   normalizeRecallSettings,
@@ -145,6 +146,14 @@ function pureHelpers() {
   // Overrides keep only the fields given; everything else follows the defaults.
   const overrides = normalizeCompendiumOverrides({ recall: { tokenBudget: "4000", bogus: 1 }, archivist: {} });
   assert.deepEqual(overrides, { recall: { tokenBudget: 4000 } }, "only given fields, empty groups dropped");
+  // Include character context is on by default, and a Compendium from before it follows the default (round 5).
+  assert.equal(DEFAULT_RECALL_SETTINGS.meaningIncludeReplies, true);
+  assert.equal(
+    migrateLegacyRetrievalSettings({ tokenBudget: 4000, semanticEnabled: true }).overrides.recall
+      ?.meaningIncludeReplies,
+    undefined,
+  );
+  assert.equal(normalizeRecallSettings({ meaningIncludeReplies: false }).meaningIncludeReplies, false);
   const defaults = normalizeRecallSettings({ ...DEFAULT_RECALL_SETTINGS, tokenBudget: 3000, maxTextHits: 8 });
   const resolved = resolveRetrievalSettings(defaults, overrides, { mha: 1200 });
   assert.equal(resolved.tokenBudget, 4000, "an override wins");

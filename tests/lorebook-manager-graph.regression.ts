@@ -683,6 +683,33 @@ assert.ok(
   !simRes.activated.some((a) => a.entry.ref === "lore:unrelated-student"),
   "Incoming member_of links from Class 1-A must not flood unrelated students",
 );
+// Round 5: is_a / member_of follow outgoing links only. Even with words of his own in the scene ("grape juice"),
+// Mineta doesn't ride in on Class 1-A; named himself, he brings Class 1-A.
+{
+  const round5Query = { activeCharacterIds: ["izuku"], tokenBudget: 2000 };
+  const withEvidence = simulateLorebookRetrieval(simPayload, {
+    ...round5Query,
+    queryText: "We meet Class 1-A before the Overhaul mission. Someone spilled grape juice.",
+    maxTextHits: 0,
+    maxOneHop: 6,
+  });
+  assert.ok(
+    !withEvidence.activated.some((a) => a.entry.ref === "lore:unrelated-student"),
+    "kind/group → member never comes in by 1-hop, even with text evidence",
+  );
+  const named = simulateLorebookRetrieval(simPayload, {
+    ...round5Query,
+    queryText: "Mineta waits by the gate.",
+    maxTextHits: 0,
+    maxOneHop: 6,
+  });
+  const group = named.activated.find((a) => a.entry.ref === "lore:class1a");
+  assert.equal(group?.tier, "graph_1hop", "member → group comes in by 1-hop");
+  assert.ok(
+    group?.reasons.some((r) => r.detail.endsWith("member_of ← Minoru Mineta")),
+    JSON.stringify(group?.reasons),
+  );
+}
 
 const tightBudgetRes = simulateLorebookRetrieval(simPayload, {
   queryText: "We meet Class 1-A before the Overhaul mission.",
@@ -743,8 +770,8 @@ assert.ok(oneHopActivatedCount >= 2, "Fixture must activate at least two 1-hop n
   const extra = oneHopFull.activated.find((a) => a.entry.ref === "lore:extra-ally");
   assert.ok(extra, "Extra Ally comes in by 1-hop");
   assert.ok(
-    extra.reasons.some((r) => r.detail.endsWith(`ally_of ← ${dekuName}`)),
-    `arrow reads from the neighbour: ${extra.reasons.map((r) => r.detail).join(" | ")}`,
+    extra?.reasons.some((r) => r.detail.endsWith(`ally_of ← ${dekuName}`)),
+    `arrow reads from the neighbour: ${(extra?.reasons ?? []).map((r) => r.detail).join(" | ")}`,
   );
 }
 const oneHopCapped = simulateLorebookRetrieval(oneHopPayload, { ...simQuery, maxOneHop: 1 });

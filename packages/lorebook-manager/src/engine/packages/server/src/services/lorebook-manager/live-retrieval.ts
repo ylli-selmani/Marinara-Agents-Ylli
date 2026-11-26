@@ -244,6 +244,28 @@ export function meaningQueryText(
     .trim();
 }
 
+/**
+ * The replies' half of meaning match (the Engine's "Include character context"): the last N replies, embedded on
+ * their own so long prose can't drown a short question. Empty when there are no replies before the turn.
+ */
+export function meaningReplyText(
+  messages: readonly LorebookManagerMessageRecord[],
+  count: number,
+  regenerateMessageId?: string | null,
+): string {
+  const regenerateIndex = regenerateMessageId
+    ? messages.findIndex((message) => message.id === regenerateMessageId)
+    : -1;
+  const before = regenerateIndex >= 0 ? messages.slice(0, regenerateIndex) : messages;
+  return recentQueryMessages(
+    before.filter((message) => message.role === "assistant"),
+    count,
+  )
+    .map((message) => message.content)
+    .join("\n")
+    .trim();
+}
+
 function wrapLore(text: string, wrapFormat: LivePromptContextRequest["wrapFormat"]): string {
   if (wrapFormat === "markdown") return `## World info\n\n${text}`;
   if (wrapFormat === "none") return text;
@@ -436,6 +458,9 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   const queryMessages = recentQueryMessages(messages, settings.queryMessageCount, request.regenerateMessageId);
   const queryText = queryMessages.map((message) => message.content).join("\n\n");
   const meaningText = meaningQueryText(messages, settings.queryMessageCount, request.regenerateMessageId);
+  const meaningReplies = settings.meaningIncludeReplies
+    ? meaningReplyText(messages, settings.queryMessageCount, request.regenerateMessageId)
+    : "";
 
   const reuseKey = turnKey([
     request.chatId,
@@ -445,6 +470,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     settings,
     queryMessages,
     meaningText,
+    meaningReplies,
     activeCharacterIds,
     personaId,
     location ? [location.text, location.entryRefs, location.locationId] : null,
@@ -474,7 +500,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     return reused.text;
   }
   // Meaning match never fails the turn: on a timeout or error Stage 1 runs on text alone, and the run says why.
-  const semantic = vectorSources ? await semanticScoresFor(vectorSources, meaningText) : null;
+  const semantic = vectorSources ? await semanticScoresFor(vectorSources, [meaningText, meaningReplies]) : null;
   const stage1 = simulateLorebookRetrieval(
     payload,
     {

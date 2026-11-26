@@ -373,7 +373,8 @@ export interface SemanticScoresResult {
  */
 export async function semanticScoresFor(
   sources: readonly EntryVectorSource[],
-  queryText: string,
+  /** One query, or several embedded in one call; each entry keeps its best score (the Engine's character context). */
+  queryText: string | readonly string[],
   options: { timeoutMs?: number } = {},
 ): Promise<SemanticScoresResult> {
   const startedAt = Date.now();
@@ -381,8 +382,14 @@ export async function semanticScoresFor(
     scores: {},
     info: { embedMs: 0, vectorCount: 0, engineVectorCount: 0, missingCount: 0, ...info },
   });
-  const query = queryText.trim().slice(-MAX_QUERY_CHARS);
-  if (!query) return empty({ status: "no_vectors", detail: "No message text to match" });
+  const queries = [
+    ...new Set(
+      (typeof queryText === "string" ? [queryText] : queryText)
+        .map((text) => text.trim().slice(-MAX_QUERY_CHARS))
+        .filter(Boolean),
+    ),
+  ];
+  if (queries.length === 0) return empty({ status: "no_vectors", detail: "No message text to match" });
   try {
     const host = await resolveHost();
     if (!host) return empty({ status: "error", detail: "This Engine has no embedding host" });
@@ -405,7 +412,7 @@ export async function semanticScoresFor(
     }
 
     const knownBaseline = baselineBySpace.get(host.spaceId);
-    const texts = knownBaseline === undefined ? [query, ...CALIBRATION_TEXTS] : [query];
+    const texts = knownBaseline === undefined ? [...queries, ...CALIBRATION_TEXTS] : queries;
     const embedStarted = Date.now();
     const outcome = await withDeadline(
       (signal) => host.embed(texts, signal, "query"),
@@ -417,19 +424,24 @@ export async function semanticScoresFor(
       void warmBaseline(host).catch(() => null);
       return empty({ status: "timeout", embedMs, ...counts });
     }
-    if (!outcome || outcome.length !== texts.length || !outcome[0]?.length) {
+    const queryVectors = outcome && outcome.length === texts.length ? outcome.slice(0, queries.length) : [];
+    if (queryVectors.length === 0 || queryVectors.some((vector) => !vector?.length)) {
       return empty({ status: "error", embedMs, ...counts, detail: "The embedding request failed" });
     }
     let baseline = knownBaseline;
     if (baseline === undefined) {
-      baseline = similarityBaseline(outcome.slice(1));
+      baseline = similarityBaseline(outcome!.slice(queries.length));
       baselineBySpace.set(host.spaceId, baseline);
     }
-    const queryVector = outcome[0];
     const scores: Record<string, number> = {};
     for (const [entryId, vector] of resolved.vectors) {
-      if (vector.length !== queryVector.length) continue;
-      scores[`lore:${entryId}`] = Math.round(calibrate(cosine(queryVector, vector), baseline) * 1000) / 1000;
+      let best: number | null = null;
+      for (const queryVector of queryVectors) {
+        if (vector.length !== queryVector.length) continue;
+        const similarity = calibrate(cosine(queryVector, vector), baseline);
+        if (best === null || similarity > best) best = similarity;
+      }
+      if (best !== null) scores[`lore:${entryId}`] = Math.round(best * 1000) / 1000;
     }
     return { scores, info: { status: "used", embedMs, ...counts } };
   } catch (error) {

@@ -235,6 +235,23 @@ export function RecallFields(props: RecallFieldsProps) {
             {props.meaningExtra}
           </div>
         ) : null}
+        {value.semanticEnabled ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <label
+              className="flex items-center gap-2 text-[var(--muted-foreground)]"
+              title="Also search the recent replies separately and keep the stronger match. Your own messages are searched as they are. This embeds a second text each turn."
+            >
+              <input
+                type="checkbox"
+                disabled={disabled}
+                checked={value.meaningIncludeReplies}
+                onChange={(event) => onChange("meaningIncludeReplies", event.target.checked)}
+              />
+              <span>Include character context (the replies, searched separately)</span>
+            </label>
+            <InheritMark field="meaningIncludeReplies" inherit={inherit} disabled={disabled} />
+          </div>
+        ) : null}
       </div>
 
       <div className="space-y-1.5 border-t border-[var(--border)] pt-2">

@@ -22,6 +22,7 @@ export const DEFAULT_RECALL_SETTINGS: Readonly<LmRecallSettings> = Object.freeze
   respectBookBudgets: true,
   semanticEnabled: false,
   semanticThreshold: 0.15,
+  meaningIncludeReplies: true,
   stage2Gate: "instant",
   librarianConnectionId: null,
   extraStopwords: [] as string[],
@@ -33,19 +34,19 @@ export const DEFAULT_RECALL_SETTINGS: Readonly<LmRecallSettings> = Object.freeze
  * then reads its overrides as "what differs from these", and a later change to the factory defaults must not
  * reinterpret it.
  */
-const LEGACY_COMPENDIUM_DEFAULTS: Readonly<Omit<LmRecallSettings, "extraStopwords" | "bm25Strictness">> = Object.freeze(
-  {
-    tokenBudget: 2000,
-    queryMessageCount: 2,
-    maxOneHop: 6,
-    maxTextHits: 5,
-    respectBookBudgets: true,
-    semanticEnabled: false,
-    semanticThreshold: 0.15,
-    stage2Gate: "instant",
-    librarianConnectionId: null,
-  },
-);
+const LEGACY_COMPENDIUM_DEFAULTS: Readonly<
+  Omit<LmRecallSettings, "extraStopwords" | "bm25Strictness" | "meaningIncludeReplies">
+> = Object.freeze({
+  tokenBudget: 2000,
+  queryMessageCount: 2,
+  maxOneHop: 6,
+  maxTextHits: 5,
+  respectBookBudgets: true,
+  semanticEnabled: false,
+  semanticThreshold: 0.15,
+  stage2Gate: "instant",
+  librarianConnectionId: null,
+});
 
 export const DEFAULT_ARCHIVIST_SETTINGS: Readonly<LmArchivistSettings> = Object.freeze({
   mode: "off",
@@ -123,6 +124,7 @@ export function normalizeRecallSettings(
     respectBookBudgets: boolOr(record.respectBookBudgets, fallback.respectBookBudgets),
     semanticEnabled: boolOr(record.semanticEnabled, fallback.semanticEnabled),
     semanticThreshold: clampFloat(record.semanticThreshold, fallback.semanticThreshold, 0.05, 0.95),
+    meaningIncludeReplies: boolOr(record.meaningIncludeReplies, fallback.meaningIncludeReplies),
     stage2Gate: oneOf(record.stage2Gate, STAGE2_GATES, fallback.stage2Gate),
     librarianConnectionId: connectionIdOr(record.librarianConnectionId, fallback.librarianConnectionId),
     extraStopwords: Array.isArray(record.extraStopwords)
@@ -248,7 +250,13 @@ export function migrateLegacyRetrievalSettings(raw: unknown): {
   bookTokenBudgets: Record<string, number>;
 } {
   const record = asRecord(raw);
-  const legacyBase: LmRecallSettings = { ...LEGACY_COMPENDIUM_DEFAULTS, extraStopwords: [], bm25Strictness: "normal" };
+  // Fields added after the hub never were in an old Compendium: they follow the defaults.
+  const legacyBase: LmRecallSettings = {
+    ...LEGACY_COMPENDIUM_DEFAULTS,
+    extraStopwords: [],
+    bm25Strictness: "normal",
+    meaningIncludeReplies: DEFAULT_RECALL_SETTINGS.meaningIncludeReplies,
+  };
   const legacy = normalizeRecallSettings(record, legacyBase);
   const recall = diffRecallSettings(legacyBase, legacy);
   return {

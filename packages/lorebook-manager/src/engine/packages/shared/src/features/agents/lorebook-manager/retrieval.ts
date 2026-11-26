@@ -411,6 +411,16 @@ export function simulateLorebookRetrieval(
   const queryText = input.queryText ?? "";
   const activeCharSet = new Set(input.activeCharacterIds);
   const locationQuery = (input.activeLocationText ?? "").trim();
+  const locationEntryRefs = new Set(input.currentLocationEntryRefs ?? []);
+  const currentLocationId = input.currentLocationId?.trim() || null;
+  const linkedToCurrentLocation = (entry: LmEntryNode): boolean => {
+    if (locationEntryRefs.has(entry.ref)) return true;
+    if (!currentLocationId) return false;
+    return Object.keys(entry.relationships).some((rawKey) => {
+      const parsed = parseEntityRef(rawKey);
+      return parsed?.kind === "loc" && parsed.id === currentLocationId;
+    });
+  };
 
   const cardNamesById = new Map<string, string>();
   const scopedEntries: LmEntryNode[] = [];
@@ -526,7 +536,7 @@ export function simulateLorebookRetrieval(
     string,
     {
       entry: LmEntryNode;
-      tier: "constant" | "direct";
+      tier: "constant" | "location" | "direct";
       score: number;
       reasons: LmRetrievalReason[];
       matchedLocation: boolean;
@@ -536,7 +546,7 @@ export function simulateLorebookRetrieval(
   for (const entry of eligibleEntries) {
     const reasons: LmRetrievalReason[] = [];
     let score = 0;
-    let tier: "constant" | "direct" | null = null;
+    let tier: "constant" | "location" | "direct" | null = null;
     let matchedLocation = false;
 
     if (entry.constant) {
@@ -552,7 +562,17 @@ export function simulateLorebookRetrieval(
       reasons.push({ kind: "keyword", detail: `Keyword "${keywordHit}"`, score: 10 });
     }
 
-    if (
+    // The map links this entry to where the chat is: forced in, like the Engine's `current_location` entries.
+    if (linkedToCurrentLocation(entry)) {
+      tier ??= "location";
+      matchedLocation = true;
+      score += 12;
+      reasons.push({
+        kind: "location",
+        detail: locationQuery ? `Linked to the current location "${locationQuery}"` : "Linked to the current location",
+        score: 12,
+      });
+    } else if (
       locationQuery &&
       (entry.family === "location" || entry.secondaryFamilies.includes("location")) &&
       [entry.name, ...entry.keys].some((tok) =>
@@ -782,6 +802,9 @@ export function simulateLorebookRetrieval(
   const rankedConstants = [...directCandidates.values()]
     .filter((item) => item.tier === "constant")
     .sort((a, b) => (a.entry.order ?? 100) - (b.entry.order ?? 100) || a.entry.name.localeCompare(b.entry.name));
+  const rankedLocation = [...directCandidates.values()]
+    .filter((item) => item.tier === "location")
+    .sort((a, b) => (a.entry.order ?? 100) - (b.entry.order ?? 100) || a.entry.name.localeCompare(b.entry.name));
   const rankedDirect = [...directCandidates.values()]
     .filter((item) => item.tier === "direct")
     .sort((a, b) => b.score - a.score || (a.entry.order ?? 100) - (b.entry.order ?? 100));
@@ -795,6 +818,14 @@ export function simulateLorebookRetrieval(
       tokens: estimateEntryTokens(item.entry),
       score: item.score,
       tier: "constant" as const,
+      reasons: item.reasons,
+      viaRefs: [],
+    })),
+    ...rankedLocation.map((item) => ({
+      entry: item.entry,
+      tokens: estimateEntryTokens(item.entry),
+      score: item.score,
+      tier: "location" as const,
       reasons: item.reasons,
       viaRefs: [],
     })),

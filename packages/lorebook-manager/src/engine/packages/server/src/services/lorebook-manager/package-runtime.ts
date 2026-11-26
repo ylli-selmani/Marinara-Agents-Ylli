@@ -48,6 +48,12 @@ export interface LorebookManagerMessageRecord {
   agentContent?: string;
 }
 
+export interface LorebookManagerGameStateRecord {
+  messageId: string;
+  swipeIndex: number;
+  location: string | null;
+}
+
 export interface LorebookManagerChatRecord {
   id: string;
   name?: string;
@@ -94,6 +100,8 @@ export interface LorebookManagerRuntimeHost {
     /** Requires `chat-read`. Chats and messages live on persistence, not on resources. */
     listMessages?(chatId: string): Promise<LorebookManagerMessageRecord[]>;
     getChat?(chatId: string): Promise<LorebookManagerChatRecord | null>;
+    /** Requires `chat-read`. The committed tracker state per message (the active swipe's), World State included. */
+    listGameStates?(chatId: string): Promise<LorebookManagerGameStateRecord[]>;
   };
 }
 

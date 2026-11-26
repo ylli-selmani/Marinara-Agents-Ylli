@@ -139,7 +139,7 @@ export interface LmRetrievalActivatedItem {
   entry: LmEntryNode;
   tokens: number;
   score: number;
-  tier: "constant" | "direct" | "graph_1hop";
+  tier: "constant" | "location" | "direct" | "graph_1hop";
   reasons: LmRetrievalReason[];
   viaRefs: string[];
 }
@@ -158,6 +158,13 @@ export interface LmRetrievalInput {
   activeCharacterIds: string[];
   activePersonaId?: string | null;
   activeLocationText?: string;
+  /**
+   * Entry refs linked to the chat's current map location (World Maps `lorebookEntryIds`). They join the Location
+   * tier right after constants, like the Engine's own `current_location` entries.
+   */
+  currentLocationEntryRefs?: readonly string[];
+  /** The current World Maps location id; entries with a `loc:<id>` relationship to it join the Location tier too. */
+  currentLocationId?: string | null;
   tokenBudget: number;
   maxOneHop: number;
   maxTextHits?: number;
@@ -258,6 +265,15 @@ export interface LmLiveRunRecord {
   suppressedCount: number;
   /** Absent on runs recorded before the semantic lane. */
   semantic?: LmSemanticRunInfo;
+  /** Where the chat was this turn, when known. Absent on older runs and when no location source answered. */
+  location?: LmLocationRunInfo;
+}
+
+/** The location a live run used: World Maps (linked entries + boost) or the World State tracker (boost only). */
+export interface LmLocationRunInfo {
+  source: "world_maps" | "world_state";
+  text: string;
+  linkedEntryCount: number;
 }
 
 export interface LmChatRuns {

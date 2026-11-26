@@ -4,12 +4,17 @@ import type {
   LmCompendium,
   LmGraphPayload,
   LmLiveRunRecord,
+  LmLocationRunInfo,
   LmRetrievalResult,
   LmSemanticRunInfo,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { agentAddedToChat, compendiumForChat } from "./live-claims.js";
-import { getLorebookManagerRuntime, type LorebookManagerMessageRecord } from "./package-runtime.js";
+import {
+  getLorebookManagerRuntime,
+  type LorebookManagerGameStateRecord,
+  type LorebookManagerMessageRecord,
+} from "./package-runtime.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
 
@@ -26,6 +31,59 @@ export interface LivePromptContextRequest {
   wrapFormat?: "xml" | "markdown" | "none";
   /** On a regenerate or swipe, the message being replaced (Capability API 1.839). */
   regenerateMessageId?: string | null;
+  /** Where the chat is on its World Maps map this turn (Capability API 1.839). */
+  currentLocation?: { locationId: string; path: string; lorebookEntryIds: string[] } | null;
+}
+
+/** The location Stage 1 uses this turn: what the retrieval input needs, plus what the run log shows. */
+export interface LiveLocation {
+  text: string;
+  entryRefs: string[];
+  locationId: string | null;
+  info: LmLocationRunInfo;
+}
+
+/**
+ * Where the chat is. World Maps first: the Engine passes its resolved location with the entries the map links to
+ * it (a claim hides those from the Engine's scan, so they are ours to inject). Otherwise the World State tracker's
+ * location text, from the latest message before a swipe's replaced one, which only boosts matching location entries.
+ */
+export function resolveLiveLocation(
+  request: Pick<LivePromptContextRequest, "currentLocation" | "regenerateMessageId">,
+  messages: readonly LorebookManagerMessageRecord[],
+  gameStates: readonly LorebookManagerGameStateRecord[],
+): LiveLocation | null {
+  const map = request.currentLocation;
+  if (map && typeof map.locationId === "string" && map.locationId.trim()) {
+    const entryRefs = [...new Set((map.lorebookEntryIds ?? []).filter((id) => typeof id === "string" && id))].map(
+      (id) => `lore:${id}`,
+    );
+    const text = typeof map.path === "string" ? map.path.trim() : "";
+    return {
+      text,
+      entryRefs,
+      locationId: map.locationId.trim(),
+      info: { source: "world_maps", text, linkedEntryCount: entryRefs.length },
+    };
+  }
+  const indexById = new Map(messages.map((message, index) => [message.id, index]));
+  const end = request.regenerateMessageId
+    ? (indexById.get(request.regenerateMessageId) ?? messages.length)
+    : messages.length;
+  let best: { index: number; text: string } | null = null;
+  for (const state of gameStates) {
+    const index = indexById.get(state.messageId);
+    const text = typeof state.location === "string" ? state.location.trim() : "";
+    if (index === undefined || index >= end || !text) continue;
+    if (!best || index > best.index) best = { index, text };
+  }
+  if (!best) return null;
+  return {
+    text: best.text,
+    entryRefs: [],
+    locationId: null,
+    info: { source: "world_state", text: best.text, linkedEntryCount: 0 },
+  };
 }
 
 function parseExtra(extra: unknown): Record<string, unknown> {
@@ -112,6 +170,7 @@ export function toLiveRunRecord(
   result: LmRetrievalResult,
   at: string,
   semantic?: LmSemanticRunInfo,
+  location?: LmLocationRunInfo | null,
 ): LmLiveRunRecord {
   return {
     at,
@@ -131,6 +190,7 @@ export function toLiveRunRecord(
     })),
     suppressedCount: result.suppressed.length,
     ...(semantic ? { semantic } : {}),
+    ...(location ? { location } : {}),
   };
 }
 
@@ -207,10 +267,18 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   const { persistence } = runtime;
   if (typeof persistence.listMessages !== "function") throw new Error("persistence.listMessages is unavailable");
 
-  const [messages, chat] = await Promise.all([
+  const needsWorldState = !request.currentLocation && typeof persistence.listGameStates === "function";
+  const [messages, chat, gameStates] = await Promise.all([
     persistence.listMessages(request.chatId),
     typeof persistence.getChat === "function" ? persistence.getChat(request.chatId) : Promise.resolve(null),
+    needsWorldState
+      ? persistence.listGameStates!(request.chatId).catch((error: unknown) => {
+          runtime.logger.warn("[lorebook-manager] Could not read World State for chat %s: %s", request.chatId, error);
+          return [] as LorebookManagerGameStateRecord[];
+        })
+      : Promise.resolve([] as LorebookManagerGameStateRecord[]),
   ]);
+  const location = resolveLiveLocation(request, messages, gameStates);
   // Every card in the chat counts as active, like the Engine's scan; the generation's targets come first so
   // `{{char}}` names the one who speaks.
   const activeCharacterIds = [...new Set([...(request.targetCharacterIds ?? []), ...(chat?.characterIds ?? [])])];
@@ -238,6 +306,13 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
         : {}),
       activeCharacterIds,
       activePersonaId: personaId,
+      ...(location
+        ? {
+            activeLocationText: location.text,
+            currentLocationEntryRefs: location.entryRefs,
+            currentLocationId: location.locationId,
+          }
+        : {}),
       tokenBudget: settings.tokenBudget,
       maxOneHop: settings.maxOneHop,
       maxTextHits: settings.maxTextHits,
@@ -249,7 +324,13 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
 
   void recordLiveRun(
     request.chatId,
-    toLiveRunRecord(compendium, result, new Date().toISOString(), semantic?.info ?? { ...SEMANTIC_OFF }),
+    toLiveRunRecord(
+      compendium,
+      result,
+      new Date().toISOString(),
+      semantic?.info ?? { ...SEMANTIC_OFF },
+      location?.info ?? null,
+    ),
   ).catch((error) =>
     runtime.logger.warn("[lorebook-manager] Could not record the retrieval run for chat %s: %s", request.chatId, error),
   );

@@ -53,6 +53,7 @@ const SIM_STYLE = `
 
 export const TIER_LABEL: Record<LmRetrievalActivatedItem["tier"], string> = {
   constant: "Constant",
+  location: "Location",
   direct: "Direct",
   graph_1hop: "1-hop",
 };

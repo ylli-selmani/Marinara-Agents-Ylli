@@ -4,6 +4,7 @@
  * Slice 3b: the Activity listing of those runs, and the Review store (apply / dismiss suggested entry changes).
  */
 import assert from "node:assert/strict";
+import type { LmLiveRunRecord } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/schema.js";
 import {
   createCompendium,
   setChatCompendiumBinding,
@@ -17,6 +18,7 @@ import {
   contributeLiveLore,
   listLiveRuns,
   recentQueryText,
+  resolveLiveLocation,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
 import {
   applyProposal,
@@ -28,6 +30,7 @@ import {
   configureLorebookManagerRuntime,
   type LorebookManagerDocumentRecord,
   type LorebookManagerDocumentStore,
+  type LorebookManagerGameStateRecord,
   type LorebookManagerMessageRecord,
   type LorebookManagerRuntimeHost,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
@@ -82,6 +85,14 @@ const books = [
       },
       { id: "syliveera", name: "Syliveera", keys: ["Syliveera"], content: "Syliveera greets {{user}} coldly." },
       { id: "oath", name: "Oath", constant: true, content: "Every fae keeps their word." },
+      { id: "hall", name: "Moon Hall", tag: "location", keys: ["xyzzy"], content: "Silver light fills the Moon Hall." },
+      {
+        id: "well",
+        name: "Old Well",
+        keys: ["qqqq"],
+        content: "An old well.",
+        relationships: { "loc:map-moon": "located_in" },
+      },
     ],
   },
   {
@@ -95,6 +106,7 @@ async function main() {
   const documents = makeMemoryDocStore();
   const lorebookCalls: Array<string[] | undefined> = [];
   let messages: LorebookManagerMessageRecord[] = [];
+  let gameStates: LorebookManagerGameStateRecord[] = [];
   const runtime: LorebookManagerRuntimeHost = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     persistence: {
@@ -105,6 +117,9 @@ async function main() {
       },
       async getChat(chatId) {
         return { id: chatId, name: "Fae night", characterIds: ["ash"], personaId: "ylva" };
+      },
+      async listGameStates() {
+        return gameStates;
       },
     },
     resources: {
@@ -279,6 +294,51 @@ async function main() {
 
     const oldEngine = { ...runtime, resources: { ...runtime.resources, updateLorebookEntry: undefined } };
     await assert.rejects(() => applyProposal(oldEngine, locked.id), /Capability API 1\.839/u);
+
+    // Location. World Maps first: the entries the map links to the current place (and `loc:` links to it) join
+    // the Location tier, though nothing in the chat names them.
+    const atMoon = {
+      locationId: "map-moon",
+      path: "Faerie > Moon Hall",
+      lorebookEntryIds: ["hall", "hall", "elsewhere"],
+    };
+    assert.deepEqual(resolveLiveLocation({ currentLocation: atMoon }, [], []), {
+      text: "Faerie > Moon Hall",
+      entryRefs: ["lore:hall", "lore:elsewhere"],
+      locationId: "map-moon",
+      info: { source: "world_maps", text: "Faerie > Moon Hall", linkedEntryCount: 2 },
+    });
+    messages = [message("7", "user", "We rest."), message("8", "assistant", "The night is quiet.")];
+    gameStates = [
+      { messageId: "7", swipeIndex: 0, location: "Moon Hall" },
+      { messageId: "8", swipeIndex: 0, location: "  " },
+      { messageId: "gone", swipeIndex: 0, location: "Elsewhere" },
+    ];
+    const plain = await contributeLiveLore({ ...request, regenerateMessageId: "7" });
+    assert.doesNotMatch(plain ?? "", /Moon Hall|old well/u, "no location before the swiped message: nothing extra");
+    const mapped = await contributeLiveLore({ ...request, currentLocation: atMoon });
+    assert.match(mapped!, /Silver light fills the Moon Hall\./, "the entry the map links to the current place");
+    assert.match(mapped!, /An old well\./, "an entry with a loc: link to the current place");
+    assert.ok(
+      mapped!.indexOf("Every fae keeps") < mapped!.indexOf("Silver light"),
+      "location entries come right after constants",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const mappedRun = (documents.docs.get("live_run:chat-1")?.data as { runs: LmLiveRunRecord[] }).runs[0]!;
+    assert.deepEqual(mappedRun.location, { source: "world_maps", text: "Faerie > Moon Hall", linkedEntryCount: 2 });
+    assert.equal(mappedRun.activated.find((item) => item.ref === "lore:hall")?.tier, "location");
+
+    // No map: the World State tracker's location boosts matching location entries (the newest non-empty one).
+    assert.equal(resolveLiveLocation({}, messages, gameStates)?.text, "Moon Hall");
+    assert.equal(resolveLiveLocation({ regenerateMessageId: "7" }, messages, gameStates), null);
+    const tracked = await contributeLiveLore(request);
+    assert.match(tracked!, /Silver light fills the Moon Hall\./, "World State's location picks the place's entry");
+    assert.doesNotMatch(tracked!, /An old well\./, "a loc: link needs the map's location id");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const trackedRun = (documents.docs.get("live_run:chat-1")?.data as { runs: LmLiveRunRecord[] }).runs[0]!;
+    assert.deepEqual(trackedRun.location, { source: "world_state", text: "Moon Hall", linkedEntryCount: 0 });
+    assert.equal(trackedRun.activated.find((item) => item.ref === "lore:hall")?.tier, "direct");
+    gameStates = [];
 
     await setChatCompendiumBinding(documents, "chat-1", null);
     await refreshLiveClaims();

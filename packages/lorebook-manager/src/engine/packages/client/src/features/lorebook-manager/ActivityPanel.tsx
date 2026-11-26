@@ -62,6 +62,14 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
           {semantic.missingCount > 0 ? ` · ${semantic.missingCount} still vectorizing` : ""}
         </p>
       ) : null}
+      {run.location ? (
+        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+          {run.location.source === "world_maps" ? "World Maps" : "World State"}: {run.location.text || "unnamed place"}
+          {run.location.source === "world_maps"
+            ? ` · ${run.location.linkedEntryCount} linked ${run.location.linkedEntryCount === 1 ? "entry" : "entries"}`
+            : ""}
+        </p>
+      ) : null}
       {run.activated.length === 0 ? (
         <p className="text-[var(--muted-foreground)]">
           Nothing matched the last {run.queryMessageCount} {run.queryMessageCount === 1 ? "message" : "messages"}.

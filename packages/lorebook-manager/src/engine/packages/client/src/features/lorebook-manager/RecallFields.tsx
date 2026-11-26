@@ -186,7 +186,7 @@ export function RecallFields(props: RecallFieldsProps) {
         <NumberField
           field="queryMessageCount"
           label="Messages to match"
-          title="Live retrieval matches this many of the latest messages (yours and the replies)."
+          title="Keywords and shared words look at this many of the latest messages (yours and the replies). Meaning match uses your own last messages only, like the Engine's lorebook vectors."
           min={1}
           max={10}
           props={props}

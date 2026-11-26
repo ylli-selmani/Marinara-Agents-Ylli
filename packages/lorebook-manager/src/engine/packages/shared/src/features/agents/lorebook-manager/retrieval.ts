@@ -804,7 +804,8 @@ export function simulateLorebookRetrieval(
         if (bm25 < policy.floor) continue;
 
         const hopScore = policy.weight * seed.seedScore + bm25 * 0.25;
-        const arrow = link.direction === "both" ? "↔" : link.direction === "out" ? "→" : "←";
+        // The badge sits on the neighbour, so the arrow reads from it: link "in" (neighbour → seed) shows "→ seed".
+        const arrow = link.direction === "both" ? "↔" : link.direction === "in" ? "→" : "←";
         const reason: LmRetrievalReason = seed.viaCardName
           ? {
               kind: "card_inherited",

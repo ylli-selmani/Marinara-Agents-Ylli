@@ -17,6 +17,7 @@ import {
 import {
   contributeLiveLore,
   listLiveRuns,
+  meaningQueryText,
   recentQueryText,
   resolveLiveLocation,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
@@ -166,6 +167,15 @@ async function main() {
     // A swipe of message 2 matches what came before it, never the text of the swipe it replaces.
     assert.equal(recentQueryText(window, 2, "2"), "Syliveera waits.");
     assert.equal(recentQueryText(window, 2, "missing"), recentQueryText(window, 2), "an unknown id changes nothing");
+    // Meaning match asks with the user's own last messages only, like the Engine's lorebook vectors (round 4).
+    assert.equal(meaningQueryText(window, 2), "Syliveera waits.\nWe reach the Unseelie Court.");
+    assert.equal(meaningQueryText(window, 1), "We reach the Unseelie Court.");
+    assert.equal(meaningQueryText(window, 2, "2"), "Syliveera waits.", "a swipe asks with what came before it");
+    assert.equal(
+      meaningQueryText([message("a", "assistant", "The bell rings.")], 2),
+      "The bell rings.",
+      "without a user message it falls back to the replies",
+    );
 
     const compendium = await createCompendium(documents, {
       name: "Fae",

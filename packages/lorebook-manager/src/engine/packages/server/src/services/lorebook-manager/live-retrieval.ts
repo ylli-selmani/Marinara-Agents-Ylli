@@ -219,6 +219,31 @@ export function recentQueryMessages(
   return picked.reverse();
 }
 
+/**
+ * The meaning-match query, the way the Engine's own lorebook vectors build it (`selectLorebookVectorQueryText`): the
+ * user's last messages only, because reply prose (and an OOC aside in a short window) drowns a short question. Falls
+ * back to every message when the chat has no user message yet.
+ */
+export function meaningQueryText(
+  messages: readonly LorebookManagerMessageRecord[],
+  count: number,
+  regenerateMessageId?: string | null,
+): string {
+  const regenerateIndex = regenerateMessageId
+    ? messages.findIndex((message) => message.id === regenerateMessageId)
+    : -1;
+  const before = regenerateIndex >= 0 ? messages.slice(0, regenerateIndex) : messages;
+  const userMessages = recentQueryMessages(
+    before.filter((message) => message.role === "user"),
+    count,
+  );
+  const picked = userMessages.length > 0 ? userMessages : recentQueryMessages(before, count);
+  return picked
+    .map((message) => message.content)
+    .join("\n")
+    .trim();
+}
+
 function wrapLore(text: string, wrapFormat: LivePromptContextRequest["wrapFormat"]): string {
   if (wrapFormat === "markdown") return `## World info\n\n${text}`;
   if (wrapFormat === "none") return text;
@@ -410,6 +435,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   });
   const queryMessages = recentQueryMessages(messages, settings.queryMessageCount, request.regenerateMessageId);
   const queryText = queryMessages.map((message) => message.content).join("\n\n");
+  const meaningText = meaningQueryText(messages, settings.queryMessageCount, request.regenerateMessageId);
 
   const reuseKey = turnKey([
     request.chatId,
@@ -418,6 +444,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     compendium.id,
     settings,
     queryMessages,
+    meaningText,
     activeCharacterIds,
     personaId,
     location ? [location.text, location.entryRefs, location.locationId] : null,
@@ -438,10 +465,16 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
           error,
         ),
       );
+    runtime.logger.debug(
+      "[lorebook-manager] Chat %s: reused the earlier run (%d entries), %d ms",
+      request.chatId,
+      reused.record.activated.length,
+      Date.now() - startedAt,
+    );
     return reused.text;
   }
   // Meaning match never fails the turn: on a timeout or error Stage 1 runs on text alone, and the run says why.
-  const semantic = vectorSources ? await semanticScoresFor(vectorSources, queryText) : null;
+  const semantic = vectorSources ? await semanticScoresFor(vectorSources, meaningText) : null;
   const stage1 = simulateLorebookRetrieval(
     payload,
     {
@@ -496,6 +529,21 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
         error,
       ),
     );
+
+  runtime.logger.debug(
+    "[lorebook-manager] Chat %s: %d entries, ~%d tok · Stage 1 %d ms · meaning %s %d ms · gate %s%s · %d ms total",
+    request.chatId,
+    result.activated.length,
+    record.totalTokens,
+    record.durationMs,
+    semanticInfo.status,
+    semanticInfo.embedMs,
+    gate.info ? `${gate.info.mode} ${gate.info.status} ${gate.info.ms} ms` : "off",
+    gate.info && gate.info.checked > 0
+      ? `, kept ${gate.info.checked - gate.info.dropped.length}/${gate.info.checked}`
+      : "",
+    record.totalMs ?? Date.now() - startedAt,
+  );
 
   const text = formatLiveLore(result, payload, { activeCharacterIds, personaId, wrapFormat: request.wrapFormat });
   if (!degraded(semanticInfo, gate.info)) writeReusableTurn(reuseKey, { at: Date.now(), text, record });

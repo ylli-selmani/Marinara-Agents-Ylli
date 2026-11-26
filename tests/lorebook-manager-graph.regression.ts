@@ -736,6 +736,17 @@ const oneHopPayload: LmGraphPayload = {
 const oneHopFull = simulateLorebookRetrieval(oneHopPayload, { ...simQuery, maxOneHop: 6 });
 const oneHopActivatedCount = oneHopFull.activated.filter((a) => a.tier === "graph_1hop").length;
 assert.ok(oneHopActivatedCount >= 2, "Fixture must activate at least two 1-hop neighbours");
+// The badge sits on the neighbour: deku-lore ally_of extra-ally reads "ally_of ← <Deku>" on Extra Ally (round 4:
+// "is_a → Lee Clan" on Clan read as if Clan were a Lee Clan).
+{
+  const dekuName = (oneHopPayload.nodes.find((n) => n.ref === "lore:deku-lore") as LmEntryNode).name;
+  const extra = oneHopFull.activated.find((a) => a.entry.ref === "lore:extra-ally");
+  assert.ok(extra, "Extra Ally comes in by 1-hop");
+  assert.ok(
+    extra.reasons.some((r) => r.detail.endsWith(`ally_of ← ${dekuName}`)),
+    `arrow reads from the neighbour: ${extra.reasons.map((r) => r.detail).join(" | ")}`,
+  );
+}
 const oneHopCapped = simulateLorebookRetrieval(oneHopPayload, { ...simQuery, maxOneHop: 1 });
 assert.equal(
   oneHopCapped.activated.filter((a) => a.tier === "graph_1hop").length,

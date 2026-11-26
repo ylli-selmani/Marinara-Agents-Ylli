@@ -100,7 +100,7 @@ export function CompendiumModal({
   const connectionsQuery = useQuery({
     queryKey: lmQueryKeys.connections,
     queryFn: fetchTextConnections,
-    enabled: open && semanticEnabled && stage2Gate === "librarian",
+    enabled: open && stage2Gate === "librarian",
     staleTime: 60_000,
   });
   const [indexing, setIndexing] = useState(false);
@@ -593,57 +593,59 @@ export function CompendiumModal({
                 ) : null}
               </div>
             ) : null}
-            {semanticEnabled ? (
-              <div className="flex flex-wrap items-center gap-3">
-                <label
-                  className="flex items-center gap-1.5"
-                  title="Entries found only by meaning can be noise. A check asks a model which ones fit the scene; anything it can't answer stays in."
+          </div>
+
+          <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
+            {/* Not under meaning match: shared-word hits are checked too, so the gate helps without embeddings. */}
+            <div className="flex flex-wrap items-center gap-3">
+              <label
+                className="flex items-center gap-1.5"
+                title="Entries found only by shared words or by meaning can be noise. A check asks a model which ones fit the scene; anything it can't answer stays in."
+              >
+                <span className="text-[var(--muted-foreground)]">Check loose matches</span>
+                <select
+                  disabled={saving}
+                  value={stage2Gate}
+                  onChange={(event) => setStage2Gate(event.target.value as LmStage2Gate)}
+                  className="mari-chrome-field h-8 rounded px-2 text-xs"
                 >
-                  <span className="text-[var(--muted-foreground)]">Check meaning matches</span>
+                  <option value="instant">Off (fastest)</option>
+                  <option value="decision">Decision model</option>
+                  <option value="librarian">Librarian (language model)</option>
+                </select>
+              </label>
+              {stage2Gate === "librarian" ? (
+                <label className="flex items-center gap-1.5">
+                  <span className="text-[var(--muted-foreground)]">Connection</span>
                   <select
                     disabled={saving}
-                    value={stage2Gate}
-                    onChange={(event) => setStage2Gate(event.target.value as LmStage2Gate)}
-                    className="mari-chrome-field h-8 rounded px-2 text-xs"
+                    value={librarianConnectionId ?? ""}
+                    onChange={(event) => setLibrarianConnectionId(event.target.value || null)}
+                    className="mari-chrome-field h-8 max-w-[14rem] rounded px-2 text-xs"
                   >
-                    <option value="instant">Off (fastest)</option>
-                    <option value="decision">Decision model</option>
-                    <option value="librarian">Librarian (language model)</option>
+                    <option value="">Agents&apos; default, then the chat&apos;s</option>
+                    {(connectionsQuery.data ?? []).map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name}
+                      </option>
+                    ))}
+                    {/* A saved connection that has since been deleted stays visible, as in Saucelings' picker. */}
+                    {librarianConnectionId &&
+                    connectionsQuery.data &&
+                    !connectionsQuery.data.some((connection) => connection.id === librarianConnectionId) ? (
+                      <option value={librarianConnectionId}>Missing connection</option>
+                    ) : null}
                   </select>
                 </label>
-                {stage2Gate === "librarian" ? (
-                  <label className="flex items-center gap-1.5">
-                    <span className="text-[var(--muted-foreground)]">Connection</span>
-                    <select
-                      disabled={saving}
-                      value={librarianConnectionId ?? ""}
-                      onChange={(event) => setLibrarianConnectionId(event.target.value || null)}
-                      className="mari-chrome-field h-8 max-w-[14rem] rounded px-2 text-xs"
-                    >
-                      <option value="">Agents&apos; default, then the chat&apos;s</option>
-                      {(connectionsQuery.data ?? []).map((connection) => (
-                        <option key={connection.id} value={connection.id}>
-                          {connection.name}
-                        </option>
-                      ))}
-                      {/* A saved connection that has since been deleted stays visible, as in Saucelings' picker. */}
-                      {librarianConnectionId &&
-                      connectionsQuery.data &&
-                      !connectionsQuery.data.some((connection) => connection.id === librarianConnectionId) ? (
-                        <option value={librarianConnectionId}>Missing connection</option>
-                      ) : null}
-                    </select>
-                  </label>
-                ) : null}
-                {stage2Gate !== "instant" ? (
-                  <span className="basis-full text-[0.6875rem] text-[var(--muted-foreground)]">
-                    {stage2Gate === "decision"
-                      ? "Uses the Decision model from Settings. Adds a moment to each turn that has meaning-only matches."
-                      : "One short model call on turns with meaning-only matches, about 1–2 seconds. Keyword, location and linked hits are never checked."}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
+              ) : null}
+              {stage2Gate !== "instant" ? (
+                <span className="basis-full text-[0.6875rem] text-[var(--muted-foreground)]">
+                  {stage2Gate === "decision"
+                    ? "Uses the Decision model from Settings. Checks entries found only by shared words or meaning; keyword, constant, location and linked hits are never checked."
+                    : "One short model call per turn, about 1–2 seconds. Checks entries found only by shared words or meaning; keyword, constant, location and linked hits are never checked."}
+                </span>
+              ) : null}
+            </div>
           </div>
 
           {selectedBookRows.length > 0 ? (

@@ -342,7 +342,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     },
     lorebookIds,
   );
-  // Stage 2 checks only the meaning-only picks, and keeps them whenever it can't answer.
+  // Stage 2 checks only the loose picks (shared words or meaning), and keeps them whenever it can't answer.
   const gate = await runStage2Gate(settings, stage1, {
     chatId: request.chatId,
     mode: request.mode,

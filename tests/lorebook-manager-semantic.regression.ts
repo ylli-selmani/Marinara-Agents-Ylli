@@ -119,6 +119,32 @@ function pureStage1() {
   assert.deepEqual(shape(emptyScores), shape(textOnly), "no similarities = the text-only result, unchanged");
   assert.ok(!textOnly.activated.some((item) => item.entry.ref === "lore:tempest"), "no words in common with Tempest");
 
+  // {{user}} is a placeholder, not a word: a greeting stored with a raw {{user}} matched every entry that says
+  // {{user}} (Ylli's test round 2). Real shared words still match.
+  const macroPayload = payloadOf([
+    lore("susanoo", "Susanoo", { content: "{{user}} sees blue fire in the eyes of the Uchiha." }),
+    // Other entries, so a shared word has a real IDF (one entry alone scores nothing).
+    lore("market", "Market", { content: "Spices and silk for {{user}}." }),
+    lore("dock", "Dock", { content: "Ropes and tar." }),
+    lore("forge", "Forge", { content: "Hammers ring all night." }),
+    lore("garden", "Garden", { content: "Roses climb the wall." }),
+    lore("well", "Well", { content: "Cold water, deep stone." }),
+  ]);
+  const macro = simulateLorebookRetrieval(macroPayload, {
+    ...baseInput,
+    queryText: "{{user}} watches blue fire burn in the Uchiha eyes.",
+  });
+  const susanoo = macro.activated.find((item) => item.entry.ref === "lore:susanoo");
+  assert.ok(susanoo, "real shared words still match");
+  // The reason text lists only the top shared words, so compare scores: adding {{user}} must change nothing.
+  const without = simulateLorebookRetrieval(macroPayload, {
+    ...baseInput,
+    queryText: "watches blue fire burn in the Uchiha eyes.",
+  }).activated.find((item) => item.entry.ref === "lore:susanoo");
+  const bm25Score = (item: typeof susanoo) => item?.reasons.find((reason) => reason.kind === "bm25")?.score;
+  assert.ok(bm25Score(susanoo)! > 0);
+  assert.equal(bm25Score(susanoo), bm25Score(without), "{{user}} is never one of the shared words");
+
   const semanticScores = { "lore:tempest": 0.72, "lore:harbor": 0.41, "lore:market": 0.12 };
   const withMeaning = simulateLorebookRetrieval(payload, { ...input, semanticScores });
   const tempest = withMeaning.activated.find((item) => item.entry.ref === "lore:tempest");

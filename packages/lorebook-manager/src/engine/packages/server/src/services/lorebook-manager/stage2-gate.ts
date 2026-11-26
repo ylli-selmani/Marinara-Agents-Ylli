@@ -42,11 +42,31 @@ export interface GateOutcome {
   info: LmGateRunInfo | null;
 }
 
-/** The uncertain tail: entries found by meaning alone. Every other reason is trusted and never checked. */
+/** Shared words (BM25) and meaning (similarity) are guesses; keys, constants, location and links are not. */
+const LOOSE_REASONS = new Set(["bm25", "semantic"]);
+
+/**
+ * The uncertain tail: entries found only by shared words or by meaning, nothing stronger. Keyword, constant, location
+ * and card hits are trusted and never checked. (3c-2 first checked meaning-only picks, but almost every meaning match
+ * also shares a word, so the gate never had anything to check; the noise Ylli saw was shared-word hits.)
+ */
 export function gateCandidates(result: LmRetrievalResult): LmRetrievalActivatedItem[] {
   return result.activated.filter(
-    (item) => item.reasons.length > 0 && item.reasons.every((reason) => reason.kind === "semantic"),
+    (item) => item.reasons.length > 0 && item.reasons.every((reason) => LOOSE_REASONS.has(reason.kind)),
   );
+}
+
+/** 1-hop entries that came only through seeds the gate turned down lose their reason to be there too. */
+function orphanedByRejection(result: LmRetrievalResult, rejected: ReadonlySet<string>): string[] {
+  return result.activated
+    .filter(
+      (item) =>
+        item.reasons.length > 0 &&
+        item.reasons.every((reason) => reason.kind === "graph_1hop") &&
+        item.viaRefs.length > 0 &&
+        item.viaRefs.every((ref) => rejected.has(ref)),
+    )
+    .map((item) => item.entry.ref);
 }
 
 function summaryOf(item: LmRetrievalActivatedItem): string {
@@ -154,8 +174,8 @@ async function decisionRejects(
 }
 
 const LIBRARIAN_SYSTEM = [
-  "You are the Librarian of a roleplay's lorebook. Some entries were found only because their wording is similar to",
-  "the latest messages, and some of those are noise. Keep an entry only if the story right now involves it, or the",
+  "You are the Librarian of a roleplay's lorebook. Some entries were found only because they share words or meaning",
+  "with the latest messages, and some of those are noise. Keep an entry only if the story right now involves it, or the",
   "writer would plainly need it for the next reply. When unsure, keep it.",
   'Answer with JSON only: {"keep": ["e1", "e3"]}. Use only the ids listed.',
 ].join(" ");
@@ -209,12 +229,13 @@ function safeParse(raw: string): unknown {
 
 function withoutRejected(result: LmRetrievalResult, rejected: ReadonlySet<string>): LmRetrievalResult {
   if (rejected.size === 0) return result;
-  const activated = result.activated.filter((item) => !rejected.has(item.entry.ref));
+  const gone = new Set([...rejected, ...orphanedByRejection(result, rejected)]);
+  const activated = result.activated.filter((item) => !gone.has(item.entry.ref));
   return { ...result, activated, totalTokens: activated.reduce((sum, item) => sum + item.tokens, 0) };
 }
 
 /**
- * Stage 2: check the meaning-only picks with the Compendium's gate, at most one model call. Fails open: whatever goes
+ * Stage 2: check the loose picks (shared words or meaning only) with the Compendium's gate, at most one model call. Fails open: whatever goes
  * wrong, the entry stays, so the gate can cost noise but never lore.
  */
 export async function runStage2Gate(
@@ -238,14 +259,15 @@ export async function runStage2Gate(
     extra: Partial<LmGateRunInfo> = {},
   ): GateOutcome => {
     const rejected = new Set(rejectedRefs);
+    const orphans = new Set(orphanedByRejection(result, rejected));
     return {
       result: withoutRejected(result, rejected),
       info: {
         ...base,
         status,
         ms: Date.now() - started,
-        dropped: candidates
-          .filter((item) => rejected.has(item.entry.ref))
+        dropped: result.activated
+          .filter((item) => rejected.has(item.entry.ref) || orphans.has(item.entry.ref))
           .map((item) => ({ ref: item.entry.ref, name: item.entry.name })),
         ...extra,
       },

@@ -302,7 +302,13 @@ function findMatchingKey(entry: LmEntryNode, text: string): string | null {
 }
 
 function tokenizeBm25(text: string): string[] {
-  const tokens = text.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+  // Macros like {{user}} are placeholders, not words: a greeting stored with a raw {{user}} matched every entry that
+  // says {{user}} on "user" (Ylli's test round 2).
+  const tokens =
+    text
+      .replace(/\{\{[^{}]*\}\}/gu, " ")
+      .toLocaleLowerCase()
+      .match(/[\p{L}\p{N}]{2,}/gu) ?? [];
   return tokens.filter((token) => !STOPWORDS.has(token));
 }
 

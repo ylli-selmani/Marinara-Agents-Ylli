@@ -160,13 +160,20 @@ async function unitCases() {
     item("oath", "Oath", ["constant"]),
     item("harbor", "Harbor", ["keyword"]),
     item("gull", "Gull", ["semantic"]),
-    item("boat", "Boat", ["semantic", "bm25"]),
+    item("boat", "Boat", ["semantic", "keyword"]),
     item("kraken", "Kraken", ["semantic"], 40),
   ]);
   assert.deepEqual(
     gateCandidates(mixed).map((row) => row.entry.ref),
     ["lore:gull", "lore:kraken"],
-    "only entries found by meaning alone are checked",
+    "only loose picks are checked; a keyword hit is trusted even when it also matched by meaning",
+  );
+  assert.deepEqual(
+    gateCandidates(stage1([item("susanoo", "Susanoo", ["bm25"]), item("sasuke", "Sasuke", ["bm25", "semantic"])])).map(
+      (row) => row.entry.ref,
+    ),
+    ["lore:susanoo", "lore:sasuke"],
+    "shared-word hits are loose too (the noise Ylli saw: 'blue', 'eyes', 'user')",
   );
 
   // Instant never asks anything.
@@ -228,6 +235,36 @@ async function unitCases() {
     const many = stage1(Array.from({ length: 20 }, (_v, i) => item(`m${i}`, `M${i}`, ["semantic"])));
     await runStage2Gate(decision, many, context());
     assert.equal(asked.at(-1)!.questions.length, GATE_MAX_DECISION_QUESTIONS);
+  } finally {
+    release();
+  }
+
+  // A 1-hop entry reached only through a turned-down seed goes with it; one with another seed stays.
+  resetGateVerdicts();
+  release = configureLorebookManagerRuntime(
+    baseRuntime({
+      decisions: {
+        evaluate: async () => ({ model: "noul-small", answers: { e1: 0.1 }, choices: {}, threshold: 0.5 }),
+      },
+    }),
+  );
+  try {
+    const withHop = stage1([
+      item("harbor", "Harbor", ["keyword"]),
+      item("susanoo", "Susanoo", ["bm25"], 30),
+      { ...item("uchiha", "Uchiha", ["graph_1hop"], 20), viaRefs: ["lore:susanoo"] },
+      { ...item("akatsuki", "Akatsuki", ["graph_1hop"]), viaRefs: ["lore:susanoo", "lore:harbor"] },
+    ]);
+    const out = await runStage2Gate(decision, withHop, context({ chatId: "hop" }));
+    assert.deepEqual(
+      out.result.activated.map((row) => row.entry.name),
+      ["Harbor", "Akatsuki"],
+    );
+    assert.deepEqual(
+      out.info?.dropped.map((row) => row.name),
+      ["Susanoo", "Uchiha"],
+    );
+    assert.equal(out.result.totalTokens, 20, "Harbor 10 + Akatsuki 10");
   } finally {
     release();
   }

@@ -46,10 +46,10 @@ function gateLine(gate: NonNullable<LmLiveRunRecord["gate"]>): string {
       const kept = gate.checked - dropped;
       const how = gate.status === "cached" ? "same answer as before" : `${gate.ms} ms`;
       const names = dropped > 0 ? ` (dropped ${gate.dropped.map((item) => item.name).join(", ")})` : "";
-      return `${mode} kept ${kept} of ${gate.checked} meaning matches${names} · ${how}`;
+      return `${mode} kept ${kept} of ${gate.checked} loose matches${names} · ${how}`;
     }
     case "nothing_to_check":
-      return `${mode}: no meaning-only matches to check`;
+      return `${mode}: no loose matches to check`;
     case "unavailable":
       return `${mode} unavailable, kept all${gate.detail ? `: ${gate.detail}` : ""}`;
     case "timeout":

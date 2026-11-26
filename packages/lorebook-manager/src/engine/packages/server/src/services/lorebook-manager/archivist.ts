@@ -46,8 +46,11 @@ const MAX_FACT_CHARS = 400;
 const MAX_CREATES = 5;
 const MAX_CREATE_CHARS = 2_000;
 const MAX_RECORDED_RUNS = 20;
-/** A stalled provider must not hold the package's background queue: one model call gets this long. */
-export const BACKGROUND_MODEL_TIMEOUT_MS = 120_000;
+/**
+ * A backstop so nothing holds the package's background queue forever. The host already ends a stream that goes
+ * quiet; this only caps a call that keeps streaming, long enough for a 4k-token Crawler answer on a slow model.
+ */
+export const BACKGROUND_MODEL_TIMEOUT_MS = 5 * 60_000;
 
 /** The caller's signal (deactivation), plus the deadline. */
 export function backgroundModelSignal(signal?: AbortSignal): AbortSignal {

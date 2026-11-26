@@ -191,6 +191,8 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
   const runsQuery = useQuery({ queryKey: lmQueryKeys.runs, queryFn: fetchLiveRuns, refetchInterval: 15_000 });
   const chats = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  // A chat button clicked: the Archivist strip follows it instead of the open chat.
+  const [pickedChat, setPickedChat] = useState(false);
 
   useEffect(() => {
     if (selectedChatId && chats.some((chat) => chat.chatId === selectedChatId)) return;
@@ -215,7 +217,7 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
       {/* The open chat even before it has retrieval runs; else the chat picked below. */}
       <ArchivistActivity
         chatId={
-          currentChatId && !chats.some((chat) => chat.chatId === currentChatId)
+          !pickedChat && currentChatId && !chats.some((chat) => chat.chatId === currentChatId)
             ? currentChatId
             : (selectedChatId ?? currentChatId)
         }
@@ -229,7 +231,10 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
               type="button"
               className="mari-chrome-control mari-chrome-control--small"
               aria-pressed={chat.chatId === selectedChatId}
-              onClick={() => setSelectedChatId(chat.chatId)}
+              onClick={() => {
+                setSelectedChatId(chat.chatId);
+                setPickedChat(true);
+              }}
             >
               {chat.chatName}
             </button>

@@ -337,7 +337,10 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   if (batch.length === 0) {
     // After an Archivist change there's nothing to say when the entry is already tidy: record only Tidy entries.
     if (trigger !== "manual") return { status: "nothing_to_do", run: null };
-    const waiting = pending.filter((proposal) => proposal.source === "crawler").length;
+    const books = new Set(compendium.lorebookIds);
+    const waiting = pending.filter(
+      (proposal) => proposal.source === "crawler" && books.has(proposal.lorebookId),
+    ).length;
     return finish(
       base(
         "nothing_to_do",

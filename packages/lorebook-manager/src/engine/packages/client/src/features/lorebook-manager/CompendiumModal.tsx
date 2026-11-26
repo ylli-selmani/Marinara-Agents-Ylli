@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Loader2, Save, Sparkles, Trash2, X } from "lucide-react";
 import {
@@ -14,8 +15,15 @@ import type {
   LmEntryNode,
   LmLorebookSummary,
   LmSemanticIndexStatus,
+  LmStage2Gate,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { fetchLorebookManagerGraph, indexSemanticApi, type LmCompendiumSavePayload } from "./api";
+import {
+  fetchLorebookManagerGraph,
+  fetchTextConnections,
+  indexSemanticApi,
+  lmQueryKeys,
+  type LmCompendiumSavePayload,
+} from "./api";
 import { confirmWithHostOrBrowser, getHostComponents } from "./host-components";
 
 const MODAL_STYLE = `
@@ -85,6 +93,16 @@ export function CompendiumModal({
   const [bookTokenBudgets, setBookTokenBudgets] = useState<Record<string, number>>({});
   const [semanticEnabled, setSemanticEnabled] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticEnabled);
   const [semanticThreshold, setSemanticThreshold] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold);
+  const [stage2Gate, setStage2Gate] = useState<LmStage2Gate>(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.stage2Gate);
+  const [librarianConnectionId, setLibrarianConnectionId] = useState<string | null>(
+    DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.librarianConnectionId,
+  );
+  const connectionsQuery = useQuery({
+    queryKey: lmQueryKeys.connections,
+    queryFn: fetchTextConnections,
+    enabled: open && semanticEnabled && stage2Gate === "librarian",
+    staleTime: 60_000,
+  });
   const [indexing, setIndexing] = useState(false);
   const [indexStatus, setIndexStatus] = useState<LmSemanticIndexStatus | null>(null);
   const [discoveringCast, setDiscoveringCast] = useState(false);
@@ -105,6 +123,8 @@ export function CompendiumModal({
       setBookTokenBudgets(compendium.retrievalSettings.bookTokenBudgets);
       setSemanticEnabled(compendium.retrievalSettings.semanticEnabled);
       setSemanticThreshold(compendium.retrievalSettings.semanticThreshold);
+      setStage2Gate(compendium.retrievalSettings.stage2Gate);
+      setLibrarianConnectionId(compendium.retrievalSettings.librarianConnectionId);
     } else {
       setName("");
       setDescription("");
@@ -119,6 +139,8 @@ export function CompendiumModal({
       setBookTokenBudgets({});
       setSemanticEnabled(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticEnabled);
       setSemanticThreshold(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold);
+      setStage2Gate(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.stage2Gate);
+      setLibrarianConnectionId(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.librarianConnectionId);
     }
     setIndexStatus(null);
   }, [open, compendium]);
@@ -245,6 +267,8 @@ export function CompendiumModal({
       bookTokenBudgets: filteredBookBudgets,
       semanticEnabled,
       semanticThreshold: Math.max(0.05, Math.min(0.95, Math.round(semanticThreshold * 100) / 100)),
+      stage2Gate,
+      librarianConnectionId: stage2Gate === "librarian" ? librarianConnectionId : null,
     };
     await onSave(
       {
@@ -565,6 +589,57 @@ export function CompendiumModal({
                 {!indexStatus ? (
                   <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
                     Missing vectors also fill in by themselves after the first turns.
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            {semanticEnabled ? (
+              <div className="flex flex-wrap items-center gap-3">
+                <label
+                  className="flex items-center gap-1.5"
+                  title="Entries found only by meaning can be noise. A check asks a model which ones fit the scene; anything it can't answer stays in."
+                >
+                  <span className="text-[var(--muted-foreground)]">Check meaning matches</span>
+                  <select
+                    disabled={saving}
+                    value={stage2Gate}
+                    onChange={(event) => setStage2Gate(event.target.value as LmStage2Gate)}
+                    className="mari-chrome-field h-8 rounded px-2 text-xs"
+                  >
+                    <option value="instant">Off (fastest)</option>
+                    <option value="decision">Decision model</option>
+                    <option value="librarian">Librarian (language model)</option>
+                  </select>
+                </label>
+                {stage2Gate === "librarian" ? (
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-[var(--muted-foreground)]">Connection</span>
+                    <select
+                      disabled={saving}
+                      value={librarianConnectionId ?? ""}
+                      onChange={(event) => setLibrarianConnectionId(event.target.value || null)}
+                      className="mari-chrome-field h-8 max-w-[14rem] rounded px-2 text-xs"
+                    >
+                      <option value="">Agents&apos; default, then the chat&apos;s</option>
+                      {(connectionsQuery.data ?? []).map((connection) => (
+                        <option key={connection.id} value={connection.id}>
+                          {connection.name}
+                        </option>
+                      ))}
+                      {/* A saved connection that has since been deleted stays visible, as in Saucelings' picker. */}
+                      {librarianConnectionId &&
+                      connectionsQuery.data &&
+                      !connectionsQuery.data.some((connection) => connection.id === librarianConnectionId) ? (
+                        <option value={librarianConnectionId}>Missing connection</option>
+                      ) : null}
+                    </select>
+                  </label>
+                ) : null}
+                {stage2Gate !== "instant" ? (
+                  <span className="basis-full text-[0.6875rem] text-[var(--muted-foreground)]">
+                    {stage2Gate === "decision"
+                      ? "Uses the Decision model from Settings. Adds a moment to each turn that has meaning-only matches."
+                      : "One short model call on turns with meaning-only matches, about 1–2 seconds. Keyword, location and linked hits are never checked."}
                   </span>
                 ) : null}
               </div>

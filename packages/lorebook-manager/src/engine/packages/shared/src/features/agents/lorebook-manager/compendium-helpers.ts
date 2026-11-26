@@ -1,5 +1,5 @@
 import { parseEntityRef } from "./entity-ref.js";
-import type { LmCompendiumRetrievalSettings, LmEntryNode, LmLorebookSummary } from "./schema.js";
+import type { LmCompendiumRetrievalSettings, LmEntryNode, LmLorebookSummary, LmStage2Gate } from "./schema.js";
 
 export const DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS: LmCompendiumRetrievalSettings = {
   tokenBudget: 2000,
@@ -10,7 +10,11 @@ export const DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS: LmCompendiumRetrievalSetting
   bookTokenBudgets: {},
   semanticEnabled: false,
   semanticThreshold: 0.15,
+  stage2Gate: "instant",
+  librarianConnectionId: null,
 };
+
+const STAGE2_GATES: readonly LmStage2Gate[] = ["instant", "decision", "librarian"];
 
 function clampFloat(value: unknown, fallback: number, min: number, max: number): number {
   const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
@@ -59,6 +63,13 @@ export function normalizeCompendiumRetrievalSettings(raw: unknown): LmCompendium
       0.05,
       0.95,
     ),
+    stage2Gate: STAGE2_GATES.includes(record.stage2Gate as LmStage2Gate)
+      ? (record.stage2Gate as LmStage2Gate)
+      : DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.stage2Gate,
+    librarianConnectionId:
+      typeof record.librarianConnectionId === "string" && record.librarianConnectionId.trim()
+        ? record.librarianConnectionId.trim()
+        : null,
   };
 }
 

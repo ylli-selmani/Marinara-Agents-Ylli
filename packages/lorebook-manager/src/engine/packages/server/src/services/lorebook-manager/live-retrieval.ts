@@ -2,6 +2,7 @@ import { simulateLorebookRetrieval } from "../../../../shared/src/features/agent
 import type {
   LmChatRuns,
   LmCompendium,
+  LmGateRunInfo,
   LmGraphPayload,
   LmLiveRunRecord,
   LmLocationRunInfo,
@@ -17,6 +18,7 @@ import {
 } from "./package-runtime.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
+import { runStage2Gate, type GateQueryMessage } from "./stage2-gate.js";
 
 export const LIVE_RUN_DOC_KIND = "live_run";
 const MAX_RECORDED_RUNS = 20;
@@ -109,19 +111,30 @@ export function recentQueryText(
   count: number,
   regenerateMessageId?: string | null,
 ): string {
+  return recentQueryMessages(messages, count, regenerateMessageId)
+    .map((message) => message.content)
+    .join("\n\n");
+}
+
+/** The same messages as {@link recentQueryText}, with their roles (the Stage 2 gate reads them as a scene). */
+export function recentQueryMessages(
+  messages: readonly LorebookManagerMessageRecord[],
+  count: number,
+  regenerateMessageId?: string | null,
+): GateQueryMessage[] {
   const regenerateIndex = regenerateMessageId
     ? messages.findIndex((message) => message.id === regenerateMessageId)
     : -1;
   const end = regenerateIndex >= 0 ? regenerateIndex : messages.length;
-  const picked: string[] = [];
+  const picked: GateQueryMessage[] = [];
   for (let index = end - 1; index >= 0 && picked.length < count; index--) {
     const message = messages[index]!;
     if (message.role !== "user" && message.role !== "assistant") continue;
     if (parseExtra(message.extra).hiddenFromAI === true) continue;
     const text = (message.agentContent ?? message.content ?? "").trim();
-    if (text) picked.push(text);
+    if (text) picked.push({ role: message.role, content: text });
   }
-  return picked.reverse().join("\n\n");
+  return picked.reverse();
 }
 
 function wrapLore(text: string, wrapFormat: LivePromptContextRequest["wrapFormat"]): string {
@@ -173,6 +186,8 @@ export function toLiveRunRecord(
   at: string,
   semantic?: LmSemanticRunInfo,
   location?: LmLocationRunInfo | null,
+  gate?: LmGateRunInfo | null,
+  totalMs?: number,
 ): LmLiveRunRecord {
   return {
     at,
@@ -193,6 +208,8 @@ export function toLiveRunRecord(
     suppressedCount: result.suppressed.length,
     ...(semantic ? { semantic } : {}),
     ...(location ? { location } : {}),
+    ...(gate ? { gate } : {}),
+    ...(totalMs !== undefined ? { totalMs: Math.round(totalMs) } : {}),
   };
 }
 
@@ -263,6 +280,7 @@ async function recordLiveRun(chatId: string, record: LmLiveRunRecord): Promise<v
  */
 export async function contributeLiveLore(request: LivePromptContextRequest): Promise<string | null> {
   if (!agentAddedToChat(request.chatMeta)) return null;
+  const startedAt = Date.now();
   const compendium = compendiumForChat(request.chatId);
   if (!compendium || compendium.lorebookIds.length === 0) return null;
   const runtime = getLorebookManagerRuntime();
@@ -296,10 +314,11 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     skipMentions: true,
     vectorSources,
   });
-  const queryText = recentQueryText(messages, settings.queryMessageCount, request.regenerateMessageId);
+  const queryMessages = recentQueryMessages(messages, settings.queryMessageCount, request.regenerateMessageId);
+  const queryText = queryMessages.map((message) => message.content).join("\n\n");
   // Meaning match never fails the turn: on a timeout or error Stage 1 runs on text alone, and the run says why.
   const semantic = vectorSources ? await semanticScoresFor(vectorSources, queryText) : null;
-  const result = simulateLorebookRetrieval(
+  const stage1 = simulateLorebookRetrieval(
     payload,
     {
       queryText,
@@ -323,6 +342,15 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     },
     lorebookIds,
   );
+  // Stage 2 checks only the meaning-only picks, and keeps them whenever it can't answer.
+  const gate = await runStage2Gate(settings, stage1, {
+    chatId: request.chatId,
+    mode: request.mode,
+    queryMessages,
+    chatConnectionId: chat?.connectionId ?? null,
+    startedAt,
+  });
+  const result = gate.result;
 
   if (request.preview !== true)
     void recordLiveRun(
@@ -333,6 +361,8 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
         new Date().toISOString(),
         semantic?.info ?? { ...SEMANTIC_OFF },
         location?.info ?? null,
+        gate.info,
+        Date.now() - startedAt,
       ),
     ).catch((error) =>
       runtime.logger.warn(

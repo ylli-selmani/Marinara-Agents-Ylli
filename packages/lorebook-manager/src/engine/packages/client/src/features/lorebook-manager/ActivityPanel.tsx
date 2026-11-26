@@ -31,6 +31,36 @@ const SEMANTIC_STATUS_LABEL: Record<NonNullable<LmLiveRunRecord["semantic"]>["st
   error: "Meaning match failed, keywords only",
 };
 
+const GATE_MODE_LABEL: Record<NonNullable<LmLiveRunRecord["gate"]>["mode"], string> = {
+  decision: "Decision model",
+  librarian: "Librarian",
+};
+
+/** One line on what the Stage 2 gate did this turn. */
+function gateLine(gate: NonNullable<LmLiveRunRecord["gate"]>): string {
+  const mode = GATE_MODE_LABEL[gate.mode];
+  const dropped = gate.dropped.length;
+  switch (gate.status) {
+    case "used":
+    case "cached": {
+      const kept = gate.checked - dropped;
+      const how = gate.status === "cached" ? "same answer as before" : `${gate.ms} ms`;
+      const names = dropped > 0 ? ` (dropped ${gate.dropped.map((item) => item.name).join(", ")})` : "";
+      return `${mode} kept ${kept} of ${gate.checked} meaning matches${names} · ${how}`;
+    }
+    case "nothing_to_check":
+      return `${mode}: no meaning-only matches to check`;
+    case "unavailable":
+      return `${mode} unavailable, kept all${gate.detail ? `: ${gate.detail}` : ""}`;
+    case "timeout":
+      return `${mode} timed out after ${gate.ms} ms, kept all`;
+    case "skipped":
+      return `${mode} skipped, no time left this turn`;
+    default:
+      return `${mode} failed, kept all`;
+  }
+}
+
 function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: (ref: string) => void }) {
   const semantic = run.semantic && run.semantic.status !== "off" ? run.semantic : null;
   return (
@@ -49,7 +79,19 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
           <span>
             ~{run.totalTokens}/{run.tokenBudget} tok
           </span>
-          <span>{run.durationMs} ms</span>
+          {/* Past the Engine's 5 s contributor limit the Engine scanned the books itself, so this run's lore wasn't used. */}
+          <span
+            className={run.totalMs !== undefined && run.totalMs > 5000 ? "text-amber-400" : undefined}
+            title={
+              run.totalMs === undefined
+                ? undefined
+                : run.totalMs > 5000
+                  ? `Over the Engine's 5 s limit: the Engine used its own lorebook scan this turn (Stage 1 ${run.durationMs} ms)`
+                  : `Stage 1 ${run.durationMs} ms, whole turn ${run.totalMs} ms`
+            }
+          >
+            {run.totalMs ?? run.durationMs} ms
+          </span>
         </div>
       </div>
       {semantic ? (
@@ -60,6 +102,14 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
           {semantic.status === "used" || semantic.status === "timeout" ? ` · ${semantic.embedMs} ms` : ""}
           {semantic.vectorCount > 0 ? ` · ${semantic.vectorCount} vectors` : ""}
           {semantic.missingCount > 0 ? ` · ${semantic.missingCount} still vectorizing` : ""}
+        </p>
+      ) : null}
+      {run.gate ? (
+        <p
+          className={`text-[0.6875rem] ${run.gate.status === "error" || run.gate.status === "timeout" ? "text-amber-400" : "text-[var(--muted-foreground)]"}`}
+          title={[run.gate.model, run.gate.detail].filter(Boolean).join(" · ") || undefined}
+        >
+          {gateLine(run.gate)}
         </p>
       ) : null}
       {run.location ? (

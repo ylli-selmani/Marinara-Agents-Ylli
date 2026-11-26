@@ -3,12 +3,16 @@ import { claimLorebooksForChat, refreshLiveClaims, resetLiveClaims } from "./liv
 import { contributeLiveLore, type LivePromptContextRequest } from "./live-retrieval.js";
 import { configureLorebookManagerRuntime, type LorebookManagerRuntimeHost } from "./package-runtime.js";
 import { lorebookManagerRoutes, setLiveRetrievalRegistered } from "./routes.js";
+import { LIVE_CONTRIBUTOR_TIMEOUT_MS } from "./stage2-gate.js";
 
 type ActivationContext = {
   api: {
     runtime: LorebookManagerRuntimeHost;
     registerPrivilegedRoutes(routes: FastifyPluginAsync, options: { prefix: string }): Promise<() => void>;
-    registerPromptContext?(contributor: (request: LivePromptContextRequest) => Promise<string | null>): () => void;
+    registerPromptContext?(
+      contributor: (request: LivePromptContextRequest) => Promise<string | null>,
+      options?: { timeoutMs?: number },
+    ): () => void;
     /** Capability API 1.839. */
     registerLorebookClaims?(
       resolver: (request: { chatId: string; chatMeta?: Record<string, unknown> }) => readonly string[] | null,
@@ -35,7 +39,9 @@ async function registerLiveRetrieval(api: ActivationContext["api"], releases: Ar
     api.runtime.logger.error(error, "[lorebook-manager] Could not load chat bindings for live retrieval");
   }
   releases.push(api.registerLorebookClaims(claimLorebooksForChat));
-  releases.push(api.registerPromptContext(contributeLiveLore));
+  // 5 s (the Engine's cap) so a Stage 2 gate has room; the gate keeps its own shorter deadline, and an Instant
+  // Compendium still answers in milliseconds.
+  releases.push(api.registerPromptContext(contributeLiveLore, { timeoutMs: LIVE_CONTRIBUTOR_TIMEOUT_MS }));
   setLiveRetrievalRegistered(true);
   releases.push(() => setLiveRetrievalRegistered(false));
 }

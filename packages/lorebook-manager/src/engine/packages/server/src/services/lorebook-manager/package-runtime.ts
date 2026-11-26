@@ -59,6 +59,33 @@ export interface LorebookManagerChatRecord {
   name?: string;
   characterIds: string[];
   personaId: string | null;
+  connectionId?: string | null;
+}
+
+/** The Engine's `CapabilityDecisionHost` (optional: absent on older Engines). */
+export interface LorebookManagerDecisionHost {
+  evaluate(request: {
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+    questions: Array<{ id: string; question: string }>;
+    signal?: AbortSignal;
+  }): Promise<{
+    model: string | null;
+    answers: Record<string, number>;
+    choices: Record<string, string>;
+    threshold: number;
+  } | null>;
+}
+
+/** The Engine's `CapabilityLanguageModelHost`, the part the Librarian uses. */
+export interface LorebookManagerLanguageModelHost {
+  resolveForRequest(request: { connectionId?: string | null; chatConnectionId?: string | null }): Promise<{
+    connectionId: string;
+    model: string;
+    chatComplete(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options?: { temperature?: number; maxTokens?: number; signal?: AbortSignal },
+    ): Promise<{ content: string | null; finishReason: string }>;
+  }>;
 }
 
 /** The Engine's `CapabilityEmbeddingHost`. `embed` answers null (it doesn't throw) when it can't embed. */
@@ -74,6 +101,11 @@ export interface LorebookManagerRuntimeHost {
   embeddings?: LorebookManagerEmbeddingHost;
   /** Capability API 1.15. The package's current embedding source (its agent connection, else the app default). */
   resolveEmbeddings?(): Promise<LorebookManagerEmbeddingHost>;
+  /** The user's Decision model (Stage 2 gate, Decision mode). */
+  decisions?: LorebookManagerDecisionHost;
+  /** Language models (Stage 2 gate, Librarian mode). */
+  languageModels?: LorebookManagerLanguageModelHost;
+  json?: { parseJsonish(raw: string): unknown };
   logger: {
     debug(message: string, ...args: unknown[]): void;
     info(message: string, ...args: unknown[]): void;

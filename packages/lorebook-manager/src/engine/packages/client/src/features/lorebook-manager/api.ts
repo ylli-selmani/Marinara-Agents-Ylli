@@ -25,6 +25,7 @@ export const lmQueryKeys = {
   compendiums: ["lorebook-manager", "compendiums"] as const,
   chatBinding: (chatId: string) => ["lorebook-manager", "chat-binding", chatId] as const,
   status: ["lorebook-manager", "status"] as const,
+  connections: ["lorebook-manager", "connections"] as const,
   runs: ["lorebook-manager", "runs"] as const,
   proposalsRoot: ["lorebook-manager", "proposals"] as const,
   proposals: (status: LmProposalStatus) => ["lorebook-manager", "proposals", status] as const,
@@ -212,6 +213,23 @@ export async function fetchLiveRuns(): Promise<LmChatRuns[]> {
 }
 
 /** Vectorize the given books' missing entries for meaning match, and report what is indexed. */
+export interface LmConnectionSummary {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+/** Providers that can't answer a chat completion (the Librarian's picker leaves them out, like Saucelings'). */
+const NON_TEXT_PROVIDERS = new Set(["image_generation", "video_generation", "audio", "decision"]);
+
+/** The user's text connections, for the Librarian's connection picker. */
+export async function fetchTextConnections(): Promise<LmConnectionSummary[]> {
+  const response = await fetch("/api/connections", { credentials: "same-origin" });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  const rows = (await response.json()) as LmConnectionSummary[];
+  return Array.isArray(rows) ? rows.filter((row) => !NON_TEXT_PROVIDERS.has(row.provider)) : [];
+}
+
 export async function indexSemanticApi(lorebookIds: string[]): Promise<LmSemanticIndexStatus> {
   const response = await fetch(`${API_ROOT}/semantic/index`, {
     method: "POST",

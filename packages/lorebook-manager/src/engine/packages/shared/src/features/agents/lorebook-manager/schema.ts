@@ -200,6 +200,29 @@ export interface LmCompendiumRetrievalSettings {
   semanticEnabled: boolean;
   /** Minimum calibrated similarity for a meaning match (0.05–0.95). */
   semanticThreshold: number;
+  /** Stage 2: how meaning-only picks are checked before they reach the prompt. `instant` = not at all. */
+  stage2Gate: LmStage2Gate;
+  /** The Librarian's connection. null = the agents' default connection, then the chat's. */
+  librarianConnectionId: string | null;
+}
+
+export type LmStage2Gate = "instant" | "decision" | "librarian";
+
+/**
+ * How the Stage 2 gate went on one turn. Only `used` and `cached` dropped anything; every other status kept the
+ * meaning-only picks as Stage 1 chose them.
+ */
+export type LmGateRunStatus = "used" | "cached" | "nothing_to_check" | "unavailable" | "timeout" | "error" | "skipped";
+
+export interface LmGateRunInfo {
+  mode: Exclude<LmStage2Gate, "instant">;
+  status: LmGateRunStatus;
+  /** Meaning-only picks the gate looked at, and the ones it turned down. */
+  checked: number;
+  dropped: Array<{ ref: string; name: string }>;
+  ms: number;
+  model?: string;
+  detail?: string;
 }
 
 /** How the meaning-match lane went on one turn. "used" is the only state where similarities reached Stage 1. */
@@ -267,6 +290,10 @@ export interface LmLiveRunRecord {
   semantic?: LmSemanticRunInfo;
   /** Where the chat was this turn, when known. Absent on older runs and when no location source answered. */
   location?: LmLocationRunInfo;
+  /** The Stage 2 gate, when the Compendium has one. Absent on Instant. */
+  gate?: LmGateRunInfo;
+  /** The contributor's whole time (Stage 1 in `durationMs` is only part of it). Absent on older runs. */
+  totalMs?: number;
 }
 
 /** The location a live run used: World Maps (linked entries + boost) or the World State tracker (boost only). */

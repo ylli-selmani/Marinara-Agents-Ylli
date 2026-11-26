@@ -33,7 +33,9 @@ Each explicit ID link stores one of these relation labels in `entry.relationship
 | ------------ | ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------ |
 | `part_of`    | Directed                | Sub-entry to parent (`Personality` → `Character`)  | Strongest structural pull so sub-entries surface with their parent |
 | `located_in` | Directed                | Thing or sub-place to containing place             | Boosted when the active scene or World Maps location matches       |
+| `is_a`       | Directed                | Kind or instance to its type (`Dark Elf` → `High Elf`) | Pulls the type when an instance appears; the reverse needs evidence |
 | `member_of`  | Directed                | Person or squad to group (`Student` → `Class 1-A`) | Pulls group context when an active member appears                  |
+| `leads`      | Directed                | Leader to group (`Syliveera` → `Unseelie Court`)   | Leader and group surface together in both directions               |
 | `owns`       | Directed                | Owner to item or property                          | Surfaces signature gear or possessions when relevant               |
 | `ally_of`    | Symmetric (`Both ways`) | Mutual link between allies                         | Soft social candidate for Stage 2 filtering                        |
 | `rival_of`   | Symmetric (`Both ways`) | Mutual link between rivals                         | Soft social candidate for Stage 2 filtering                        |

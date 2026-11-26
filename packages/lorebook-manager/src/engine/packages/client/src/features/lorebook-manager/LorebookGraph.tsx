@@ -75,6 +75,8 @@ const RELATION_COLORS: Record<string, string> = {
   located_in: "#14b8a6",
   part_of: "#a855f7",
   member_of: "#6366f1",
+  is_a: "#ec4899",
+  leads: "#eab308",
   owns: "#f59e0b",
   represents: "#06b6d4",
 };

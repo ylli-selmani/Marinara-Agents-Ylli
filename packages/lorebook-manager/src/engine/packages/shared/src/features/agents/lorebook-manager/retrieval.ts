@@ -288,6 +288,14 @@ function oneHopPolicy(
   if (base === "located_in") {
     return { weight: 0.85, floor: seedMatchedLocation || viaCardInherited ? 0 : 0.4 };
   }
+  if (base === "is_a") {
+    // Child → kind is free (Shiza pulls Dark Fae); kind → every instance needs evidence (High Elf ≠ all elves).
+    return { weight: 0.75, floor: viaCardInherited || direction === "out" ? 0 : 1.0 };
+  }
+  if (base === "leads") {
+    // A leader and their group travel together both ways (mentioning the court brings its queen).
+    return { weight: 0.8, floor: 0 };
+  }
   if (base === "member_of") {
     return { weight: 0.75, floor: viaCardInherited || direction === "out" ? 0 : 1.0 };
   }

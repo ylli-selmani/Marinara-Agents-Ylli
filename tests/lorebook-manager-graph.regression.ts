@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import {
+  LM_RELATIONS,
+  LM_RELATION_VALUES,
+} from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/relations.js";
+import {
   formatEntityRef,
   parseEntityRef,
+  SYMMETRIC_RELATIONS,
   toRelationshipKey,
 } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
@@ -769,6 +774,16 @@ assert.ok(
   assert.equal(backfillHops.length, 1, "One slot must still be filled when the top neighbour is over budget");
   assert.notEqual(backfillHops[0]!.entry.ref, top.entry.ref, "The over-budget top neighbour must not activate");
 }
+
+// Relation catalog and the symmetric set used for implied-mutual card links must agree.
+for (const relation of LM_RELATIONS) {
+  assert.equal(
+    SYMMETRIC_RELATIONS.has(relation.value),
+    relation.symmetric,
+    `Relation ${relation.value}: catalog symmetry must match SYMMETRIC_RELATIONS`,
+  );
+}
+assert.ok(LM_RELATION_VALUES.includes("is_a") && LM_RELATION_VALUES.includes("leads"), "is_a and leads are offered");
 
 const disabledBookRes = simulateLorebookRetrieval(
   { ...simPayload, lorebooks: simPayload.lorebooks.map((b) => ({ ...b, enabled: false })) },

@@ -32,18 +32,11 @@ import type {
   LmGraphNode,
   LmGraphPayload,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import { LM_RELATION_VALUES } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type { LmEntryPatch } from "./api";
+import { LinkTargetPicker, RelationPicker, type LinkTargetOption } from "./pickers";
 
-export const RELATION_PRESETS = [
-  "related_to",
-  "located_in",
-  "member_of",
-  "ally_of",
-  "rival_of",
-  "owns",
-  "part_of",
-  "represents",
-] as const;
+export const RELATION_PRESETS = LM_RELATION_VALUES;
 
 const TAG_OVERRIDES = ["", "lore", "character", "location", "faction", "item", "creature", "ability", "quest"] as const;
 const SECTION_AUTO_COLLAPSE = 6;
@@ -346,6 +339,18 @@ export function GraphInspector({
       )
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [activeNode, explicitGroups, payload.nodes]);
+
+  const linkTargetOptions = useMemo<LinkTargetOption[]>(
+    () =>
+      linkableTargets.flatMap((target) =>
+        target.nodeType === "lore"
+          ? [{ ref: target.ref, name: target.name, nodeType: "lore" as const, lorebookName: target.lorebookName }]
+          : target.nodeType === "character" || target.nodeType === "persona"
+            ? [{ ref: target.ref, name: target.name, nodeType: target.nodeType }]
+            : [],
+      ),
+    [linkableTargets],
+  );
 
   const addTargetNode = addTargetRef ? allNodesByRef.get(addTargetRef) : undefined;
   const canBidirectTarget = activeNode.nodeType === "lore" && addTargetNode?.nodeType === "lore";
@@ -1110,18 +1115,12 @@ export function GraphInspector({
                       </div>
                       {isEditing && editingLink ? (
                         <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
-                          <select
-                            aria-label="Edit relation type"
+                          <RelationPicker
+                            ariaLabel="Edit relation type"
                             value={editingLink.relation}
-                            onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
-                            className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
-                          >
-                            {RELATION_PRESETS.map((rel) => (
-                              <option key={rel} value={rel}>
-                                {rel}
-                              </option>
-                            ))}
-                          </select>
+                            onChange={(value) => setEditingLink({ ...editingLink, relation: value })}
+                            fallbackClassName="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
+                          />
                           {targetCanBeBidirect ? (
                             <label className="flex items-center gap-1">
                               <input
@@ -1219,18 +1218,12 @@ export function GraphInspector({
                       </div>
                       {isEditing && editingLink ? (
                         <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
-                          <select
-                            aria-label="Edit relation type"
+                          <RelationPicker
+                            ariaLabel="Edit relation type"
                             value={editingLink.relation}
-                            onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
-                            className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
-                          >
-                            {RELATION_PRESETS.map((rel) => (
-                              <option key={rel} value={rel}>
-                                {rel}
-                              </option>
-                            ))}
-                          </select>
+                            onChange={(value) => setEditingLink({ ...editingLink, relation: value })}
+                            fallbackClassName="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
+                          />
                           {targetCanBeBidirect ? (
                             <>
                               <button
@@ -1343,18 +1336,12 @@ export function GraphInspector({
                       </div>
                       {isEditing && editingLink ? (
                         <div className="flex flex-wrap items-center gap-1 border-t border-[var(--border)] pt-1.5 text-[0.6875rem]">
-                          <select
-                            aria-label="Edit relation type"
+                          <RelationPicker
+                            ariaLabel="Edit relation type"
                             value={editingLink.relation}
-                            onChange={(event) => setEditingLink({ ...editingLink, relation: event.target.value })}
-                            className="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
-                          >
-                            {RELATION_PRESETS.map((rel) => (
-                              <option key={rel} value={rel}>
-                                {rel}
-                              </option>
-                            ))}
-                          </select>
+                            onChange={(value) => setEditingLink({ ...editingLink, relation: value })}
+                            fallbackClassName="mari-chrome-field h-6 flex-1 rounded px-1 text-[0.6875rem]"
+                          />
                           {targetCanBeBidirect ? (
                             <>
                               <button
@@ -1409,51 +1396,26 @@ export function GraphInspector({
         <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
           <span className="block text-xs font-medium">Add ID link</span>
           <div className="flex gap-1.5">
-            <select
-              aria-label="Target entity"
+            <LinkTargetPicker
               value={addTargetRef}
-              onChange={(event) => {
-                setAddTargetRef(event.target.value);
+              targets={linkTargetOptions}
+              onChange={(value) => {
+                setAddTargetRef(value);
                 setAddFlipped(false);
               }}
-              className="mari-chrome-field min-w-0 flex-1 rounded px-2 py-1 text-xs"
-            >
-              <option value="">
-                {activeNode.nodeType === "lore" ? "Pick entry, card, or persona…" : "Pick lorebook entry…"}
-              </option>
-              {linkableTargets.map((target) => {
-                const suffix =
-                  target.nodeType === "lore"
-                    ? loadedBookCount > 1
-                      ? ` · ${target.lorebookName}`
-                      : ""
-                    : target.nodeType === "character"
-                      ? " · Card"
-                      : " · Persona";
-                return (
-                  <option key={target.ref} value={target.ref}>
-                    {target.name}
-                    {suffix}
-                  </option>
-                );
-              })}
-            </select>
-            <select
-              aria-label="New link relation"
+              placeholder={activeNode.nodeType === "lore" ? "Pick entry, card, or persona…" : "Pick lorebook entry…"}
+              fallbackClassName="mari-chrome-field min-w-0 flex-1 rounded px-2 py-1 text-xs"
+            />
+            <RelationPicker
+              ariaLabel="New link relation"
               value={addRelation}
-              onChange={(event) => {
-                const nextRel = event.target.value;
+              onChange={(value) => {
+                const nextRel = value;
                 setAddRelation(nextRel);
                 setAddBothWays(SYMMETRIC_RELATIONS.has(nextRel));
               }}
-              className="mari-chrome-field w-28 rounded px-1.5 py-1 text-xs"
-            >
-              {RELATION_PRESETS.map((rel) => (
-                <option key={rel} value={rel}>
-                  {rel}
-                </option>
-              ))}
-            </select>
+              fallbackClassName="mari-chrome-field w-28 rounded px-1.5 py-1 text-xs"
+            />
           </div>
           {addTargetNode ? (
             <div className="flex flex-wrap items-center justify-between gap-1.5 rounded border border-[var(--border)] bg-[var(--background)]/40 px-2 py-1 text-[0.6875rem]">
@@ -1524,23 +1486,17 @@ export function GraphInspector({
             <span>Detected mentions ({totalMentionsForActive})</span>
             <label className="flex items-center gap-1 text-[0.6875rem] font-normal text-[var(--muted-foreground)]">
               <span>Promote as:</span>
-              <select
-                aria-label="Promote mention as relation"
+              <RelationPicker
+                ariaLabel="Promote mention as relation"
                 value={relationDraft}
-                onChange={(event) => {
-                  const nextRel = event.target.value;
+                onChange={(value) => {
+                  const nextRel = value;
                   setRelationDraft(nextRel);
                   if (SYMMETRIC_RELATIONS.has(nextRel)) setPromoteDirection("both");
                   else setPromoteDirection((curr) => (curr === "both" ? "outgoing" : curr));
                 }}
-                className="mari-chrome-field h-6 rounded px-1 text-[0.6875rem] text-[var(--foreground)]"
-              >
-                {RELATION_PRESETS.map((rel) => (
-                  <option key={rel} value={rel}>
-                    {rel}
-                  </option>
-                ))}
-              </select>
+                fallbackClassName="mari-chrome-field h-6 rounded px-1 text-[0.6875rem] text-[var(--foreground)]"
+              />
             </label>
           </div>
 

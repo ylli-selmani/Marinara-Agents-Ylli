@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { claimLorebooksForChat, refreshLiveClaims, resetLiveClaims } from "./live-claims.js";
 import { contributeLiveLore, type LivePromptContextRequest } from "./live-retrieval.js";
 import { configureLorebookManagerRuntime, type LorebookManagerRuntimeHost } from "./package-runtime.js";
-import { lorebookManagerRoutes } from "./routes.js";
+import { lorebookManagerRoutes, setLiveRetrievalRegistered } from "./routes.js";
 
 type ActivationContext = {
   api: {
@@ -34,6 +34,8 @@ async function registerLiveRetrieval(api: ActivationContext["api"], releases: Ar
   }
   releases.push(api.registerLorebookClaims(claimLorebooksForChat));
   releases.push(api.registerPromptContext(contributeLiveLore));
+  setLiveRetrievalRegistered(true);
+  releases.push(() => setLiveRetrievalRegistered(false));
 }
 
 export async function activate({ api }: ActivationContext) {

@@ -1,7 +1,9 @@
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
+  LmChatRuns,
   LmCompendium,
   LmGraphPayload,
+  LmLiveRunRecord,
   LmRetrievalResult,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
@@ -20,25 +22,6 @@ export interface LivePromptContextRequest {
   targetCharacterIds?: string[];
   personaId?: string | null;
   wrapFormat?: "xml" | "markdown" | "none";
-}
-
-export interface LmLiveRunRecord {
-  at: string;
-  compendiumId: string;
-  compendiumName: string;
-  queryMessageCount: number;
-  durationMs: number;
-  totalTokens: number;
-  tokenBudget: number;
-  activated: Array<{
-    ref: string;
-    name: string;
-    lorebookName: string;
-    tier: string;
-    tokens: number;
-    reasons: string[];
-  }>;
-  suppressedCount: number;
 }
 
 function parseExtra(extra: unknown): Record<string, unknown> {
@@ -118,10 +101,33 @@ export function toLiveRunRecord(compendium: LmCompendium, result: LmRetrievalRes
       lorebookName: item.entry.lorebookName,
       tier: item.tier,
       tokens: item.tokens,
-      reasons: [...new Set(item.reasons.map((reason) => reason.kind))],
+      reasons: item.reasons.map((reason) => ({ kind: reason.kind, detail: reason.detail.slice(0, 120) })),
     })),
     suppressedCount: result.suppressed.length,
   };
+}
+
+/** The chats with recorded runs, most recent first, for the Activity tab. */
+export async function listLiveRuns(limit = 20): Promise<LmChatRuns[]> {
+  const runtime = getLorebookManagerRuntime();
+  const docs = await runtime.persistence.documents.list(LOREBOOK_MANAGER_PACKAGE_ID, LIVE_RUN_DOC_KIND);
+  const chats = docs
+    .map((doc) => {
+      const data = (doc.data ?? {}) as { chatId?: unknown; runs?: unknown };
+      const runs = Array.isArray(data.runs) ? (data.runs as LmLiveRunRecord[]) : [];
+      return typeof data.chatId === "string" && runs.length > 0 ? { chatId: data.chatId, runs } : null;
+    })
+    .filter((row): row is { chatId: string; runs: LmLiveRunRecord[] } => row !== null)
+    .sort((a, b) => (b.runs[0]?.at ?? "").localeCompare(a.runs[0]?.at ?? ""))
+    .slice(0, limit);
+  const { persistence } = runtime;
+  return Promise.all(
+    chats.map(async (row) => {
+      const chat =
+        typeof persistence.getChat === "function" ? await persistence.getChat(row.chatId).catch(() => null) : null;
+      return { chatId: row.chatId, chatName: chat?.name?.trim() || "Untitled chat", runs: row.runs };
+    }),
+  );
 }
 
 function liveRunDocId(chatId: string): string {
@@ -170,12 +176,12 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   const compendium = compendiumForChat(request.chatId);
   if (!compendium || compendium.lorebookIds.length === 0) return null;
   const runtime = getLorebookManagerRuntime();
-  const { listMessages, getChat } = runtime.resources;
-  if (typeof listMessages !== "function") throw new Error("resources.listMessages is unavailable");
+  const { persistence } = runtime;
+  if (typeof persistence.listMessages !== "function") throw new Error("persistence.listMessages is unavailable");
 
   const [messages, chat] = await Promise.all([
-    listMessages(request.chatId),
-    typeof getChat === "function" ? getChat(request.chatId) : Promise.resolve(null),
+    persistence.listMessages(request.chatId),
+    typeof persistence.getChat === "function" ? persistence.getChat(request.chatId) : Promise.resolve(null),
   ]);
   // Every card in the chat counts as active, like the Engine's scan; the generation's targets come first so
   // `{{char}}` names the one who speaks.

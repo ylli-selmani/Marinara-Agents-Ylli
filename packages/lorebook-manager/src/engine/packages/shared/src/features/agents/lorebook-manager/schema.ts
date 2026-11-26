@@ -195,6 +195,66 @@ export interface LmCompendium {
   updatedAt: string;
 }
 
+/** One live retrieval turn, as the Activity tab shows it. */
+export interface LmLiveRunRecord {
+  at: string;
+  compendiumId: string;
+  compendiumName: string;
+  queryMessageCount: number;
+  durationMs: number;
+  totalTokens: number;
+  tokenBudget: number;
+  activated: Array<{
+    ref: string;
+    name: string;
+    lorebookName: string;
+    tier: LmRetrievalActivatedItem["tier"];
+    tokens: number;
+    reasons: Array<{ kind: LmRetrievalReasonKind; detail: string }>;
+  }>;
+  suppressedCount: number;
+}
+
+export interface LmChatRuns {
+  chatId: string;
+  chatName: string;
+  runs: LmLiveRunRecord[];
+}
+
+export type LmProposalStatus = "pending" | "applied" | "dismissed";
+
+/** What the Archivist or Auto-tag & Link suggests. */
+export interface LmProposalInput {
+  kind: "create_entry" | "update_entry";
+  lorebookId: string;
+  targetEntryId?: string | null;
+  entryName: string;
+  /** The fields to set (an update) or the new entry's fields (a create). */
+  patch: Record<string, unknown>;
+  reason?: string;
+  source: "archivist" | "crawler";
+  chatId?: string | null;
+  sourceMessageRefs?: Array<{ messageId: string; swipeIndex: number }>;
+  duplicateOfEntryId?: string | null;
+}
+
+export interface LmProposal extends Required<Omit<LmProposalInput, "reason">> {
+  id: string;
+  revision: number;
+  status: LmProposalStatus;
+  reason: string;
+  /** For an applied update: the changed fields' values before, for Undo. */
+  before: Record<string, unknown> | null;
+  appliedEntryId: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface LmLiveStatus {
+  /** Capability API 1.839: lorebook claims and the entry write path. */
+  liveRetrieval: boolean;
+}
+
 export interface LmChatCompendiumBinding {
   chatId: string;
   compendiumId: string | null;

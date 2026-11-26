@@ -29,6 +29,8 @@ import {
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
+import { listLiveRuns } from "./live-retrieval.js";
+import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -356,6 +358,12 @@ function sendRouteError(reply: FastifyReply, error: unknown) {
   return reply.code(500).send({ error: "Unexpected server error" });
 }
 
+/** Set by the server entry once claims and the contributor are registered (Capability API 1.839). */
+let liveRetrievalRegistered = false;
+export function setLiveRetrievalRegistered(value: boolean): void {
+  liveRetrievalRegistered = value;
+}
+
 export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.get("/graph", async (request) => {
     const query = request.query as { lorebookIds?: unknown; characterIds?: unknown; personaIds?: unknown } | undefined;
@@ -364,6 +372,49 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
       characterIds: parseLorebookIdsQuery(query?.characterIds),
       personaIds: parseLorebookIdsQuery(query?.personaIds),
     });
+  });
+
+  app.get("/status", async () => {
+    const resources = getLorebookManagerRuntime().resources;
+    return {
+      liveRetrieval: liveRetrievalRegistered && typeof resources.updateLorebookEntry === "function",
+    };
+  });
+
+  app.get("/runs", async (_request, reply) => {
+    try {
+      return { chats: await listLiveRuns() };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.get("/proposals", async (request, reply) => {
+    try {
+      const status = (request.query as { status?: unknown } | undefined)?.status;
+      const filter = status === "pending" || status === "applied" || status === "dismissed" ? status : undefined;
+      return { proposals: await listProposals(getLorebookManagerRuntime().persistence.documents, filter) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/proposals/:id/apply", async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      return { proposal: await applyProposal(getLorebookManagerRuntime(), id) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/proposals/:id/dismiss", async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      return { proposal: await dismissProposal(getLorebookManagerRuntime().persistence.documents, id) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
   });
 
   app.get("/compendiums", async (_request, reply) => {

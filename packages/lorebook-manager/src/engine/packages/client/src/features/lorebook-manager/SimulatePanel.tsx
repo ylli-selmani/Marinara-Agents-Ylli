@@ -48,13 +48,13 @@ const SIM_STYLE = `
 }
 `;
 
-const TIER_LABEL: Record<LmRetrievalActivatedItem["tier"], string> = {
+export const TIER_LABEL: Record<LmRetrievalActivatedItem["tier"], string> = {
   constant: "Constant",
   direct: "Direct",
   graph_1hop: "1-hop",
 };
 
-const REASON_BADGE_STYLE: Record<string, { border: string; text: string }> = {
+export const REASON_BADGE_STYLE: Record<string, { border: string; text: string }> = {
   constant: { border: "var(--border)", text: "var(--foreground)" },
   keyword: { border: "#22c55e", text: "#22c55e" },
   location: { border: "#14b8a6", text: "#14b8a6" },

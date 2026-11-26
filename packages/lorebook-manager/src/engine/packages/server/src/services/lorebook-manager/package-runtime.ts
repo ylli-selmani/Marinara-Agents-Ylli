@@ -50,6 +50,7 @@ export interface LorebookManagerMessageRecord {
 
 export interface LorebookManagerChatRecord {
   id: string;
+  name?: string;
   characterIds: string[];
   personaId: string | null;
 }
@@ -66,12 +67,22 @@ export interface LorebookManagerRuntimeHost {
     listCharacters(characterIds?: string[]): Promise<Array<{ id: string; data: unknown; comment: string }>>;
     listPersonas(personaIds?: string[]): Promise<Array<{ id: string; data: unknown }>>;
     listLorebooks(lorebookIds?: string[]): Promise<Array<{ id: string; data: unknown; entries: unknown[] }>>;
-    /** Requires `chat-read`. */
-    listMessages?(chatId: string): Promise<LorebookManagerMessageRecord[]>;
-    getChat?(chatId: string): Promise<LorebookManagerChatRecord | null>;
+    /** Capability API 1.839. */
+    createLorebookEntry?(
+      lorebookId: string,
+      entry: Record<string, unknown>,
+    ): Promise<{ id: string; lorebookId: string; data: Record<string, unknown> }>;
+    /** Capability API 1.839. Refuses a locked entry. */
+    updateLorebookEntry?(
+      entryId: string,
+      patch: Record<string, unknown>,
+    ): Promise<{ id: string; lorebookId: string; data: Record<string, unknown> } | null>;
   };
   persistence: {
     documents: LorebookManagerDocumentStore;
+    /** Requires `chat-read`. Chats and messages live on persistence, not on resources. */
+    listMessages?(chatId: string): Promise<LorebookManagerMessageRecord[]>;
+    getChat?(chatId: string): Promise<LorebookManagerChatRecord | null>;
   };
 }
 

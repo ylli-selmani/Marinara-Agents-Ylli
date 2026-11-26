@@ -1,4 +1,8 @@
 import type {
+  LmChatRuns,
+  LmLiveStatus,
+  LmProposal,
+  LmProposalStatus,
   LmChatCompendiumBinding,
   LmCompendium,
   LmCompendiumRetrievalSettings,
@@ -18,6 +22,10 @@ export const lmQueryKeys = {
   graph: (scopeKey: string) => ["lorebook-manager", "graph", scopeKey] as const,
   compendiums: ["lorebook-manager", "compendiums"] as const,
   chatBinding: (chatId: string) => ["lorebook-manager", "chat-binding", chatId] as const,
+  status: ["lorebook-manager", "status"] as const,
+  runs: ["lorebook-manager", "runs"] as const,
+  proposalsRoot: ["lorebook-manager", "proposals"] as const,
+  proposals: (status: LmProposalStatus) => ["lorebook-manager", "proposals", status] as const,
 };
 
 export interface LmEntryPatch {
@@ -179,6 +187,40 @@ export async function setChatCompendiumBindingApi(
   if (!response.ok) throw new Error(await readErrorMessage(response));
   const payload = (await response.json()) as { binding: LmChatCompendiumBinding };
   return payload.binding;
+}
+
+async function readJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_ROOT}${path}`, {
+    credentials: "same-origin",
+    headers: getAdminSecretHeader(),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return (await response.json()) as T;
+}
+
+export async function fetchLiveStatus(): Promise<LmLiveStatus> {
+  return readJson<LmLiveStatus>("/status");
+}
+
+export async function fetchLiveRuns(): Promise<LmChatRuns[]> {
+  const payload = await readJson<{ chats?: LmChatRuns[] }>("/runs");
+  return Array.isArray(payload.chats) ? payload.chats : [];
+}
+
+export async function fetchProposals(status: LmProposalStatus): Promise<LmProposal[]> {
+  const payload = await readJson<{ proposals?: LmProposal[] }>(`/proposals?status=${status}`);
+  return Array.isArray(payload.proposals) ? payload.proposals : [];
+}
+
+export async function decideProposalApi(id: string, decision: "apply" | "dismiss"): Promise<LmProposal> {
+  const response = await fetch(`${API_ROOT}/proposals/${encodeURIComponent(id)}/${decision}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: "{}",
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return ((await response.json()) as { proposal: LmProposal }).proposal;
 }
 
 export async function patchLorebookEntry(lorebookId: string, entryId: string, patch: LmEntryPatch): Promise<void> {

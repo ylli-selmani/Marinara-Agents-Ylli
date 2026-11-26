@@ -12,9 +12,9 @@ export const COMPENDIUM_DOC_KIND = "compendium";
 export const CHAT_BINDING_DOC_KIND = "chat_binding";
 
 export class CompendiumStoreError extends Error {
-  readonly statusCode: 400 | 404 | 409;
+  readonly statusCode: 400 | 404 | 409 | 501;
 
-  constructor(message: string, statusCode: 400 | 404 | 409) {
+  constructor(message: string, statusCode: 400 | 404 | 409 | 501) {
     super(message);
     this.name = "CompendiumStoreError";
     this.statusCode = statusCode;

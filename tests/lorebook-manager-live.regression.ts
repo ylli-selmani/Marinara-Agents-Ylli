@@ -1,6 +1,7 @@
 /**
  * Slice 3a: live Stage 1 retrieval. A chat bound to a Compendium claims that Compendium's books (so the Engine's
  * scan skips them) and gets them through the package's prompt-context contributor instead.
+ * Slice 3b: the Activity listing of those runs, and the Review store (apply / dismiss suggested entry changes).
  */
 import assert from "node:assert/strict";
 import {
@@ -14,8 +15,15 @@ import {
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-claims.js";
 import {
   contributeLiveLore,
+  listLiveRuns,
   recentQueryText,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
+import {
+  applyProposal,
+  createProposal,
+  dismissProposal,
+  listProposals,
+} from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/proposals-store.js";
 import {
   configureLorebookManagerRuntime,
   type LorebookManagerDocumentRecord,
@@ -89,7 +97,16 @@ async function main() {
   let messages: LorebookManagerMessageRecord[] = [];
   const runtime: LorebookManagerRuntimeHost = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    persistence: { documents },
+    persistence: {
+      documents,
+      // The real host puts chat reads on persistence; a fake that put them on resources hid a live bug in 3a.
+      async listMessages() {
+        return messages;
+      },
+      async getChat(chatId) {
+        return { id: chatId, name: "Fae night", characterIds: ["ash"], personaId: "ylva" };
+      },
+    },
     resources: {
       async listLorebooks(ids) {
         lorebookCalls.push(ids);
@@ -101,14 +118,24 @@ async function main() {
       async listPersonas(ids) {
         return [{ id: "ylva", data: { name: "Ylva" } }].filter((row) => !ids || ids.includes(row.id));
       },
-      async listMessages() {
-        return messages;
+      async createLorebookEntry(lorebookId, entry) {
+        const id = `new-${writes.length}`;
+        writes.push({ op: "create", id: lorebookId, fields: entry });
+        return { id, lorebookId, data: { ...entry, id } };
       },
-      async getChat(chatId) {
-        return { id: chatId, characterIds: ["ash"], personaId: "ylva" };
+      async updateLorebookEntry(entryId, patch) {
+        const entry = books
+          .flatMap((book) => book.entries as Array<Record<string, unknown>>)
+          .find((e) => e.id === entryId);
+        if (!entry) return null;
+        if (entry.locked === true) throw new Error("This entry is locked");
+        writes.push({ op: "update", id: entryId, fields: patch });
+        Object.assign(entry, patch);
+        return { id: entryId, lorebookId: "court", data: entry };
       },
     },
   };
+  const writes: Array<{ op: string; id: string; fields: Record<string, unknown> }> = [];
   const release = configureLorebookManagerRuntime(runtime);
   try {
     // Query window: the last N visible user/assistant messages, oldest first.
@@ -157,6 +184,80 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 20));
     const runs = (documents.docs.get("live_run:chat-1")?.data as { runs?: Array<{ activated: unknown[] }> })?.runs;
     assert.equal(runs?.length, 2, "both runs are recorded, newest first");
+
+    // Activity: chats with runs, named, newest first, reasons carry their detail.
+    const activity = await listLiveRuns();
+    assert.equal(activity.length, 1);
+    assert.equal(activity[0]!.chatName, "Fae night");
+    const unseelie = activity[0]!.runs[1]!.activated.find((item) => item.ref === "lore:unseelie");
+    assert.ok(unseelie?.reasons.some((reason) => reason.kind === "keyword" && reason.detail.length > 0));
+
+    // Review: dismiss, apply an update (with an Undo snapshot), apply a create, refuse a locked entry.
+    const toDismiss = await createProposal(documents, {
+      kind: "update_entry",
+      lorebookId: "court",
+      targetEntryId: "unseelie",
+      entryName: "Unseelie Court",
+      patch: { description: "Wrong." },
+      source: "archivist",
+    });
+    await dismissProposal(documents, toDismiss.id);
+    await assert.rejects(() => applyProposal(runtime, toDismiss.id), /already handled/u);
+
+    const update = await createProposal(documents, {
+      kind: "update_entry",
+      lorebookId: "court",
+      targetEntryId: "syliveera",
+      entryName: "Syliveera",
+      patch: { description: "Queen of the night court." },
+      reason: "Named queen in the last reply.",
+      source: "archivist",
+      chatId: "chat-1",
+      sourceMessageRefs: [{ messageId: "6", swipeIndex: 0 }],
+    });
+    assert.equal((await listProposals(documents, "pending")).length, 1);
+    const applied = await applyProposal(runtime, update.id);
+    assert.equal(applied.status, "applied");
+    assert.deepEqual(applied.before, { description: null }, "the old value is kept for Undo");
+    assert.deepEqual(writes.at(-1), {
+      op: "update",
+      id: "syliveera",
+      fields: { description: "Queen of the night court." },
+    });
+
+    const create = await createProposal(documents, {
+      kind: "create_entry",
+      lorebookId: "court",
+      entryName: "Moonlit Hall",
+      patch: { content: "A hall of silver light.", keys: ["Moonlit Hall"] },
+      source: "crawler",
+    });
+    const created = await applyProposal(runtime, create.id);
+    assert.equal(created.appliedEntryId, "new-1");
+    assert.deepEqual(writes.at(-1)?.fields, {
+      name: "Moonlit Hall",
+      content: "A hall of silver light.",
+      keys: ["Moonlit Hall"],
+    });
+
+    (books[0]!.entries[2] as Record<string, unknown>).locked = true;
+    const locked = await createProposal(documents, {
+      kind: "update_entry",
+      lorebookId: "court",
+      targetEntryId: "oath",
+      entryName: "Oath",
+      patch: { content: "Changed." },
+      source: "archivist",
+    });
+    await assert.rejects(() => applyProposal(runtime, locked.id), /locked/u);
+    assert.equal(
+      (await listProposals(documents, "pending")).map((proposal) => proposal.id).join(),
+      locked.id,
+      "a refused change stays pending",
+    );
+
+    const oldEngine = { ...runtime, resources: { ...runtime.resources, updateLorebookEntry: undefined } };
+    await assert.rejects(() => applyProposal(oldEngine, locked.id), /Capability API 1\.839/u);
 
     await setChatCompendiumBinding(documents, "chat-1", null);
     await refreshLiveClaims();

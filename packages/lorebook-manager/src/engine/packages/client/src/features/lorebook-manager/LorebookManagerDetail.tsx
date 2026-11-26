@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Activity as ActivityIcon,
   ArrowLeft,
   BookMarked,
   Check,
   FlaskConical,
   Focus,
   FolderOpen,
+  Inbox,
   List,
   Maximize2,
   Minimize2,
@@ -39,7 +41,9 @@ import {
   deleteCompendiumApi,
   fetchChatCompendiumBinding,
   fetchCompendiums,
+  fetchLiveStatus,
   fetchLorebookManagerGraph,
+  fetchProposals,
   lmQueryKeys,
   patchEntryRelationships,
   patchLorebookEntry,
@@ -48,9 +52,11 @@ import {
   type LmCompendiumSavePayload,
   type LmEntryPatch,
 } from "./api";
+import { ActivityPanel } from "./ActivityPanel";
 import { CompendiumModal } from "./CompendiumModal";
 import { confirmWithHostOrBrowser, getHostComponents } from "./host-components";
 import { FAMILY_META, LorebookGraph } from "./LorebookGraph";
+import { ReviewPanel } from "./ReviewPanel";
 import { SimulatePanel, type SimGraphHighlight } from "./SimulatePanel";
 import type { CapabilityProps } from "./types";
 
@@ -184,7 +190,7 @@ function writeStoredManagedBooks(ids: readonly string[]): void {
 export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const queryClient = useQueryClient();
   const [surface, setSurface] = useState<"library" | "workbench">("library");
-  const [view, setView] = useState<"graph" | "list" | "simulate">("graph");
+  const [view, setView] = useState<"graph" | "list" | "simulate" | "activity" | "review">("graph");
   const [search, setSearch] = useState("");
   const [managedLorebookIds, setManagedLorebookIds] = useState<string[] | null>(() => readStoredManagedBooks());
   const [collapsedLorebookIds, setCollapsedLorebookIds] = useState<Set<string>>(() => new Set());
@@ -214,6 +220,12 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     queryKey: lmQueryKeys.compendiums,
     queryFn: fetchCompendiums,
   });
+  const liveStatusQuery = useQuery({ queryKey: lmQueryKeys.status, queryFn: fetchLiveStatus, staleTime: 60_000 });
+  const pendingProposalsQuery = useQuery({
+    queryKey: lmQueryKeys.proposals("pending"),
+    queryFn: () => fetchProposals("pending"),
+  });
+  const pendingCount = pendingProposalsQuery.data?.length ?? 0;
 
   const chatId = props.chatId ?? null;
   const chatBindingQuery = useQuery({
@@ -954,7 +966,11 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                 type="button"
                 className="mari-chrome-control mari-chrome-control--small"
                 disabled={graphQuery.isFetching}
-                onClick={() => void graphQuery.refetch()}
+                onClick={() => {
+                  void graphQuery.refetch();
+                  void queryClient.invalidateQueries({ queryKey: lmQueryKeys.runs });
+                  void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
+                }}
               >
                 <RefreshCw aria-hidden="true" size="0.875rem" className={graphQuery.isFetching ? "animate-spin" : ""} />
                 Refresh
@@ -988,6 +1004,29 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
               >
                 <FlaskConical aria-hidden="true" size="0.875rem" />
                 Simulate
+              </button>
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                aria-pressed={view === "activity"}
+                onClick={() => setView("activity")}
+              >
+                <ActivityIcon aria-hidden="true" size="0.875rem" />
+                Activity
+              </button>
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                aria-pressed={view === "review"}
+                onClick={() => setView("review")}
+              >
+                <Inbox aria-hidden="true" size="0.875rem" />
+                Review
+                {pendingCount > 0 ? (
+                  <span className="rounded-full bg-[var(--primary)] px-1.5 text-[0.625rem] tabular-nums text-[var(--primary-foreground)]">
+                    {pendingCount}
+                  </span>
+                ) : null}
               </button>
             </div>
           </div>
@@ -1101,6 +1140,23 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                 onSaveRelationships={handleSaveRelationships}
                 onBatchSaveRelationships={handleBatchSaveRelationships}
                 onUpdateEntry={handleUpdateEntry}
+              />
+            ) : view === "activity" ? (
+              <ActivityPanel
+                currentChatId={chatId}
+                liveRetrieval={liveStatusQuery.data?.liveRetrieval}
+                onInspectNode={(ref) => {
+                  setSelectedNodeRef(ref);
+                  setView("graph");
+                }}
+              />
+            ) : view === "review" ? (
+              <ReviewPanel
+                payload={payload}
+                onInspectNode={(ref) => {
+                  setSelectedNodeRef(ref);
+                  setView("graph");
+                }}
               />
             ) : view === "simulate" ? (
               <SimulatePanel

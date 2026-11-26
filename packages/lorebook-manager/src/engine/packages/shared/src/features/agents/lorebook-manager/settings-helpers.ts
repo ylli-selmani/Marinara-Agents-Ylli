@@ -51,14 +51,19 @@ const LEGACY_COMPENDIUM_DEFAULTS: Readonly<
 export const DEFAULT_ARCHIVIST_SETTINGS: Readonly<LmArchivistSettings> = Object.freeze({
   mode: "off",
   everyNTurns: 5,
-  unreadMessages: 2,
+  readBehind: 1,
   connectionId: null,
+  maxTokens: 4096,
+  temperature: null,
 } satisfies LmArchivistSettings);
 
 export const DEFAULT_CRAWLER_SETTINGS: Readonly<LmCrawlerSettings> = Object.freeze({
   trigger: "after_archivist",
   connectionId: null,
   batchSize: 20,
+  // Twice the Archivist's: 20 entries' answers plus a thinking model's reasoning cut off at 3,500 (Ylli's round 5).
+  maxTokens: 8192,
+  temperature: null,
 } satisfies LmCrawlerSettings);
 
 /** The defaults a fresh install resolves to, before anything is saved. Kept for the Compendium dialog's first draw. */
@@ -106,6 +111,14 @@ function connectionIdOr(value: unknown, fallback: string | null): string | null 
   return typeof value === "string" ? value.trim() || null : fallback;
 }
 
+/** Blank or null = the model's own default; otherwise 0–2. */
+function temperatureOr(value: unknown, fallback: number | null): number | null {
+  if (value === null || (typeof value === "string" && !value.trim())) return null;
+  const num = toNumber(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(0, Math.min(2, Math.round(num * 100) / 100));
+}
+
 function boolOr(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -142,8 +155,10 @@ export function normalizeArchivistSettings(
   return {
     mode: oneOf(record.mode, ARCHIVIST_MODES, fallback.mode),
     everyNTurns: clampInt(record.everyNTurns, fallback.everyNTurns, 1, 50),
-    unreadMessages: clampInt(record.unreadMessages, fallback.unreadMessages, 1, 10),
+    readBehind: clampInt(record.readBehind, fallback.readBehind, 0, 5),
     connectionId: connectionIdOr(record.connectionId, fallback.connectionId),
+    maxTokens: clampInt(record.maxTokens, fallback.maxTokens, 512, 65536),
+    temperature: temperatureOr(record.temperature, fallback.temperature),
   };
 }
 
@@ -156,6 +171,8 @@ export function normalizeCrawlerSettings(
     trigger: oneOf(record.trigger, CRAWLER_TRIGGERS, fallback.trigger),
     connectionId: connectionIdOr(record.connectionId, fallback.connectionId),
     batchSize: clampInt(record.batchSize, fallback.batchSize, 5, 50),
+    maxTokens: clampInt(record.maxTokens, fallback.maxTokens, 512, 65536),
+    temperature: temperatureOr(record.temperature, fallback.temperature),
   };
 }
 

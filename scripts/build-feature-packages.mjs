@@ -90,7 +90,8 @@ const PACKAGE_BUILT_AGAINST = Object.freeze({
 // Capability API 1.390 lets the Engine draw the agent page header (agentDetail.header: "engine"); 1.820 adds the
 // chat-activity slot, so an Engine without it refuses the manifest instead of dropping the Agent activity card.
 const LONG_TERM_MEMORY_CAPABILITY_API = Object.freeze({ major: 1, minor: 820 });
-const LOREBOOK_MANAGER_CAPABILITY_API = Object.freeze({ major: 1, minor: 390 });
+// 1.820 for the chat-activity slot (the Archivist's card in a chat's Agent activity panel).
+const LOREBOOK_MANAGER_CAPABILITY_API = Object.freeze({ major: 1, minor: 820 });
 // Capability API 1.819 gives packages characters on api.runtime.resources and the `character-write` permission
 // (Pasta-Devs/Marinara-Engine#9043), so Calls, Noodle and Slurp stop bundling the Engine's characters storage
 // (Pasta-Devs/Marinara-Agents#2242). Built against the Engine commit that added it.
@@ -676,6 +677,7 @@ const features = [
     capabilityApi: LOREBOOK_MANAGER_CAPABILITY_API,
     contributions: {
       agentDetail: { agentIds: ["lorebook-manager"], header: "engine" },
+      slots: ["chat-activity"],
     },
   },
   {

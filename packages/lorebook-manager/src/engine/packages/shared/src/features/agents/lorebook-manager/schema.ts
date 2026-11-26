@@ -233,10 +233,14 @@ export interface LmArchivistSettings {
   mode: LmArchivistMode;
   /** Runs after every this-many assistant turns (1–50). */
   everyNTurns: number;
-  /** The newest messages it never reads, so a swipe can't write lore (1–10). */
-  unreadMessages: number;
+  /** Read Behind: AI replies it leaves unread at the chat's end, so a swipe can't write lore (0–5; 0 reads the newest). */
+  readBehind: number;
   /** null = the agents' default connection, then the chat's. */
   connectionId: string | null;
+  /** The answer's token limit; a thinking model spends part of it reasoning. */
+  maxTokens: number;
+  /** null = the model's own default (Google asks Gemini 3 to keep 1.0; reasoning models ignore it). */
+  temperature: number | null;
 }
 
 export type LmCrawlerTrigger = "after_archivist" | "on_demand";
@@ -247,6 +251,10 @@ export interface LmCrawlerSettings {
   connectionId: string | null;
   /** Entries per call when it tidies whole books (5–50). */
   batchSize: number;
+  /** The answer's token limit; a thinking model spends part of it reasoning. */
+  maxTokens: number;
+  /** null = the model's own default. */
+  temperature: number | null;
 }
 
 /** The package's global settings document (the Settings tab). */

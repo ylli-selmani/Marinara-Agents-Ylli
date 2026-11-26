@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Loader2, Network, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Network, RotateCcw, Sparkles, X } from "lucide-react";
+import { LM_RELATIONS } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
   LmCompendium,
   LmEntryNode,
@@ -29,6 +30,7 @@ const FIELD_LABEL: Record<string, string> = {
   content: "Content",
   newFacts: "New facts",
   addKeys: "New keywords",
+  removeKeys: "Remove keywords",
   addLinks: "New links",
   description: "Summary",
   keys: "Keys",
@@ -39,6 +41,20 @@ const FIELD_LABEL: Record<string, string> = {
   relationships: "Links",
   dynamicState: "Facets",
 };
+
+/** Fields Review lets you trim or reword before Apply; the server takes only less, a relation or reworded text. */
+const TEXT_FIELDS = new Set(["description", "tag"]);
+const LIST_FIELDS = new Set(["addKeys", "removeKeys", "newFacts", "keys"]);
+/** Every relation but `represents` (it hides an entry while its card is active): `related_to` is fine by hand. */
+const EDIT_RELATIONS = LM_RELATIONS.filter((relation) => relation.value !== "represents");
+
+interface ReviewLink {
+  key: string;
+  relation: string;
+  name: string;
+}
+
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 function formatValue(value: unknown, field?: string): string {
   if (value === null || value === undefined || value === "") return "—";
@@ -60,6 +76,101 @@ function formatValue(value: unknown, field?: string): string {
   return String(value);
 }
 
+const isBlank = (value: unknown) =>
+  value === null ||
+  value === undefined ||
+  (typeof value === "string" && !value.trim()) ||
+  (Array.isArray(value) && value.length === 0);
+
+/** One removable item: a keyword, a fact or a link. Precedent: the entry editor's keyword chips. */
+function Chip({ children, onRemove, label }: { children: React.ReactNode; onRemove?: () => void; label: string }) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5">
+      <span className="min-w-0 break-words">{children}</span>
+      {onRemove ? (
+        <button
+          type="button"
+          aria-label={`Leave out ${label}`}
+          title="Leave out"
+          onClick={onRemove}
+          className="shrink-0 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+        >
+          <X size="0.7rem" />
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+/** A pending field you can trim or reword; applied and dismissed cards show their value only. */
+function FieldValue({
+  field,
+  value,
+  editable,
+  onChange,
+}: {
+  field: string;
+  value: unknown;
+  editable: boolean;
+  onChange: (next: unknown) => void;
+}) {
+  if (editable && TEXT_FIELDS.has(field) && typeof value === "string") {
+    return (
+      <input
+        aria-label={FIELD_LABEL[field] ?? field}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mari-chrome-field h-7 w-full rounded px-2 text-xs"
+      />
+    );
+  }
+  if (editable && LIST_FIELDS.has(field) && Array.isArray(value)) {
+    const items = value.filter((item): item is string => typeof item === "string");
+    return (
+      <div className="flex flex-wrap gap-1">
+        {items.map((item) => (
+          <Chip key={item} label={item} onRemove={() => onChange(items.filter((other) => other !== item))}>
+            {item}
+          </Chip>
+        ))}
+      </div>
+    );
+  }
+  if (editable && field === "addLinks" && Array.isArray(value)) {
+    const links = value as ReviewLink[];
+    return (
+      <div className="flex flex-wrap gap-1">
+        {links.map((link) => (
+          <Chip
+            key={link.key}
+            label={`${link.relation} → ${link.name}`}
+            onRemove={() => onChange(links.filter((other) => other.key !== link.key))}
+          >
+            <select
+              aria-label={`Relation to ${link.name}`}
+              value={link.relation}
+              onChange={(event) =>
+                onChange(
+                  links.map((other) => (other.key === link.key ? { ...other, relation: event.target.value } : other)),
+                )
+              }
+              className="mari-chrome-field h-6 rounded px-1 text-[0.6875rem]"
+            >
+              {EDIT_RELATIONS.map((relation) => (
+                <option key={relation.value} value={relation.value} title={relation.hint}>
+                  {relation.value}
+                </option>
+              ))}
+            </select>{" "}
+            → {link.name}
+          </Chip>
+        ))}
+      </div>
+    );
+  }
+  return <div>{formatValue(value, field)}</div>;
+}
+
 function ProposalCard({
   proposal,
   current,
@@ -72,15 +183,24 @@ function ProposalCard({
   current: LmEntryNode | null;
   lorebookName: string;
   busy: boolean;
-  onDecide: (decision: "apply" | "dismiss") => void;
+  onDecide: (decision: "apply" | "dismiss", patch?: Record<string, unknown>) => void;
   onInspectNode: (ref: string) => void;
 }) {
   const isCreate = proposal.kind === "create_entry";
+  const pending = proposal.status === "pending";
   const duplicate = proposal.duplicateOfEntryId ? `lore:${proposal.duplicateOfEntryId}` : null;
+  // The suggestion as you trimmed it; a field left out entirely is dropped from what Apply sends.
+  const [draft, setDraft] = useState<Record<string, unknown>>(() => ({ ...proposal.patch }));
+  const [dropped, setDropped] = useState<ReadonlySet<string>>(() => new Set());
+  const edited = pending && (dropped.size > 0 || !sameJson(draft, proposal.patch));
+  const kept = Object.fromEntries(
+    Object.entries(draft).filter(([field, value]) => !dropped.has(field) && !isBlank(value)),
+  );
   const previousOf = (field: string): unknown => {
     if (proposal.before && field in proposal.before) return proposal.before[field];
     return current ? (current as unknown as Record<string, unknown>)[field] : undefined;
   };
+  const shown = pending ? draft : proposal.patch;
 
   return (
     <div className="space-y-1.5 rounded border border-[var(--border)] bg-[var(--background)]/40 px-2.5 py-2 text-xs">
@@ -93,6 +213,7 @@ function ProposalCard({
           <span className="text-[0.625rem] text-[var(--muted-foreground)]">
             {proposal.source === "crawler" ? "Crawler" : "Archivist"}
           </span>
+          {edited ? <span className="text-[0.625rem] text-[var(--muted-foreground)]">· Edited</span> : null}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {!isCreate && proposal.targetEntryId ? (
@@ -106,7 +227,21 @@ function ProposalCard({
               <Network size="0.8rem" />
             </button>
           ) : null}
-          {proposal.status === "pending" ? (
+          {edited ? (
+            <button
+              type="button"
+              title="Undo your edits to this suggestion"
+              aria-label="Reset this suggestion"
+              onClick={() => {
+                setDraft({ ...proposal.patch });
+                setDropped(new Set());
+              }}
+              className="p-0.5 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+            >
+              <RotateCcw size="0.8rem" />
+            </button>
+          ) : null}
+          {pending ? (
             <>
               <button
                 type="button"
@@ -119,9 +254,10 @@ function ProposalCard({
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || Object.keys(kept).length === 0}
+                title={Object.keys(kept).length === 0 ? "Nothing left to apply; dismiss it instead" : undefined}
                 className="mari-chrome-control mari-chrome-control--small disabled:opacity-45"
-                onClick={() => onDecide("apply")}
+                onClick={() => onDecide("apply", edited ? kept : undefined)}
               >
                 <Check aria-hidden="true" size="0.8rem" />
                 Apply
@@ -144,19 +280,42 @@ function ProposalCard({
       ) : null}
 
       <dl className="space-y-1">
-        {Object.entries(proposal.patch).map(([field, next]) => {
+        {Object.entries(shown).map(([field, next]) => {
           const previous = isCreate ? undefined : previousOf(field);
+          const leftOut = pending && (dropped.has(field) || (Array.isArray(next) && next.length === 0));
+          const editable = pending && (TEXT_FIELDS.has(field) || LIST_FIELDS.has(field) || field === "addLinks");
           return (
             <div key={field} className="grid gap-0.5 border-t border-[var(--border)] pt-1 first:border-t-0 first:pt-0">
-              <dt className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                {FIELD_LABEL[field] ?? field}
-              </dt>
-              <dd className="space-y-0.5 whitespace-pre-wrap break-words">
-                {previous !== undefined ? (
-                  <div className="text-[var(--muted-foreground)] line-through">{formatValue(previous)}</div>
+              <dt className="flex items-center justify-between gap-2 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                <span>
+                  {FIELD_LABEL[field] ?? field}
+                  {leftOut ? " · left out" : ""}
+                </span>
+                {pending && !leftOut ? (
+                  <button
+                    type="button"
+                    title="Leave this out of the change"
+                    aria-label={`Leave out ${FIELD_LABEL[field] ?? field}`}
+                    onClick={() => setDropped((value) => new Set([...value, field]))}
+                    className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  >
+                    <X size="0.7rem" />
+                  </button>
                 ) : null}
-                <div>{formatValue(next, field)}</div>
-              </dd>
+              </dt>
+              {leftOut ? null : (
+                <dd className="space-y-0.5 whitespace-pre-wrap break-words">
+                  {previous !== undefined && !isBlank(previous) && !Array.isArray(next) ? (
+                    <div className="text-[var(--muted-foreground)] line-through">{formatValue(previous)}</div>
+                  ) : null}
+                  <FieldValue
+                    field={field}
+                    value={next}
+                    editable={editable}
+                    onChange={(value) => setDraft((draftValue) => ({ ...draftValue, [field]: value }))}
+                  />
+                </dd>
+              )}
             </div>
           );
         })}
@@ -188,7 +347,7 @@ function TidyEntries({ compendium }: { compendium: LmCompendium }) {
         const made = `${record.proposals} ${record.proposals === 1 ? "suggestion" : "suggestions"}`;
         toast.success(`Looked at ${entries}: ${made}`);
       } else if (record?.status === "nothing_to_do") {
-        toast("Every entry is tidied");
+        toast(record.detail ?? "Every entry is tidied");
       } else {
         toast.error(record?.detail ?? "The Crawler could not run");
       }
@@ -213,7 +372,7 @@ function TidyEntries({ compendium }: { compendium: LmCompendium }) {
         type="button"
         disabled={running || remaining === 0}
         onClick={() => void run()}
-        title="Suggests a summary, a tag, keywords and links for the next batch of entries. One model call."
+        title="Suggests a summary, a tag, keyword fixes and links for the next batch of entries. One model call."
         className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"
       >
         {running ? <Loader2 size="0.75rem" className="animate-spin" /> : <Sparkles size="0.75rem" />}
@@ -237,10 +396,10 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
   }, [payload]);
   const bookNames = useMemo(() => new Map((payload?.lorebooks ?? []).map((book) => [book.id, book.name])), [payload]);
 
-  const decide = async (proposal: LmProposal, decision: "apply" | "dismiss") => {
+  const decide = async (proposal: LmProposal, decision: "apply" | "dismiss", patch?: Record<string, unknown>) => {
     setBusyId(proposal.id);
     try {
-      await decideProposalApi(proposal.id, decision);
+      await decideProposalApi(proposal.id, decision, patch);
       toast.success(decision === "apply" ? "Change applied" : "Suggestion dismissed");
       await queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
       if (decision === "apply") await queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
@@ -290,12 +449,12 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
         <div className="space-y-1.5">
           {proposals.map((proposal) => (
             <ProposalCard
-              key={proposal.id}
+              key={`${proposal.id}:${proposal.revision}`}
               proposal={proposal}
               current={proposal.targetEntryId ? (entriesById.get(proposal.targetEntryId) ?? null) : null}
               lorebookName={bookNames.get(proposal.lorebookId) ?? "Lorebook"}
               busy={busyId === proposal.id}
-              onDecide={(decision) => void decide(proposal, decision)}
+              onDecide={(decision, patch) => void decide(proposal, decision, patch)}
               onInspectNode={onInspectNode}
             />
           ))}

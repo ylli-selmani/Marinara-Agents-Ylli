@@ -410,6 +410,9 @@ function oneHopPolicy(
   const base = relation.trim().toLowerCase();
   if (base === "part_of") return { weight: 1.0, floor: 0 };
   if (base === "located_in") {
+    // Outgoing only, like is_a: a place inside Konoha brings Konoha, never Konoha every place in it (Ylli's round 5:
+    // the World State naming Konoha pulled the Inuzuka Clan, the Memorial Stone and the Orphanage).
+    if (direction === "in") return { weight: 0.85, floor: Number.POSITIVE_INFINITY };
     return { weight: 0.85, floor: seedMatchedLocation || viaCardInherited ? 0 : 0.4 };
   }
   if (base === "is_a" || base === "member_of") {

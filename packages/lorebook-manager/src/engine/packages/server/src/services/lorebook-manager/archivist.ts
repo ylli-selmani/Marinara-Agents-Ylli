@@ -314,6 +314,22 @@ function visibleMessages(messages: readonly LorebookManagerMessageRecord[]): Lor
   });
 }
 
+/**
+ * Read Behind: the messages before the last `readBehind` AI replies. Those replies, and what follows them, can still be
+ * swiped or regenerated, so they never write lore. 0 reads up to the newest reply.
+ */
+export function settledMessages(
+  messages: readonly LorebookManagerMessageRecord[],
+  readBehind: number,
+): LorebookManagerMessageRecord[] {
+  if (readBehind <= 0) return [...messages];
+  let seen = 0;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]!.role === "assistant" && ++seen === readBehind) return messages.slice(0, index);
+  }
+  return [];
+}
+
 /** A message's text, capped so one huge message can't blow the window. */
 const messageText = (message: LorebookManagerMessageRecord) =>
   (message.agentContent ?? message.content ?? "").trim().slice(0, MAX_WINDOW_CHARS);
@@ -463,7 +479,7 @@ export async function runArchivist(
 
   const messages = visibleMessages(await persistence.listMessages(chatId));
   if (!options.force && messages.at(-1)?.role === "user") return quiet("reply_pending");
-  const settled = messages.slice(0, Math.max(0, messages.length - archivist.unreadMessages));
+  const settled = settledMessages(messages, archivist.readBehind);
 
   const stored = await readState(documents, chatId);
   const { state } = stored;
@@ -553,10 +569,16 @@ export async function runArchivist(
         { role: "system", content: ARCHIVIST_SYSTEM },
         { role: "user", content: archivistUserPrompt(candidates, directory, window) },
       ],
-      { temperature: 0.2, maxTokens: 1_500, signal: backgroundModelSignal(options.signal) },
+      {
+        ...(archivist.temperature === null ? {} : { temperature: archivist.temperature }),
+        maxTokens: archivist.maxTokens,
+        signal: backgroundModelSignal(options.signal),
+      },
     );
     if (options.signal?.aborted) return { status: "failed", run: null };
-    if (completion.finishReason === "length") return failed("The model's answer was cut off", modelName);
+    if (completion.finishReason === "length") {
+      return failed("The model's answer was cut off: raise Max tokens in Settings → Archivist", modelName);
+    }
     answer = completion.content ? safeParse(completion.content) : null;
   } catch (error) {
     if (options.signal?.aborted) return { status: "failed", run: null };

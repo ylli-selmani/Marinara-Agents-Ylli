@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "capabilityApi": {
     "major": 1,
-    "minor": 390
+    "minor": 820
   },
   "builtAgainst": {
     "engineVersion": "2.5.2",

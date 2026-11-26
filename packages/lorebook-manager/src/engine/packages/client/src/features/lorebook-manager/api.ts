@@ -358,12 +358,17 @@ export async function fetchProposals(status: LmProposalStatus): Promise<LmPropos
   return Array.isArray(payload.proposals) ? payload.proposals : [];
 }
 
-export async function decideProposalApi(id: string, decision: "apply" | "dismiss"): Promise<LmProposal> {
+/** `patch`: the suggestion as trimmed in Review (Apply only); the server takes only less of it. */
+export async function decideProposalApi(
+  id: string,
+  decision: "apply" | "dismiss",
+  patch?: Record<string, unknown>,
+): Promise<LmProposal> {
   const response = await fetch(`${API_ROOT}/proposals/${encodeURIComponent(id)}/${decision}`, {
     method: "POST",
     credentials: "same-origin",
     headers: writeHeaders(),
-    body: "{}",
+    body: JSON.stringify(decision === "apply" && patch ? { patch } : {}),
   });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   return ((await response.json()) as { proposal: LmProposal }).proposal;

@@ -17,6 +17,8 @@ export type CapabilityProps = {
   chatName?: string | null;
   chatMode?: "conversation" | "roleplay" | "game" | null;
   onClose?: () => void;
+  /** The chat-activity slot: opens the package's own agent page. */
+  onOpenAgentSettings?: () => void;
   onOpenLorebook?: (lorebookId: string, entryId?: string) => void;
   onOpenCharacter?: (characterId: string) => void;
   onOpenPersona?: (personaId: string) => void;

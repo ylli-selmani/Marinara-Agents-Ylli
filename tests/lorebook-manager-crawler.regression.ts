@@ -66,12 +66,14 @@ const books = [
         id: "unseelie",
         name: "Unseelie Court",
         keys: ["Unseelie Court", "Unseelie"],
+        tag: "faction",
         content: "The Unseelie Court rules the night.",
       },
       {
         id: "syliveera",
         name: "Syliveera",
-        keys: ["Syliveera"],
+        keys: ["Syliveera", "Thorns"],
+        constant: true,
         description: "",
         tag: "",
         content: "Syliveera serves the Unseelie Court and guards the Thorn Gate.",
@@ -89,6 +91,8 @@ async function main() {
   assert.equal(crawlHash({ name: "A", content: "x" }), crawlHash({ name: "A", content: "x" }));
   assert.notEqual(crawlHash({ name: "A", content: "x" }), crawlHash({ name: "A", content: "y" }));
   assert.ok(!CRAWLER_SYSTEM.includes("represents"), "the Crawler never writes represents links");
+  assert.ok(!CRAWLER_SYSTEM.includes("related_to"), "the Crawler never writes related_to links (round 5)");
+  assert.match(CRAWLER_SYSTEM, /member_of: Belongs to a group/, "each relation comes with the UI's hint");
 
   const documents = makeMemoryDocStore();
   const prompts: string[] = [];
@@ -159,11 +163,14 @@ async function main() {
             id: syl,
             description: "A fae knight of the Unseelie Court.",
             tag: "Character",
-            keys: ["Syl", "syliveera", "Knight of Thorns"],
+            keys: ["Syl", "syliveera", "Knight of Thorns", "Lady Syl"],
+            removeKeys: ["thorns", "Syliveera", "Nonexistent"],
+            constant: false,
             links: [
               { to: target, relation: "member_of" },
               { to: "t99", relation: "ally_of" },
               { to: target, relation: "represents" },
+              { to: target, relation: "related_to" },
             ],
           },
           { id: court, description: "The night court of the fae.", tag: "faction", keys: [] },
@@ -182,20 +189,32 @@ async function main() {
     assert.equal(first.run!.proposals, 2);
     assert.deepEqual(
       first.run!.skipped.map((item) => item.why).sort(),
-      ["not a mentioned target", "unknown entry", 'unknown relation "represents"'].sort(),
+      [
+        "not a mentioned target",
+        "unknown entry",
+        'unknown relation "represents"',
+        'unknown relation "related_to"',
+      ].sort(),
     );
 
     const pending = (await listProposals(documents, "pending")).filter((p) => p.source === "crawler");
     const sylProposal = pending.find((p) => p.targetEntryId === "syliveera")!;
-    assert.deepEqual(sylProposal.patch, {
-      description: "A fae knight of the Unseelie Court.",
-      tag: "character",
-      addKeys: ["Syl", "Knight of Thorns"],
-      addLinks: [{ key: "unseelie", relation: "member_of", name: "Unseelie Court" }],
-    });
-    // The Unseelie Court has no tag or summary yet: the Crawler fills both. Nothing touches its content.
+    assert.ok(prompt.includes("always on: yes"), "a constant entry says so");
+    assert.deepEqual(
+      sylProposal.patch,
+      {
+        description: "A fae knight of the Unseelie Court.",
+        tag: "character",
+        removeKeys: ["Thorns"],
+        constant: false,
+        addKeys: ["Syl", "Knight of Thorns"],
+        addLinks: [{ key: "unseelie", relation: "member_of", name: "Unseelie Court" }],
+      },
+      "at most 2 keys; the own name and unknown keys are never removed; related_to is refused",
+    );
+    // The Unseelie Court has a tag but no summary: the Crawler fills only the summary. Nothing touches its content.
     const courtProposal = pending.find((p) => p.targetEntryId === "unseelie")!;
-    assert.deepEqual(courtProposal.patch, { description: "The night court of the fae.", tag: "faction" });
+    assert.deepEqual(courtProposal.patch, { description: "The night court of the fae." }, "its tag is set already");
 
     // ── Tidied (seen, or waiting in Review): nothing left; Tidy entries says so and doesn't call the model. ──
     assert.equal(await countUntidied(compendium.id), 0);
@@ -205,20 +224,50 @@ async function main() {
     assert.equal(prompts.length, calls);
 
     // ── Apply merges into the entry as it is now: a key and a link added meanwhile survive. ──
+    // Trimmed in Review: one key and the summary left out, the tag reworded. The edit can't add a key or a link.
     (entry("syliveera").keys as string[]).push("Lady of Thorns");
     (entry("syliveera").relationships as Record<string, string>).unseelie = "leads";
-    const applied = await applyProposal(runtime, sylProposal.id);
-    assert.deepEqual(entry("syliveera").keys, ["Syliveera", "Lady of Thorns", "Syl", "Knight of Thorns"]);
+    const applied = await applyProposal(runtime, sylProposal.id, {
+      tag: "Knight",
+      removeKeys: ["Thorns"],
+      constant: false,
+      addKeys: ["Syl", "Invented Key"],
+      addLinks: [
+        { key: "unseelie", relation: "leads", name: "Unseelie Court" },
+        { key: "gate", relation: "member_of", name: "Thorn Gate" },
+      ],
+    });
+    assert.deepEqual(
+      applied.patch,
+      {
+        tag: "knight",
+        removeKeys: ["Thorns"],
+        constant: false,
+        addKeys: ["Syl"],
+        addLinks: [{ key: "unseelie", relation: "leads", name: "Unseelie Court" }],
+      },
+      "the applied suggestion keeps the trimmed version",
+    );
+    assert.deepEqual(entry("syliveera").keys, ["Syliveera", "Lady of Thorns", "Syl"], "Thorns out, Syl in");
+    assert.equal(entry("syliveera").constant, false);
     assert.deepEqual(entry("syliveera").relationships, { gate: "related_to", unseelie: "leads" }, "never replaces");
-    assert.equal(entry("syliveera").description, "A fae knight of the Unseelie Court.");
-    assert.equal(entry("syliveera").tag, "character");
-    assert.ok(!("addKeys" in entry("syliveera")) && !("addLinks" in entry("syliveera")), "no raw patch fields");
+    assert.equal(entry("syliveera").description, "", "a left-out summary isn't written");
+    assert.equal(entry("syliveera").tag, "knight");
+    assert.ok(
+      !["addKeys", "addLinks", "removeKeys"].some((field) => field in entry("syliveera")),
+      "no raw patch fields",
+    );
     assert.deepEqual(applied.before, {
-      description: "",
       tag: "",
-      keys: ["Syliveera", "Lady of Thorns"],
+      constant: true,
+      keys: ["Syliveera", "Thorns", "Lady of Thorns"],
       relationships: { gate: "related_to", unseelie: "leads" },
     });
+    await assert.rejects(
+      applyProposal(runtime, courtProposal.id, { addKeys: ["Unseelie"] }),
+      /Nothing is left to apply/,
+      "an edit that leaves nothing is refused",
+    );
 
     // ── A content change makes an entry untidied again, once nothing of the Crawler's waits for it. ──
     await dismissProposal(documents, courtProposal.id);
@@ -248,18 +297,26 @@ async function main() {
       chatId: "chat-1",
     });
     const archivedApplied = await applyProposal(runtime, archived.id);
-    assert.equal(await crawlAfterArchivist(archivedApplied), null, "on demand: no run after the Archivist");
+    assert.equal(
+      await crawlAfterArchivist(archivedApplied, { waitMs: 0 }),
+      null,
+      "on demand: no run after the Archivist",
+    );
     assert.equal(await countUntidied(compendium.id), 2, "the Archivist's fact made Syliveera untidied");
 
     await saveSettings(documents, { crawler: { trigger: "after_archivist" } });
     answer = (text) => JSON.stringify({ entries: [{ id: shortId(text, "Syliveera"), keys: ["Seelie Envoy"] }] });
-    const after = await crawlAfterArchivist(archivedApplied);
+    const after = await crawlAfterArchivist(archivedApplied, { waitMs: 0 });
     assert.equal(after?.status, "done");
     assert.equal(after!.run!.trigger, "after_archivist");
     assert.equal(after!.run!.entryCount, 1, "only the changed entry");
     assert.ok(!prompts.at(-1)!.includes("Its queen is Mab"), "the other untidied entry waits for Tidy entries");
     assert.equal(await countUntidied(compendium.id), 1);
-    assert.equal(await crawlAfterArchivist({ ...archivedApplied, source: "crawler" }), null, "only Archivist changes");
+    assert.equal(
+      await crawlAfterArchivist({ ...archivedApplied, source: "crawler" }, { waitMs: 0 }),
+      null,
+      "only Archivist changes",
+    );
 
     // ── An entry the model leaves out stays untidied for the next run. ──
     answer = () => '{"entries": []}';
@@ -282,6 +339,25 @@ async function main() {
     await applyProposal(runtime, courtAgain.id);
     assert.equal(entry("unseelie").description, "Written by hand.");
     assert.equal(entry("unseelie").tag, "faction");
+
+    // ── Applies close together share one run: clicking through Review's stack is one call. ──
+    for (const waiting of (await listProposals(documents, "pending")).filter((p) => p.source === "crawler")) {
+      await dismissProposal(documents, waiting.id);
+    }
+    entry("syliveera").content = "Syliveera serves the Seelie Queen now.";
+    entry("unseelie").content = "The Unseelie Court rules the night. Mab is gone.";
+    const callsBefore = prompts.length;
+    answer = () => '{"entries": []}';
+    const [firstApply, secondApply] = await Promise.all([
+      crawlAfterArchivist(archivedApplied, { waitMs: 30 }),
+      crawlAfterArchivist(
+        { ...archivedApplied, appliedEntryId: "unseelie", targetEntryId: "unseelie" },
+        { waitMs: 30 },
+      ),
+    ]);
+    assert.equal(prompts.length, callsBefore + 1, "one model call for both");
+    assert.equal(firstApply, secondApply, "both Applies share the run");
+    assert.equal(firstApply!.run!.entryCount, 2);
 
     const runs = await listCrawlerRuns();
     assert.ok(runs.length >= 6 && runs.some((run) => run.trigger === "after_archivist"), "runs recorded");

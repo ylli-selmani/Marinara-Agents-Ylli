@@ -711,6 +711,54 @@ assert.ok(
   );
 }
 
+// Round 5 (B tests): located_in follows outgoing links only. The World State naming a town brings the town, never
+// every place in it; a place named in the scene brings its town.
+{
+  const template = simNodes.find((node) => node.ref === "lore:class1a")!;
+  const place = (id: string, name: string, relationships: Record<string, string>) => ({
+    ...template,
+    ref: `lore:${id}`,
+    id,
+    name,
+    keys: [name],
+    content: `${name}.`,
+    tag: "location",
+    family: "location",
+    relationships,
+  });
+  const townPayload: LmGraphPayload = {
+    ...simPayload,
+    nodes: [place("konoha", "Konoha", {}), place("memorial", "Memorial Stone", { konoha: "located_in" })],
+  };
+  const inTown = simulateLorebookRetrieval(townPayload, {
+    queryText: "They walk on.",
+    activeLocationText: "Konoha village streets",
+    activeCharacterIds: [],
+    tokenBudget: 2000,
+    maxOneHop: 6,
+  });
+  assert.ok(
+    inTown.activated.some((a) => a.entry.ref === "lore:konoha"),
+    "the World State location matches the town",
+  );
+  assert.ok(
+    !inTown.activated.some((a) => a.entry.ref === "lore:memorial"),
+    "a town never brings the places located in it",
+  );
+  const atStone = simulateLorebookRetrieval(townPayload, {
+    queryText: "They walk on.",
+    activeLocationText: "Memorial Stone",
+    activeCharacterIds: [],
+    tokenBudget: 2000,
+    maxOneHop: 6,
+  });
+  assert.equal(
+    atStone.activated.find((a) => a.entry.ref === "lore:konoha")?.tier,
+    "graph_1hop",
+    "a place brings the town it is located in",
+  );
+}
+
 const tightBudgetRes = simulateLorebookRetrieval(simPayload, {
   queryText: "We meet Class 1-A before the Overhaul mission.",
   activeCharacterIds: ["izuku"],

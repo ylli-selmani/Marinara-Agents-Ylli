@@ -2,7 +2,7 @@ import {
   parseEntityRef,
   toRelationshipKey,
 } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
-import { LM_RELATION_VALUES } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
+import { LM_RELATIONS } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
   LmCompendium,
   LmCrawlerRunRecord,
@@ -21,17 +21,19 @@ import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { getSettings } from "./settings-store.js";
 
 // ── The Crawler (Tidy entries): one model call per batch fills in what an entry is missing. ──
-// Phase 1 suggests a summary and a tag where an entry has none, a few more keywords, and links to the entries and
-// cards its text mentions. Facets (dynamicState) come later. Everything goes to Review, one suggestion per entry.
+// Phase 1 suggests a summary and a tag where an entry has none, keyword fixes (a needed alias, a too-broad key out),
+// "always on" off where it doesn't belong, and specific links to the entries and cards its text mentions. Facets
+// (dynamicState) come later. Everything goes to Review, one suggestion per entry.
 // An entry counts as tidied once the model has seen it with its current name and content; editing either (an
 // applied Archivist fact, a hand edit) queues it again.
 
 const CONTENT_CHARS = 1_500;
 const MAX_LINK_TARGETS = 12;
 const MAX_TARGETS = 200;
-const MAX_KEYS_ADDED = 4;
+// Every added key is a trusted match: few, and only names the story uses (Ylli's round 5: "red-haired shinobi").
+const MAX_KEYS_ADDED = 2;
 const MAX_KEYS_TOTAL = 12;
-const MAX_LINKS_ADDED = 6;
+const MAX_LINKS_ADDED = 3;
 const DESCRIPTION_CHARS = 240;
 const TAG_CHARS = 40;
 const MAX_RECORDED_RUNS = 20;
@@ -39,8 +41,16 @@ const MAX_RECORDED_RUNS = 20;
 export const CRAWLER_RUN_DOC_KIND = "crawler_run";
 export const CRAWLER_STATE_DOC_KIND = "crawler_state";
 
-/** Relations the Crawler may write. `represents` hides an entry while its card is active: a person's call. */
-const CRAWLER_RELATIONS = LM_RELATION_VALUES.filter((value) => value !== "represents");
+/**
+ * Relations the Crawler may write: the specific ones. `related_to` says nothing a mention doesn't, and the Crawler
+ * spammed it to everything an entry names (Ylli's round 5); a person can still add it. `represents` hides an entry
+ * while its card is active: a person's call too.
+ */
+const CRAWLER_RELATION_DEFS = LM_RELATIONS.filter(
+  (relation) => relation.value !== "related_to" && relation.value !== "represents",
+);
+const CRAWLER_RELATIONS = CRAWLER_RELATION_DEFS.map((relation) => relation.value);
+const AFTER_ARCHIVIST_WAIT_MS = 20_000;
 
 const stateDocId = (compendiumId: string) => `crawler_state:${compendiumId}`;
 const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
@@ -213,18 +223,34 @@ export async function countUntidied(compendiumId: string): Promise<number> {
 // ── The prompt ──
 
 export const CRAWLER_SYSTEM = [
-  "You tidy a roleplay's lorebook entries. For each entry in <entries>, fill in only what helps find and connect it.",
-  "description: one plain sentence saying what the entry is (who, what or where), only if the entry has none.",
+  "You tidy a roleplay's lorebook so the right entries come up during play. For each entry in <entries>, suggest",
+  "only what is clearly missing or wrong. Most entries need little; an empty answer is a good answer.",
+  "",
+  "description: one plain sentence saying what the entry is (who, what or where). Only if the entry has none.",
   "tag: one or two lowercase words for its kind (character, location, item, faction, species, ability, event,",
-  "concept, ...), only if the entry has none.",
-  "keys: up to 4 more names, aliases or short phrases the story would use for it, that the entry doesn't list yet.",
-  "links: for the targets listed under the entry, the ones its text really connects it to, each with one relation:",
-  `${CRAWLER_RELATIONS.join(", ")}. A link reads "<entry> <relation> <target>": "Student member_of Class 1-A".`,
-  "Skip a target the text only names in passing. Never invent; leave a field out when unsure.",
-  'Answer for every entry; an entry with nothing to add is just {"id": "e2"}.',
-  'Answer with JSON only: {"entries": [{"id": "e1", "description": "...", "tag": "...", "keys": ["..."],',
-  '"links": [{"to": "t3", "relation": "member_of"}]}]}',
-].join(" ");
+  "concept, ...). Only if the entry has none.",
+  "",
+  "Keywords bring an entry into the story whenever one appears in the chat, without any further check. So:",
+  "addKeys: at most 2 names or aliases the story really calls it by and the entry lacks. Never descriptions",
+  '("red-haired shinobi"), titles of other things, or generic phrases.',
+  "removeKeys: keys the entry already has that are too broad on their own: a common word that would bring it in for",
+  'unrelated text ("Ten" for Ten-Tails, "Team" for Team Guy, "Dark", "water"). Copy them exactly. Never the',
+  "entry's own name, and leave it at least one key.",
+  'constant: false, only for an entry marked "always on: yes" that isn\'t lore every scene needs (a person, place or',
+  "event that matters only when it comes up).",
+  "",
+  "links: a link is a lasting fact about how the entry relates to a target; when the entry comes up, the link brings",
+  'the target along. It reads "<entry> <relation> <target>". Only these relations:',
+  ...CRAWLER_RELATION_DEFS.map((relation) => `- ${relation.value}: ${relation.hint}`),
+  "Link only when the relation is plainly true from the entry's text. Naming, mentioning or comparing a target is",
+  "not a link: an encounter prompt that names three teams links to none of them. At most 3 links per entry, only to",
+  "targets listed under that entry. When no relation above fits exactly, leave the link out.",
+  "",
+  "Never invent; leave a field out when unsure. Answer for every entry; one with nothing to add is just",
+  '{"id": "e2"}. Answer with JSON only:',
+  '{"entries": [{"id": "e1", "description": "...", "tag": "...", "addKeys": ["..."], "removeKeys": ["..."],',
+  '"constant": false, "links": [{"to": "t3", "relation": "member_of"}]}]}',
+].join("\n");
 
 function displayName(node: LmEntryNode | LmEntityNode): string {
   return node.nodeType === "lore" ? node.name : `${node.name} (${node.nodeType === "persona" ? "persona" : "card"})`;
@@ -246,6 +272,7 @@ export function crawlerUserPrompt(
       `description: ${entry.description.trim() || "(none)"}`,
       `tag: ${entry.tag.trim() || "(none)"}`,
       `keys: ${entry.keys.join(", ") || "(none)"}`,
+      ...(entry.constant ? ["always on: yes"] : []),
       `links: ${links || "(none)"}`,
       `targets: ${targets.join("; ") || "(none)"}`,
       content.trim(),
@@ -399,14 +426,14 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
         { role: "user", content: crawlerUserPrompt(batch, linkTargets, nameOf) },
       ],
       {
-        temperature: 0.2,
-        maxTokens: Math.min(4_000, 300 + batch.length * 160),
+        ...(crawler.temperature === null ? {} : { temperature: crawler.temperature }),
+        maxTokens: crawler.maxTokens,
         signal: backgroundModelSignal(options.signal),
       },
     );
     if (options.signal?.aborted) return { status: "failed", run: null };
     if (completion.finishReason === "length") {
-      return failed("The model's answer was cut off: lower Entries per run in Settings → Crawler");
+      return failed("The model's answer was cut off: raise Max tokens or lower Entries per run in Settings → Crawler");
     }
     answer = completion.content ? safeParse(completion.content) : null;
   } catch (error) {
@@ -434,9 +461,23 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     if (description && !entry.description.trim()) patch.description = description;
     const tag = cleanText(item.tag, TAG_CHARS).toLowerCase();
     if (tag && !entry.tag.trim()) patch.tag = tag;
+    // A too-broad key out: only one the entry has, never its own name, and at least one key stays.
+    const ownName = comparableFact(entry.name);
+    const removeKeys: string[] = [];
+    for (const key of Array.isArray(item.removeKeys) ? item.removeKeys : []) {
+      const wanted = comparableFact(cleanText(key, 60));
+      const existing = entry.keys.find((candidate) => comparableFact(candidate) === wanted);
+      if (!wanted || !existing || wanted === ownName || removeKeys.includes(existing)) continue;
+      if (entry.keys.length - removeKeys.length <= 1) break;
+      removeKeys.push(existing);
+    }
+    if (removeKeys.length > 0) patch.removeKeys = removeKeys;
+    if (item.constant === false && entry.constant) patch.constant = false;
     const known = new Set([...entry.keys, entry.name].map(comparableFact));
     const addKeys: string[] = [];
-    for (const key of Array.isArray(item.keys) ? item.keys : []) {
+    // `keys` was phase 1's name for the field; an older prompt's answer still reads.
+    const keysAnswer = Array.isArray(item.addKeys) ? item.addKeys : Array.isArray(item.keys) ? item.keys : [];
+    for (const key of keysAnswer) {
       const clean = cleanText(key, 60);
       const comparable = comparableFact(clean);
       if (!comparable || known.has(comparable)) continue;
@@ -516,11 +557,50 @@ async function compendiumOf(proposal: LmProposal): Promise<LmCompendium | null> 
   return all.find((compendium) => compendium.lorebookIds.includes(proposal.lorebookId)) ?? null;
 }
 
+/** Applied Archivist changes waiting to be tidied together, per Compendium. */
+interface WaitingCrawl {
+  entryIds: Set<string>;
+  chatId: string | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  done: Promise<CrawlerOutcome | null>;
+  resolve: (outcome: CrawlerOutcome | null) => void;
+}
+const waitingCrawls = new Map<string, WaitingCrawl>();
+
+/** Add an entry to the Compendium's waiting crawl and start the wait again; all of them share one run. */
+function scheduleCrawl(compendiumId: string, entryId: string, chatId: string | null, waitMs: number) {
+  let waiting = waitingCrawls.get(compendiumId);
+  if (!waiting) {
+    let resolve: (outcome: CrawlerOutcome | null) => void = () => undefined;
+    const done = new Promise<CrawlerOutcome | null>((settle) => (resolve = settle));
+    waiting = { entryIds: new Set(), chatId, timer: null, done, resolve };
+    waitingCrawls.set(compendiumId, waiting);
+  }
+  const current = waiting;
+  current.entryIds.add(entryId);
+  if (current.timer) clearTimeout(current.timer);
+  current.timer = setTimeout(() => {
+    waitingCrawls.delete(compendiumId);
+    const entryIds = [...current.entryIds];
+    runInBackgroundQueue(() =>
+      runCrawler(compendiumId, { entryIds, trigger: "after_archivist", chatId: current.chatId }),
+    ).then(current.resolve, (error: unknown) => {
+      getLorebookManagerRuntime().logger.warn("[lorebook-manager] Crawler after Archivist changes failed: %s", error);
+      current.resolve(null);
+    });
+  }, waitMs);
+  return current.done;
+}
+
 /**
  * After an Archivist change is applied: tidy that entry in the background, when the Crawler runs after the
- * Archivist. Never throws; the apply request doesn't wait for it.
+ * Archivist. Applies within `waitMs` of each other share one run (clicking through Review's stack is one call, not
+ * one per Apply; Ylli's round 5). Never throws; the apply request doesn't wait for it.
  */
-export async function crawlAfterArchivist(proposal: LmProposal): Promise<CrawlerOutcome | null> {
+export async function crawlAfterArchivist(
+  proposal: LmProposal,
+  { waitMs = AFTER_ARCHIVIST_WAIT_MS }: { waitMs?: number } = {},
+): Promise<CrawlerOutcome | null> {
   try {
     if (proposal.source !== "archivist" || proposal.status !== "applied" || !proposal.appliedEntryId) return null;
     const runtime = getLorebookManagerRuntime();
@@ -528,10 +608,7 @@ export async function crawlAfterArchivist(proposal: LmProposal): Promise<Crawler
     if (settings.crawler.trigger !== "after_archivist") return null;
     const compendium = await compendiumOf(proposal);
     if (!compendium) return null;
-    const entryId = proposal.appliedEntryId;
-    return await runInBackgroundQueue(() =>
-      runCrawler(compendium.id, { entryIds: [entryId], trigger: "after_archivist", chatId: proposal.chatId }),
-    );
+    return await scheduleCrawl(compendium.id, proposal.appliedEntryId, proposal.chatId, waitMs);
   } catch (error) {
     getLorebookManagerRuntime().logger.warn("[lorebook-manager] Crawler after an Archivist change failed: %s", error);
     return null;

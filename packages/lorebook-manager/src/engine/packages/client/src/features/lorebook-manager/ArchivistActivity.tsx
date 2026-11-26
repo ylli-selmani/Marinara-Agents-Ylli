@@ -36,7 +36,23 @@ function runLine(run: LmArchivistRunRecord): string {
   return parts.join(" · ");
 }
 
-export function ArchivistActivity({ chatId }: { chatId: string | null }) {
+/** Lights the chat's Agent activity icon while a run is in flight (Capability API 1.820; older Engines leave it out). */
+function setBusy(chatId: string, busy: boolean) {
+  const host = (
+    globalThis as {
+      __MARINARA_HOST__?: {
+        stores?: {
+          agent?: {
+            getState?: () => { setPackageActivity?: (id: string, chat: string, s: { busy: boolean }) => void };
+          };
+        };
+      };
+    }
+  ).__MARINARA_HOST__;
+  host?.stores?.agent?.getState?.().setPackageActivity?.("lorebook-manager", chatId, { busy });
+}
+
+export function ArchivistActivity({ chatId, title = "Archivist" }: { chatId: string | null; title?: string }) {
   const queryClient = useQueryClient();
   const runsQuery = useQuery({
     queryKey: lmQueryKeys.archivistRuns,
@@ -49,6 +65,7 @@ export function ArchivistActivity({ chatId }: { chatId: string | null }) {
 
   const runNow = async () => {
     setRunning(true);
+    setBusy(chatId, true);
     try {
       const outcome = await runArchivistApi(chatId);
       if (outcome.run?.status === "done") {
@@ -61,6 +78,7 @@ export function ArchivistActivity({ chatId }: { chatId: string | null }) {
       toast.error(error instanceof Error ? error.message : "The Archivist could not run");
     } finally {
       setRunning(false);
+      setBusy(chatId, false);
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.archivistRuns });
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
     }
@@ -69,7 +87,7 @@ export function ArchivistActivity({ chatId }: { chatId: string | null }) {
   return (
     <div className="space-y-1.5 rounded border border-[var(--border)] p-2.5 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-medium text-[var(--foreground)]">Archivist</span>
+        <span className="font-medium text-[var(--foreground)]">{title}</span>
         <button
           type="button"
           disabled={running}

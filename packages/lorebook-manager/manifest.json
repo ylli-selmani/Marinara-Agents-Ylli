@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "capabilityApi": {
     "major": 1,
-    "minor": 390
+    "minor": 820
   },
   "builtAgainst": {
     "engineVersion": "2.5.2",
@@ -30,7 +30,10 @@
         "lorebook-manager"
       ],
       "header": "engine"
-    }
+    },
+    "slots": [
+      "chat-activity"
+    ]
   },
   "files": [
     {
@@ -40,13 +43,13 @@
     },
     {
       "path": "server.mjs",
-      "sha256": "42a9063950fd695bd695d922681e74fb782ce244339a501704caa244f834aa4f",
-      "bytes": 86472
+      "sha256": "e334e8e6ede869aa2b568580b2eb2e0d5c1cf10f638f84792b0668ff47f6fdf7",
+      "bytes": 90404
     },
     {
       "path": "client.js",
-      "sha256": "3a7c6d1567156e7666b8066c83b7ee1b1789978ef67fcf606faf4f8cd1726a5a",
-      "bytes": 221005
+      "sha256": "0e481cb1b61b1222d8c064192729f250eee311525252fca7ec1c0271ff03d7f3",
+      "bytes": 226996
     }
   ],
   "permissions": [

@@ -1,3 +1,4 @@
+import { LM_RELATION_VALUES } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
   LmProposal,
   LmProposalInput,
@@ -89,8 +90,9 @@ function resolveCrawlerAdditions(
   current: Record<string, unknown>,
   source: LmProposal["source"],
 ): Record<string, unknown> {
-  const { addKeys, addLinks, ...fields } = patch;
+  const { addKeys, removeKeys, addLinks, ...fields } = patch;
   const resolved: Record<string, unknown> = { ...fields };
+  if (source === "crawler" && resolved.constant === false && current.constant !== true) delete resolved.constant;
   if (source === "crawler") {
     // The Crawler only fills a blank summary or tag: one written while its suggestion waited stays.
     for (const field of ["description", "tag"] as const) {
@@ -99,12 +101,15 @@ function resolveCrawlerAdditions(
       }
     }
   }
-  if (Array.isArray(addKeys)) {
+  if (Array.isArray(addKeys) || Array.isArray(removeKeys)) {
+    const removed = new Set(
+      (Array.isArray(removeKeys) ? removeKeys : []).filter((key) => typeof key === "string").map(comparableFact),
+    );
     const keys = Array.isArray(current.keys)
-      ? current.keys.filter((key): key is string => typeof key === "string")
+      ? current.keys.filter((key): key is string => typeof key === "string" && !removed.has(comparableFact(key)))
       : [];
     const known = new Set(keys.map(comparableFact));
-    for (const key of addKeys) {
+    for (const key of Array.isArray(addKeys) ? addKeys : []) {
       if (typeof key !== "string" || !comparableFact(key) || known.has(comparableFact(key))) continue;
       known.add(comparableFact(key));
       keys.push(key);
@@ -124,6 +129,56 @@ function resolveCrawlerAdditions(
     resolved.relationships = relationships;
   }
   return resolved;
+}
+
+const EDITABLE_TEXT = new Set(["description", "tag"]);
+const EDITABLE_LISTS = new Set(["addKeys", "removeKeys", "newFacts", "keys"]);
+const EDITABLE_RELATIONS = new Set(LM_RELATION_VALUES.filter((value) => value !== "represents"));
+
+/**
+ * A suggestion as the person trimmed it in Review. It may only shrink: a field left out is dropped, a list keeps
+ * only items it had, a link keeps its target but may change its relation, a summary or tag may be reworded. Anything
+ * else is applied as suggested or not at all.
+ */
+export function narrowPatch(original: Record<string, unknown>, edited: unknown): Record<string, unknown> {
+  const next = asRecord(edited);
+  const result: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(original)) {
+    if (!(field in next)) continue;
+    const proposed = next[field];
+    if (EDITABLE_TEXT.has(field)) {
+      const text = typeof proposed === "string" ? proposed.replace(/\s+/gu, " ").trim() : "";
+      if (text) result[field] = field === "tag" ? text.toLowerCase().slice(0, 40) : text.slice(0, 400);
+      continue;
+    }
+    if (EDITABLE_LISTS.has(field)) {
+      const allowed = new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === "string"));
+      const kept = [...new Set((Array.isArray(proposed) ? proposed : []).filter((item) => allowed.has(item)))];
+      if (kept.length > 0) result[field] = kept;
+      continue;
+    }
+    if (field === "addLinks") {
+      const byKey = new Map(
+        (Array.isArray(value) ? value : [])
+          .map((link) => asRecord(link))
+          .filter((link) => typeof link.key === "string")
+          .map((link) => [link.key as string, link] as const),
+      );
+      const kept: Record<string, unknown>[] = [];
+      for (const raw of Array.isArray(proposed) ? proposed : []) {
+        const link = asRecord(raw);
+        const known = typeof link.key === "string" ? byKey.get(link.key) : undefined;
+        if (!known || kept.some((item) => item.key === link.key)) continue;
+        const relation =
+          typeof link.relation === "string" && EDITABLE_RELATIONS.has(link.relation) ? link.relation : known.relation;
+        kept.push({ ...known, relation });
+      }
+      if (kept.length > 0) result[field] = kept;
+      continue;
+    }
+    result[field] = value;
+  }
+  return result;
 }
 
 function factsOf(patch: Record<string, unknown>): string[] {
@@ -252,13 +307,22 @@ export async function dismissProposal(documents: LorebookManagerDocumentStore, i
  * Activity can offer Undo later. The Engine refuses a locked entry; that error is reported, and the suggestion stays
  * pending.
  */
-export async function applyProposal(runtime: LorebookManagerRuntimeHost, id: string): Promise<LmProposal> {
+export async function applyProposal(
+  runtime: LorebookManagerRuntimeHost,
+  id: string,
+  /** The suggestion as trimmed in Review; see `narrowPatch`. The applied suggestion keeps this version. */
+  edits?: unknown,
+): Promise<LmProposal> {
   const documents = runtime.persistence.documents;
   const { createLorebookEntry, updateLorebookEntry, listLorebooks } = runtime.resources;
   if (typeof createLorebookEntry !== "function" || typeof updateLorebookEntry !== "function") {
     throw new CompendiumStoreError("Applying suggestions needs a newer Marinara Engine (Capability API 1.839)", 501);
   }
-  const proposal = await loadPending(documents, id);
+  const loaded = await loadPending(documents, id);
+  const proposal = edits === undefined ? loaded : { ...loaded, patch: narrowPatch(loaded.patch, edits) };
+  if (Object.keys(proposal.patch).length === 0) {
+    throw new CompendiumStoreError("Nothing is left to apply; dismiss the suggestion instead", 400);
+  }
   const decidedAt = new Date().toISOString();
 
   if (proposal.kind === "create_entry") {

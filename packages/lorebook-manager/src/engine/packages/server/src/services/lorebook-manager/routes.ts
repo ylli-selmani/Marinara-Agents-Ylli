@@ -562,7 +562,8 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.post("/proposals/:id/apply", async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
-      const proposal = await applyProposal(getLorebookManagerRuntime(), id);
+      const body = (request.body ?? {}) as { patch?: unknown };
+      const proposal = await applyProposal(getLorebookManagerRuntime(), id, body.patch);
       // An applied Archivist change gets tidied in the background when the Crawler runs after the Archivist.
       void crawlAfterArchivist(proposal);
       return { proposal };

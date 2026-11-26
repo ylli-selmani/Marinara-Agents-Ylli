@@ -62,6 +62,42 @@ function ConnectionSelect({
   );
 }
 
+/** Blank = the model's own default. Precedent: NumberInput here, with a placeholder for the blank state. */
+function TemperatureInput({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: number | null;
+  disabled?: boolean;
+  onChange: (value: number | null) => void;
+}) {
+  return (
+    <label
+      className="flex items-center gap-1.5"
+      title="Leave blank for the model's own default. Google asks Gemini 3 to keep 1.0; reasoning models ignore it."
+    >
+      <span className="text-[var(--muted-foreground)]">Temperature</span>
+      <input
+        type="number"
+        min={0}
+        max={2}
+        step={0.05}
+        disabled={disabled}
+        placeholder="Model default"
+        value={value ?? ""}
+        onChange={(event) => {
+          const raw = event.target.value;
+          const next = Number(raw);
+          if (!raw.trim()) onChange(null);
+          else if (Number.isFinite(next)) onChange(next);
+        }}
+        className="mari-chrome-field h-8 w-28 rounded px-2 text-xs tabular-nums"
+      />
+    </label>
+  );
+}
+
 function NumberInput({
   label,
   title,
@@ -153,13 +189,13 @@ export function ArchivistFields({
         />
         <span className="-ml-1.5 text-[var(--muted-foreground)]">replies</span>
         <NumberInput
-          label="Leave unread"
-          title="The newest messages it never reads, so a swipe can't write lore."
-          value={value.unreadMessages}
-          min={1}
-          max={10}
+          label="Read behind"
+          title="Counts AI replies: 0 reads the newest reply, 1 waits one reply. A reply it hasn't read can still be swiped without writing lore."
+          value={value.readBehind}
+          min={0}
+          max={5}
           disabled={disabled}
-          onChange={(next) => onChange("unreadMessages", next)}
+          onChange={(next) => onChange("readBehind", next)}
         />
         <ConnectionSelect
           value={value.connectionId}
@@ -168,11 +204,28 @@ export function ArchivistFields({
           emptyLabel="Agents' default, then the chat's"
         />
       </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <NumberInput
+          label="Max tokens"
+          title="The longest answer the model may give. A thinking model spends part of it reasoning; raise it when runs say the answer was cut off."
+          value={value.maxTokens}
+          min={512}
+          max={65536}
+          disabled={disabled}
+          onChange={(next) => onChange("maxTokens", next)}
+        />
+        <TemperatureInput
+          value={value.temperature}
+          disabled={disabled}
+          onChange={(next) => onChange("temperature", next)}
+        />
+      </div>
       <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
         After every few replies, the Archivist reads what happened and suggests new facts for existing entries and new
-        entries for people, places and things that matter. One model call per run, in the background; your replies never
-        wait for it. Locked entries are never touched. Suggestions wait in Review. Automatic mode applies them once Undo
-        is in; until then it works like Suggest.
+        entries for people, places and things that matter. Read behind keeps the newest replies unread until they
+        settle. One model call per run, in the background; your replies never wait for it. Locked entries are never
+        touched. Suggestions wait in Review. Automatic mode applies them once Undo is in; until then it works like
+        Suggest.
       </p>
     </div>
   );
@@ -222,10 +275,27 @@ export function CrawlerFields({
           emptyLabel="Same as the Archivist"
         />
       </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <NumberInput
+          label="Max tokens"
+          title="The longest answer the model may give for one run. A thinking model spends part of it reasoning; raise it when runs say the answer was cut off."
+          value={value.maxTokens}
+          min={512}
+          max={65536}
+          disabled={disabled}
+          onChange={(next) => onChange("maxTokens", next)}
+        />
+        <TemperatureInput
+          value={value.temperature}
+          disabled={disabled}
+          onChange={(next) => onChange("temperature", next)}
+        />
+      </div>
       <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-        The Crawler tidies entries: a short summary, keywords, a tag, and links to the entries and cards they mention.
-        It runs on the entries an applied Archivist change touched, or on a whole Compendium from Review (Tidy entries).
-        Its suggestions wait in Review too.
+        The Crawler tidies entries: a short summary and a tag where they're missing, keyword fixes (a needed alias in, a
+        too-broad key like "Ten" out), and specific links to the entries and cards they mention. It runs on the entries
+        applied Archivist changes touched (gathered for 20 seconds, then one run), or on a whole Compendium from Review
+        (Tidy entries). Its suggestions wait in Review, where you can trim them before applying.
       </p>
     </div>
   );

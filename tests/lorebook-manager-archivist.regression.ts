@@ -183,7 +183,7 @@ async function main() {
     const compendium = await createCompendium(documents, { name: "Fae", lorebookIds: ["court", "cast"] });
     await setChatCompendiumBinding(documents, "chat-1", compendium.id);
     await refreshLiveClaims();
-    await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 2, unreadMessages: 2 } });
+    await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 2, readBehind: 1 } });
 
     // ── Not due: two messages are left unread, so only one reply is settled. ──
     messages = [
@@ -199,7 +199,7 @@ async function main() {
     messages = [...messages, message("u5", "user", "And then?")];
     assert.equal((await runArchivist("chat-1")).status, "reply_pending");
 
-    // ── Due: u1..a4 settled (u5 + a6 unread), two replies. ──
+    // ── Due: Read Behind 1 leaves the newest reply (a6) unread; u1..u5 are settled. ──
     messages = [...messages, message("a6", "assistant", "The night deepens.")];
     answer = (prompt) =>
       JSON.stringify({
@@ -239,7 +239,7 @@ async function main() {
     assert.deepEqual(update.patch, { newFacts: ["Syliveera now serves the Seelie Queen."] }, "known facts dropped");
     assert.deepEqual(
       update.sourceMessageRefs.map((ref) => `${ref.messageId}:${ref.swipeIndex}`),
-      ["u1:0", "a2:0", "u3:0", "a4:2"],
+      ["u1:0", "a2:0", "u3:0", "a4:2", "u5:0"],
       "sources carry the visible swipe",
     );
     const brannoc = pending.find((p) => p.entryName === "Brannoc the Smith")!;
@@ -360,7 +360,7 @@ async function main() {
     assert.ok(runs.length >= 5 && runs[0]!.trigger === "manual", "runs recorded, newest first");
 
     // ── A long chat: the first run reads the newest window; later runs read oldest first and skip nothing. ──
-    await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 1, unreadMessages: 2 } });
+    await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 1, readBehind: 1 } });
     await setChatCompendiumBinding(documents, "chat-long", compendium.id);
     await refreshLiveClaims();
     answer = () => '{"updates": [], "creates": []}';
@@ -371,7 +371,7 @@ async function main() {
     messages = lines(0, 30);
     const firstLong = await runArchivist("chat-long", { force: true });
     assert.equal(firstLong.run!.messageCount, 24);
-    assert.match(firstLong.run!.detail ?? "", /First run: read the newest 24; 4 older messages left out/);
+    assert.match(firstLong.run!.detail ?? "", /First run: read the newest 24; 5 older messages left out/);
     assert.ok(modelCalls.at(-1)!.prompt.includes("Line 27.") && !modelCalls.at(-1)!.prompt.includes("Line 3."));
     assert.equal(firstLong.more, false);
     messages = [...messages, ...lines(30, 40)];
@@ -379,11 +379,11 @@ async function main() {
     assert.equal(secondLong.run!.messageCount, 24);
     assert.equal(secondLong.more, true, "the rest waits for the next run");
     assert.match(secondLong.run!.detail ?? "", /16 more messages wait/);
-    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 28.") && !modelCalls.at(-1)!.prompt.includes("Line 52."));
+    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 29.") && !modelCalls.at(-1)!.prompt.includes("Line 53."));
     const thirdLong = await runArchivist("chat-long", { force: true });
     assert.equal(thirdLong.run!.messageCount, 16);
     assert.equal(thirdLong.more, false);
-    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 52.") && modelCalls.at(-1)!.prompt.includes("Line 67."));
+    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 53.") && modelCalls.at(-1)!.prompt.includes("Line 68."));
     answer = () => '{"updates": [], "creates": []}';
 
     // ── The contributor arms the job on a real turn, never on a preview; stopping clears it. ──

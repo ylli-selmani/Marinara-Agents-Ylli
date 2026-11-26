@@ -2,6 +2,7 @@ import React, { useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "marinara:host";
+import { ChatActivityCard } from "./ChatActivityCard";
 import { LorebookManagerDetail } from "./LorebookManagerDetail";
 import type { CapabilityElement } from "./types";
 
@@ -59,6 +60,14 @@ function CapabilityRoot({ element }: { element: CapabilityElement }) {
 
   const props = element.capabilityProps ?? {};
   const view = element.getAttribute("view");
+  // The chat's Agent activity panel (Capability API 1.820).
+  if (view === "activity") {
+    return (
+      <LorebookManagerErrorBoundary element={element}>
+        <ChatActivityCard props={props} />
+      </LorebookManagerErrorBoundary>
+    );
+  }
   if (view !== "detail") return null;
 
   return (

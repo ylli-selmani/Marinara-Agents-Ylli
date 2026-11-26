@@ -26,7 +26,7 @@ function formatWhen(iso: string): string {
 const SEMANTIC_STATUS_LABEL: Record<NonNullable<LmLiveRunRecord["semantic"]>["status"], string> = {
   off: "",
   used: "Meaning match",
-  no_vectors: "Meaning match: no vectors yet",
+  no_vectors: "Meaning match: no vectors yet, keywords only",
   timeout: "Meaning match: timed out, keywords only",
   error: "Meaning match failed, keywords only",
 };
@@ -54,7 +54,9 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
       </div>
       {semantic ? (
         <p className="text-[0.6875rem] text-[var(--muted-foreground)]" title={semantic.detail ?? undefined}>
-          {SEMANTIC_STATUS_LABEL[semantic.status]}
+          {semantic.status === "no_vectors" && semantic.detail
+            ? `Meaning match: ${semantic.detail}`
+            : SEMANTIC_STATUS_LABEL[semantic.status]}
           {semantic.status === "used" || semantic.status === "timeout" ? ` · ${semantic.embedMs} ms` : ""}
           {semantic.vectorCount > 0 ? ` · ${semantic.vectorCount} vectors` : ""}
           {semantic.missingCount > 0 ? ` · ${semantic.missingCount} still vectorizing` : ""}

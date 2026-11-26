@@ -28,6 +28,8 @@ export interface LmLorebookSummary {
   characterIds: string[];
   personaIds: string[];
   loaded: boolean;
+  /** The book's Vectors switch is off (`excludeFromVectorization`): its entries never match by meaning. */
+  vectorsOff?: boolean;
 }
 
 export interface LmEntryNode {

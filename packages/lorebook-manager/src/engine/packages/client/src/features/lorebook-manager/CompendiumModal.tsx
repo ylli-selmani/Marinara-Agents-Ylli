@@ -165,6 +165,10 @@ export function CompendiumModal({
     id,
     book: lorebooksById.get(id) ?? null,
   }));
+  // Books whose Vectors switch is off: known from the summaries right away, and from the last Vectorize missing run.
+  const vectorsOffBooks = indexStatus
+    ? indexStatus.excludedBooks
+    : selectedBookRows.filter(({ book }) => book?.vectorsOff === true).map(({ id, book }) => book?.name ?? id);
 
   const handleAddLinkedCast = async () => {
     if (lorebookIds.length === 0) {
@@ -552,10 +556,10 @@ export function CompendiumModal({
                     {indexStatus.engineVectors > 0 ? ` · ${indexStatus.engineVectors} reused from the lorebooks` : ""}
                   </span>
                 ) : null}
-                {indexStatus && indexStatus.excludedBooks.length > 0 ? (
+                {vectorsOffBooks.length > 0 ? (
                   <span className="basis-full text-[0.6875rem] text-amber-400">
-                    Vectors are off in {indexStatus.excludedBooks.join(", ")}, so those entries only match by keyword.
-                    Turn on Vectors in the lorebook editor to include them.
+                    Vectors are off in {vectorsOffBooks.join(", ")}, so those entries only match by keyword. Turn on
+                    Vectors in the lorebook editor to include them.
                   </span>
                 ) : null}
                 {!indexStatus ? (

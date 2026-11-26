@@ -241,6 +241,7 @@ export async function buildLorebookManagerGraphPayload(
       characterIds: uniqueNonEmpty(bookData.characterId, bookData.characterIds),
       personaIds: uniqueNonEmpty(bookData.personaId, bookData.personaIds),
       loaded,
+      vectorsOff: bookData.excludeFromVectorization === true,
     });
 
     if (!loaded) continue;

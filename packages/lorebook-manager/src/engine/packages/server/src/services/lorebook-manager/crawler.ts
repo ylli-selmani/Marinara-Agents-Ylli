@@ -57,9 +57,15 @@ const AFTER_ARCHIVIST_MAX_WAITS = 3;
 const stateDocId = (compendiumId: string) => `crawler_state:${compendiumId}`;
 const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
 
-/** What the model read of an entry: its name and content. A change to either makes the entry untidied again. */
+/**
+ * Bumped when the Crawler's rules change enough to look again: every entry is untidied once (2: round 5's prompt, with
+ * key removal, "always on" and no related_to). Costs nothing until Tidy entries runs.
+ */
+const CRAWLER_RULES_VERSION = 2;
+
+/** What the model read of an entry: its name and content, under these rules. A change to either untidies it again. */
 export function crawlHash(entry: Pick<LmEntryNode, "name" | "content">): string {
-  const text = `${entry.name}\n${entry.content}`;
+  const text = `${CRAWLER_RULES_VERSION}\n${entry.name}\n${entry.content}`;
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index++) {
     hash ^= text.charCodeAt(index);

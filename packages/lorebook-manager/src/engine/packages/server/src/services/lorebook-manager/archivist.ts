@@ -357,9 +357,11 @@ function trimWindow(
 
 export const ARCHIVIST_SYSTEM = [
   "You keep a roleplay's lorebook up to date. You read recent story messages and the lorebook entries they touch.",
-  "Report only lasting facts these messages establish: who someone is or has become, what happened to them, where",
-  "things and people are, relationships, possessions, places, factions, rules of the world.",
-  "Skip moods, passing actions, dialogue, guesses and anything an entry already says.",
+  "Report only lasting facts these messages establish: who someone is or has become, where things and people are,",
+  "relationships, possessions, places, factions, rules of the world.",
+  'Skip moods, passing actions, dialogue, guesses and anything an entry already says. Skip events: "Naruto returned',
+  'after two years" is a story beat for the chat\'s memory, not lore; "Naruto is back in Konoha" may be one.',
+  "File a fact on the entry it is about: a person's change goes on the person, not on the place it happened.",
   "updates: new facts for an existing entry, by its id from <entries> or <directory>. Each fact is one short,",
   "self-contained sentence in narrator voice.",
   "creates: a new entry only for a named person, place, item, faction or idea that matters beyond this scene and is",

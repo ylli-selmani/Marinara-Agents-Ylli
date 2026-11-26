@@ -5,26 +5,30 @@ import { toast } from "sonner";
 import { Loader2, Save, Sparkles, Trash2, X } from "lucide-react";
 import {
   collectLinkedCastForLorebooks,
-  DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS,
   normalizeBookTokenBudgets,
 } from "../../../../shared/src/features/agents/lorebook-manager/compendium-helpers.js";
+import {
+  DEFAULT_RECALL_SETTINGS,
+  normalizeRecallOverrides,
+  normalizeRecallSettings,
+} from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import type {
   LmCompendium,
-  LmCompendiumRetrievalSettings,
   LmEntityNode,
   LmEntryNode,
   LmLorebookSummary,
+  LmRecallSettings,
   LmSemanticIndexStatus,
-  LmStage2Gate,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
   fetchLorebookManagerGraph,
-  fetchTextConnections,
+  fetchSettings,
   indexSemanticApi,
   lmQueryKeys,
   type LmCompendiumSavePayload,
 } from "./api";
 import { confirmWithHostOrBrowser, getHostComponents } from "./host-components";
+import { RecallFields, type RecallKey } from "./RecallFields";
 
 const MODAL_STYLE = `
 [data-lm-compendium-body] {
@@ -83,26 +87,16 @@ export function CompendiumModal({
   // Latest committed ids, read after the awaited cast scan so the "added N" counts match what the setters merge into.
   const latestCastRef = useRef({ characterIds: [] as string[], personaIds: [] as string[] });
   latestCastRef.current = { characterIds, personaIds };
-  const [tokenBudget, setTokenBudget] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget);
-  const [queryMessageCount, setQueryMessageCount] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.queryMessageCount);
-  const [maxOneHop, setMaxOneHop] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop);
-  const [maxTextHits, setMaxTextHits] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits);
-  const [respectBookBudgets, setRespectBookBudgets] = useState(
-    DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.respectBookBudgets,
-  );
+  // Only what this Compendium sets itself; every other Recall field follows the defaults in the Settings tab.
+  const [recallOverrides, setRecallOverrides] = useState<Partial<LmRecallSettings>>({});
   const [bookTokenBudgets, setBookTokenBudgets] = useState<Record<string, number>>({});
-  const [semanticEnabled, setSemanticEnabled] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticEnabled);
-  const [semanticThreshold, setSemanticThreshold] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold);
-  const [stage2Gate, setStage2Gate] = useState<LmStage2Gate>(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.stage2Gate);
-  const [librarianConnectionId, setLibrarianConnectionId] = useState<string | null>(
-    DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.librarianConnectionId,
+  const settingsQuery = useQuery({ queryKey: lmQueryKeys.settings, queryFn: fetchSettings, enabled: open });
+  const recallDefaults = settingsQuery.data?.recall ?? DEFAULT_RECALL_SETTINGS;
+  const recall = useMemo(
+    () => normalizeRecallSettings({ ...recallDefaults, ...recallOverrides }, recallDefaults),
+    [recallDefaults, recallOverrides],
   );
-  const connectionsQuery = useQuery({
-    queryKey: lmQueryKeys.connections,
-    queryFn: fetchTextConnections,
-    enabled: open && stage2Gate === "librarian",
-    staleTime: 60_000,
-  });
+  const overriddenKeys = useMemo(() => new Set(Object.keys(recallOverrides) as RecallKey[]), [recallOverrides]);
   const [indexing, setIndexing] = useState(false);
   const [indexStatus, setIndexStatus] = useState<LmSemanticIndexStatus | null>(null);
   const [discoveringCast, setDiscoveringCast] = useState(false);
@@ -115,32 +109,16 @@ export function CompendiumModal({
       setLorebookIds(compendium.lorebookIds);
       setCharacterIds(compendium.characterIds);
       setPersonaIds(compendium.personaIds);
-      setTokenBudget(compendium.retrievalSettings.tokenBudget);
-      setQueryMessageCount(compendium.retrievalSettings.queryMessageCount);
-      setMaxOneHop(compendium.retrievalSettings.maxOneHop);
-      setMaxTextHits(compendium.retrievalSettings.maxTextHits);
-      setRespectBookBudgets(compendium.retrievalSettings.respectBookBudgets);
+      setRecallOverrides(compendium.overrides?.recall ?? {});
       setBookTokenBudgets(compendium.retrievalSettings.bookTokenBudgets);
-      setSemanticEnabled(compendium.retrievalSettings.semanticEnabled);
-      setSemanticThreshold(compendium.retrievalSettings.semanticThreshold);
-      setStage2Gate(compendium.retrievalSettings.stage2Gate);
-      setLibrarianConnectionId(compendium.retrievalSettings.librarianConnectionId);
     } else {
       setName("");
       setDescription("");
       setLorebookIds([]);
       setCharacterIds([]);
       setPersonaIds([]);
-      setTokenBudget(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget);
-      setQueryMessageCount(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.queryMessageCount);
-      setMaxOneHop(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop);
-      setMaxTextHits(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits);
-      setRespectBookBudgets(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.respectBookBudgets);
+      setRecallOverrides({});
       setBookTokenBudgets({});
-      setSemanticEnabled(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticEnabled);
-      setSemanticThreshold(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold);
-      setStage2Gate(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.stage2Gate);
-      setLibrarianConnectionId(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.librarianConnectionId);
     }
     setIndexStatus(null);
   }, [open, compendium]);
@@ -258,18 +236,6 @@ export function CompendiumModal({
     for (const bookId of lorebookIds) {
       if (normalizedBudgets[bookId]) filteredBookBudgets[bookId] = normalizedBudgets[bookId];
     }
-    const retrievalSettings: LmCompendiumRetrievalSettings = {
-      tokenBudget: Math.max(100, Math.min(128000, Math.round(tokenBudget))),
-      queryMessageCount: Math.max(1, Math.min(10, Math.round(queryMessageCount))),
-      maxOneHop: Math.max(0, Math.min(20, Math.round(maxOneHop))),
-      maxTextHits: Math.max(0, Math.min(25, Math.round(maxTextHits))),
-      respectBookBudgets,
-      bookTokenBudgets: filteredBookBudgets,
-      semanticEnabled,
-      semanticThreshold: Math.max(0.05, Math.min(0.95, Math.round(semanticThreshold * 100) / 100)),
-      stage2Gate,
-      librarianConnectionId: stage2Gate === "librarian" ? librarianConnectionId : null,
-    };
     await onSave(
       {
         name: cleanName,
@@ -277,7 +243,8 @@ export function CompendiumModal({
         lorebookIds,
         characterIds,
         personaIds,
-        retrievalSettings,
+        overrides: { recall: normalizeRecallOverrides(recallOverrides) },
+        bookTokenBudgets: filteredBookBudgets,
         expectedRevision: compendium?.revision,
       },
       compendium?.id,
@@ -448,118 +415,42 @@ export function CompendiumModal({
         </div>
 
         <div className="space-y-2.5 rounded-lg border border-[var(--border)] bg-[var(--background)]/30 p-3">
-          <div className="font-medium text-[var(--foreground)]">Retrieval & Token Budgets</div>
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-1.5">
-              <span className="text-[var(--muted-foreground)]">Token budget</span>
-              <input
-                type="number"
-                min={100}
-                max={128000}
-                step={1}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <span className="block font-medium text-[var(--foreground)]">Retrieval & Token Budgets</span>
+              <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                {overriddenKeys.size === 0
+                  ? "Follows the defaults from the Settings tab. Change a field to set this Compendium's own."
+                  : `This Compendium sets ${overriddenKeys.size} of its own; the rest follow the Settings tab.`}
+              </span>
+            </div>
+            {overriddenKeys.size > 0 ? (
+              <button
+                type="button"
                 disabled={saving}
-                value={tokenBudget}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  if (Number.isFinite(next)) setTokenBudget(next);
-                }}
-                className="mari-chrome-field h-8 w-24 rounded px-2 text-xs tabular-nums"
-              />
-            </label>
-            <label
-              className="flex items-center gap-1.5"
-              title="Live retrieval matches this many of the latest messages (yours and the replies)."
-            >
-              <span className="text-[var(--muted-foreground)]">Messages to match</span>
-              <input
-                type="number"
-                min={1}
-                max={10}
-                step={1}
-                disabled={saving}
-                value={queryMessageCount}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  if (Number.isFinite(next)) setQueryMessageCount(next);
-                }}
-                className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
-              />
-            </label>
-            <label className="flex items-center gap-1.5">
-              <span className="text-[var(--muted-foreground)]">Max 1-hop bonus</span>
-              <input
-                type="number"
-                min={0}
-                max={20}
-                step={1}
-                disabled={saving}
-                value={maxOneHop}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  if (Number.isFinite(next)) setMaxOneHop(next);
-                }}
-                className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
-              />
-            </label>
-            <label className="flex items-center gap-1.5">
-              <span className="text-[var(--muted-foreground)]">Max text hits</span>
-              <input
-                type="number"
-                min={0}
-                max={25}
-                step={1}
-                disabled={saving}
-                value={maxTextHits}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  if (Number.isFinite(next)) setMaxTextHits(next);
-                }}
-                className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
-              />
-            </label>
+                onClick={() => setRecallOverrides({})}
+                className="mari-chrome-control mari-chrome-control--small"
+              >
+                Use the defaults
+              </button>
+            ) : null}
           </div>
-
-          <label className="flex items-center gap-2 text-[var(--muted-foreground)]">
-            <input
-              type="checkbox"
-              disabled={saving}
-              checked={respectBookBudgets}
-              onChange={(event) => setRespectBookBudgets(event.target.checked)}
-            />
-            <span>Respect each lorebook&apos;s own token budget when no override is set</span>
-          </label>
-
-          <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
-            <label className="flex items-center gap-2 text-[var(--muted-foreground)]">
-              <input
-                type="checkbox"
-                disabled={saving}
-                checked={semanticEnabled}
-                onChange={(event) => setSemanticEnabled(event.target.checked)}
-              />
-              <span>Also find entries by meaning, not just keywords (needs an embedding model)</span>
-            </label>
-            {semanticEnabled ? (
-              <div className="flex flex-wrap items-center gap-3">
-                <label
-                  className="flex items-center gap-1.5"
-                  title="How close in meaning an entry has to be (0–1). Lower finds more, higher finds less."
-                >
-                  <span className="text-[var(--muted-foreground)]">Min. similarity</span>
-                  <input
-                    type="number"
-                    min={0.05}
-                    max={0.95}
-                    step={0.05}
-                    disabled={saving}
-                    value={semanticThreshold}
-                    onChange={(event) => {
-                      const next = Number(event.target.value);
-                      if (Number.isFinite(next)) setSemanticThreshold(next);
-                    }}
-                    className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
-                  />
-                </label>
+          <RecallFields
+            value={recall}
+            disabled={saving}
+            onChange={(key, value) => setRecallOverrides((prev) => ({ ...prev, [key]: value }))}
+            inherit={{
+              defaults: recallDefaults,
+              overridden: overriddenKeys,
+              onUseDefault: (key) =>
+                setRecallOverrides((prev) => {
+                  const next = { ...prev };
+                  delete next[key];
+                  return next;
+                }),
+            }}
+            meaningExtra={
+              <>
                 <button
                   type="button"
                   disabled={saving || indexing || lorebookIds.length === 0}
@@ -587,66 +478,13 @@ export function CompendiumModal({
                   </span>
                 ) : null}
                 {!indexStatus ? (
-                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                  <span className="basis-full text-[0.6875rem] text-[var(--muted-foreground)]">
                     Missing vectors also fill in by themselves after the first turns.
                   </span>
                 ) : null}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
-            {/* Not under meaning match: shared-word hits are checked too, so the gate helps without embeddings. */}
-            <div className="flex flex-wrap items-center gap-3">
-              <label
-                className="flex items-center gap-1.5"
-                title="Entries found only by shared words or by meaning can be noise. A check asks a model which ones fit the scene; anything it can't answer stays in."
-              >
-                <span className="text-[var(--muted-foreground)]">Check loose matches</span>
-                <select
-                  disabled={saving}
-                  value={stage2Gate}
-                  onChange={(event) => setStage2Gate(event.target.value as LmStage2Gate)}
-                  className="mari-chrome-field h-8 rounded px-2 text-xs"
-                >
-                  <option value="instant">Off (fastest)</option>
-                  <option value="decision">Decision model</option>
-                  <option value="librarian">Librarian (language model)</option>
-                </select>
-              </label>
-              {stage2Gate === "librarian" ? (
-                <label className="flex items-center gap-1.5">
-                  <span className="text-[var(--muted-foreground)]">Connection</span>
-                  <select
-                    disabled={saving}
-                    value={librarianConnectionId ?? ""}
-                    onChange={(event) => setLibrarianConnectionId(event.target.value || null)}
-                    className="mari-chrome-field h-8 max-w-[14rem] rounded px-2 text-xs"
-                  >
-                    <option value="">Agents&apos; default, then the chat&apos;s</option>
-                    {(connectionsQuery.data ?? []).map((connection) => (
-                      <option key={connection.id} value={connection.id}>
-                        {connection.name}
-                      </option>
-                    ))}
-                    {/* A saved connection that has since been deleted stays visible, as in Saucelings' picker. */}
-                    {librarianConnectionId &&
-                    connectionsQuery.data &&
-                    !connectionsQuery.data.some((connection) => connection.id === librarianConnectionId) ? (
-                      <option value={librarianConnectionId}>Missing connection</option>
-                    ) : null}
-                  </select>
-                </label>
-              ) : null}
-              {stage2Gate !== "instant" ? (
-                <span className="basis-full text-[0.6875rem] text-[var(--muted-foreground)]">
-                  {stage2Gate === "decision"
-                    ? "Uses the Decision model from Settings. Checks entries found only by shared words or meaning; keyword, constant, location and linked hits are never checked."
-                    : "One short model call per turn, about 1–2 seconds. Checks entries found only by shared words or meaning; keyword, constant, location and linked hits are never checked."}
-                </span>
-              ) : null}
-            </div>
-          </div>
+              </>
+            }
+          />
 
           {selectedBookRows.length > 0 ? (
             <div className="space-y-1.5 border-t border-[var(--border)] pt-2">

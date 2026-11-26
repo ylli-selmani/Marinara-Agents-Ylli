@@ -5,8 +5,9 @@ import type {
   LmProposalStatus,
   LmChatCompendiumBinding,
   LmCompendium,
-  LmCompendiumRetrievalSettings,
   LmGraphPayload,
+  LmRecallSettings,
+  LmSettings,
   LorebookFilterMode,
   LmSemanticIndexStatus,
   LmSemanticRunInfo,
@@ -26,6 +27,7 @@ export const lmQueryKeys = {
   chatBinding: (chatId: string) => ["lorebook-manager", "chat-binding", chatId] as const,
   status: ["lorebook-manager", "status"] as const,
   connections: ["lorebook-manager", "connections"] as const,
+  settings: ["lorebook-manager", "settings"] as const,
   runs: ["lorebook-manager", "runs"] as const,
   proposalsRoot: ["lorebook-manager", "proposals"] as const,
   proposals: (status: LmProposalStatus) => ["lorebook-manager", "proposals", status] as const,
@@ -54,7 +56,9 @@ export interface LmCompendiumSavePayload {
   characterIds: string[];
   personaIds: string[];
   worldMapId?: string | null;
-  retrievalSettings: LmCompendiumRetrievalSettings;
+  /** The Recall fields this Compendium sets itself (replaces the stored ones; {} = follows every default). */
+  overrides: { recall: Partial<LmRecallSettings> };
+  bookTokenBudgets: Record<string, number>;
   expectedRevision?: number;
 }
 
@@ -205,6 +209,48 @@ async function readJson<T>(path: string): Promise<T> {
 
 export async function fetchLiveStatus(): Promise<LmLiveStatus> {
   return readJson<LmLiveStatus>("/status");
+}
+
+export async function fetchSettings(): Promise<LmSettings> {
+  const response = await fetch(`${API_ROOT}/settings`, { credentials: "same-origin", headers: getAdminSecretHeader() });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return ((await response.json()) as { settings: LmSettings }).settings;
+}
+
+export async function saveSettingsApi(input: {
+  recall?: Partial<LmRecallSettings>;
+  expectedRevision?: number;
+}): Promise<LmSettings> {
+  const response = await fetch(`${API_ROOT}/settings`, {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return ((await response.json()) as { settings: LmSettings }).settings;
+}
+
+export async function resetSettingsApi(expectedRevision?: number): Promise<LmSettings> {
+  const response = await fetch(`${API_ROOT}/settings/reset`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ expectedRevision }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return ((await response.json()) as { settings: LmSettings }).settings;
+}
+
+export async function clearLiveRunsApi(): Promise<number> {
+  // No body, so no JSON content type (Fastify refuses an empty JSON body), as in deleteCompendiumApi.
+  const response = await fetch(`${API_ROOT}/runs`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { [CSRF_HEADER]: CSRF_HEADER_VALUE, ...getAdminSecretHeader() },
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return ((await response.json()) as { cleared?: number }).cleared ?? 0;
 }
 
 export async function fetchLiveRuns(): Promise<LmChatRuns[]> {

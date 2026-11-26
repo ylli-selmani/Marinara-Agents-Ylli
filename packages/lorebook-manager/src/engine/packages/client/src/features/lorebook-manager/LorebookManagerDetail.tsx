@@ -18,6 +18,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
 import {
@@ -34,8 +35,10 @@ import type {
   LmEntryNode,
   LmGraphEdge,
   LmGraphPayload,
+  LmRecallSettings,
   LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import { DEFAULT_RECALL_SETTINGS } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import {
   createCompendiumApi,
   deleteCompendiumApi,
@@ -44,6 +47,7 @@ import {
   fetchLiveStatus,
   fetchLorebookManagerGraph,
   fetchProposals,
+  fetchSettings,
   lmQueryKeys,
   patchEntryRelationships,
   patchLorebookEntry,
@@ -57,21 +61,38 @@ import { CompendiumModal } from "./CompendiumModal";
 import { confirmWithHostOrBrowser, getHostComponents } from "./host-components";
 import { FAMILY_META, LorebookGraph } from "./LorebookGraph";
 import { ReviewPanel } from "./ReviewPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { SimulatePanel, type SimGraphHighlight } from "./SimulatePanel";
 import type { CapabilityProps } from "./types";
 
 const MANAGED_BOOKS_STORAGE_KEY = "lm:managed-books:v1";
 const AUTO_SELECT_ENTRY_CEILING = 400;
 const ADHOC_SCOPE_VALUE = "__adhoc__";
-/** Retrieval settings outside any Compendium (whole-library view). */
-const AD_HOC_RETRIEVAL_DEFAULTS = {
-  tokenBudget: 2000,
-  maxOneHop: 6,
-  maxTextHits: 5,
-  respectBookBudgets: true,
-  bookTokenBudgets: undefined,
-  semanticThreshold: undefined,
-} satisfies Partial<LmRetrievalInput>;
+/** Retrieval settings outside any Compendium (whole-library view): the defaults from the Settings tab. */
+function adHocRetrieval(
+  recall: LmRecallSettings = DEFAULT_RECALL_SETTINGS,
+): Pick<
+  LmRetrievalInput,
+  | "tokenBudget"
+  | "maxOneHop"
+  | "maxTextHits"
+  | "respectBookBudgets"
+  | "bookTokenBudgets"
+  | "semanticThreshold"
+  | "extraStopwords"
+  | "bm25Strictness"
+> {
+  return {
+    tokenBudget: recall.tokenBudget,
+    maxOneHop: recall.maxOneHop,
+    maxTextHits: recall.maxTextHits,
+    respectBookBudgets: recall.respectBookBudgets,
+    bookTokenBudgets: undefined,
+    semanticThreshold: undefined,
+    extraStopwords: recall.extraStopwords,
+    bm25Strictness: recall.bm25Strictness,
+  };
+}
 
 const LIBRARY_STYLE = `
 [data-lm-compendium-grid] {
@@ -191,7 +212,7 @@ function writeStoredManagedBooks(ids: readonly string[]): void {
 export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const queryClient = useQueryClient();
   const [surface, setSurface] = useState<"library" | "workbench">("library");
-  const [view, setView] = useState<"graph" | "list" | "simulate" | "activity" | "review">("graph");
+  const [view, setView] = useState<"graph" | "list" | "simulate" | "activity" | "review" | "settings">("graph");
   const [search, setSearch] = useState("");
   const [managedLorebookIds, setManagedLorebookIds] = useState<string[] | null>(() => readStoredManagedBooks());
   const [collapsedLorebookIds, setCollapsedLorebookIds] = useState<Set<string>>(() => new Set());
@@ -213,7 +234,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     activeCharacterIds: [],
     activePersonaId: null,
     activeLocationText: "",
-    ...AD_HOC_RETRIEVAL_DEFAULTS,
+    ...adHocRetrieval(),
   });
   const [simHighlight, setSimHighlight] = useState<SimGraphHighlight | null>(null);
 
@@ -222,6 +243,11 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
     queryFn: fetchCompendiums,
   });
   const liveStatusQuery = useQuery({ queryKey: lmQueryKeys.status, queryFn: fetchLiveStatus, staleTime: 60_000 });
+  const settingsQuery = useQuery({ queryKey: lmQueryKeys.settings, queryFn: fetchSettings });
+  const globalRecall = settingsQuery.data?.recall;
+  // Read through a ref so applyCompendiumSettings keeps its identity (the auto-open effect depends on it).
+  const globalRecallRef = useRef(globalRecall);
+  globalRecallRef.current = globalRecall;
   const pendingProposalsQuery = useQuery({
     queryKey: lmQueryKeys.proposals("pending"),
     queryFn: () => fetchProposals("pending"),
@@ -244,7 +270,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
   const applyCompendiumSettings = useCallback((compendium: LmCompendium | null) => {
     if (!compendium) {
       // Leaving a Compendium: back to the whole-library defaults, keeping the scene inputs.
-      setSimConfig((prev) => ({ ...prev, ...AD_HOC_RETRIEVAL_DEFAULTS }));
+      setSimConfig((prev) => ({ ...prev, ...adHocRetrieval(globalRecallRef.current) }));
       return;
     }
     const charSet = new Set(compendium.characterIds);
@@ -255,6 +281,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       maxTextHits: compendium.retrievalSettings.maxTextHits,
       respectBookBudgets: compendium.retrievalSettings.respectBookBudgets,
       semanticThreshold: compendium.retrievalSettings.semanticThreshold,
+      extraStopwords: compendium.retrievalSettings.extraStopwords,
+      bm25Strictness: compendium.retrievalSettings.bm25Strictness,
       bookTokenBudgets:
         Object.keys(compendium.retrievalSettings.bookTokenBudgets).length > 0
           ? compendium.retrievalSettings.bookTokenBudgets
@@ -262,6 +290,12 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
       activeCharacterIds: prev.activeCharacterIds.filter((id) => charSet.has(id)),
     }));
   }, []);
+
+  // The whole-library view follows the defaults: once they load, and after every save in the Settings tab.
+  const hasActiveCompendium = activeCompendium !== null;
+  useEffect(() => {
+    if (globalRecall && !hasActiveCompendium) setSimConfig((prev) => ({ ...prev, ...adHocRetrieval(globalRecall) }));
+  }, [globalRecall, hasActiveCompendium]);
 
   // When opened inside a chat bound to a Compendium, jump straight into that Compendium once.
   // The host keeps this component mounted across chat switches, so a Compendium that was auto-opened for the
@@ -1030,6 +1064,15 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                   </span>
                 ) : null}
               </button>
+              <button
+                type="button"
+                className="mari-chrome-control mari-chrome-control--small"
+                aria-pressed={view === "settings"}
+                onClick={() => setView("settings")}
+              >
+                <SlidersHorizontal aria-hidden="true" size="0.875rem" />
+                Settings
+              </button>
             </div>
           </div>
 
@@ -1152,6 +1195,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
                   setView("graph");
                 }}
               />
+            ) : view === "settings" ? (
+              <SettingsPanel compendiums={compendiums} />
             ) : view === "review" ? (
               <ReviewPanel
                 payload={payload}

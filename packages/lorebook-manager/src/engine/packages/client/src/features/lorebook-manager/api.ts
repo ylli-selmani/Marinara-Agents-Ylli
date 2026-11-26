@@ -224,7 +224,7 @@ const NON_TEXT_PROVIDERS = new Set(["image_generation", "video_generation", "aud
 
 /** The user's text connections, for the Librarian's connection picker. */
 export async function fetchTextConnections(): Promise<LmConnectionSummary[]> {
-  const response = await fetch("/api/connections", { credentials: "same-origin" });
+  const response = await fetch("/api/connections", { credentials: "same-origin", headers: getAdminSecretHeader() });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   const rows = (await response.json()) as LmConnectionSummary[];
   return Array.isArray(rows) ? rows.filter((row) => !NON_TEXT_PROVIDERS.has(row.provider)) : [];

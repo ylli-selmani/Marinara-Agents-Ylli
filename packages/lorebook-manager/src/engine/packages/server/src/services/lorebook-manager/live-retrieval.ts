@@ -33,6 +33,8 @@ export interface LivePromptContextRequest {
   regenerateMessageId?: string | null;
   /** Where the chat is on its World Maps map this turn (Capability API 1.839). */
   currentLocation?: { locationId: string; path: string; lorebookEntryIds: string[] } | null;
+  /** Peek Prompt or a dry run (Capability API 1.839): the same lore, but no Activity record. */
+  preview?: boolean;
 }
 
 /** The location Stage 1 uses this turn: what the retrieval input needs, plus what the run log shows. */
@@ -322,18 +324,23 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     lorebookIds,
   );
 
-  void recordLiveRun(
-    request.chatId,
-    toLiveRunRecord(
-      compendium,
-      result,
-      new Date().toISOString(),
-      semantic?.info ?? { ...SEMANTIC_OFF },
-      location?.info ?? null,
-    ),
-  ).catch((error) =>
-    runtime.logger.warn("[lorebook-manager] Could not record the retrieval run for chat %s: %s", request.chatId, error),
-  );
+  if (request.preview !== true)
+    void recordLiveRun(
+      request.chatId,
+      toLiveRunRecord(
+        compendium,
+        result,
+        new Date().toISOString(),
+        semantic?.info ?? { ...SEMANTIC_OFF },
+        location?.info ?? null,
+      ),
+    ).catch((error) =>
+      runtime.logger.warn(
+        "[lorebook-manager] Could not record the retrieval run for chat %s: %s",
+        request.chatId,
+        error,
+      ),
+    );
 
   return formatLiveLore(result, payload, { activeCharacterIds, personaId, wrapFormat: request.wrapFormat });
 }

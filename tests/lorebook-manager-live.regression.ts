@@ -211,6 +211,8 @@ async function main() {
     messages = [...window, message("6", "assistant", "Syliveera rises.")];
     const withName = await contributeLiveLore(request);
     assert.match(withName!, /Syliveera greets Ylva coldly\./, "{{user}} becomes the chat's persona");
+    // Peek Prompt: the same lore, and no Activity record (the run count below stays at three).
+    assert.equal(await contributeLiveLore({ ...request, preview: true }), withName, "a preview shows the turn's lore");
     const swipe = await contributeLiveLore({ ...request, regenerateMessageId: "6" });
     assert.doesNotMatch(swipe!, /Syliveera greets/, "a swipe of message 6 doesn't match the swipe it replaces");
 

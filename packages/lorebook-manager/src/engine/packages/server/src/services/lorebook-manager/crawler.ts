@@ -405,6 +405,9 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
       },
     );
     if (options.signal?.aborted) return { status: "failed", run: null };
+    if (completion.finishReason === "length") {
+      return failed("The model's answer was cut off: lower Entries per run in Settings → Crawler");
+    }
     answer = completion.content ? safeParse(completion.content) : null;
   } catch (error) {
     if (options.signal?.aborted) return { status: "failed", run: null };

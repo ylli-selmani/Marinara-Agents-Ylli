@@ -122,6 +122,7 @@ function fire(job: Job): void {
   job.running = runInBackgroundQueue(() => runArchivist(job.chatId, { signal: controller.signal }))
     .then((outcome) => {
       waitForReply = outcome.status === "reply_pending";
+      if (outcome.more) job.again = true;
     })
     .catch((error: unknown) => {
       if (!controller.signal.aborted)
@@ -300,6 +301,8 @@ export async function listArchivistRuns(): Promise<LmArchivistRunRecord[]> {
 export interface ArchivistOutcome {
   status: LmArchivistRunStatus;
   run: LmArchivistRunRecord | null;
+  /** Settled messages are still past the watermark: the job runs again. */
+  more?: boolean;
 }
 
 /** The messages the model can see: user and assistant, not hidden from the AI, not empty. */
@@ -315,17 +318,25 @@ function visibleMessages(messages: readonly LorebookManagerMessageRecord[]): Lor
 const messageText = (message: LorebookManagerMessageRecord) =>
   (message.agentContent ?? message.content ?? "").trim().slice(0, MAX_WINDOW_CHARS);
 
-/** The newest messages past the watermark that fit the prompt, oldest first. */
-function trimWindow(pending: readonly LorebookManagerMessageRecord[]): LorebookManagerMessageRecord[] {
+/**
+ * The messages past the watermark that fit the prompt, in chat order. With a watermark: the oldest ones, so nothing
+ * is skipped (the rest waits for the next run). On a chat's first run: the newest ones, so an old chat's history
+ * isn't archived in dozens of calls.
+ */
+function trimWindow(
+  pending: readonly LorebookManagerMessageRecord[],
+  fromOldest: boolean,
+): LorebookManagerMessageRecord[] {
   const window: LorebookManagerMessageRecord[] = [];
   let chars = 0;
-  for (let index = pending.length - 1; index >= 0 && window.length < MAX_WINDOW_MESSAGES; index--) {
-    const length = messageText(pending[index]!).length;
+  for (let step = 0; step < pending.length && window.length < MAX_WINDOW_MESSAGES; step++) {
+    const message = pending[fromOldest ? step : pending.length - 1 - step]!;
+    const length = messageText(message).length;
     if (window.length > 0 && chars + length > MAX_WINDOW_CHARS) break;
-    window.push(pending[index]!);
+    window.push(message);
     chars += length;
   }
-  return window.reverse();
+  return fromOldest ? window : window.reverse();
 }
 
 export const ARCHIVIST_SYSTEM = [
@@ -476,7 +487,10 @@ export async function runArchivist(
 
   const languageModels = runtime.languageModels;
   if (!languageModels) return quiet("unavailable", "This Engine has no language model host");
-  const window = trimWindow(pending);
+  const firstRun = !state.lastMessageId;
+  const window = trimWindow(pending, !firstRun);
+  const leftForNext = firstRun ? 0 : pending.length - window.length;
+  const olderLeftOut = firstRun ? pending.length - window.length : 0;
 
   // Lookup: Stage 1 over the window, wide open, picks the entries these messages touch.
   const lorebookIds = new Set(compendium.lorebookIds);
@@ -542,6 +556,7 @@ export async function runArchivist(
       { temperature: 0.2, maxTokens: 1_500, signal: backgroundModelSignal(options.signal) },
     );
     if (options.signal?.aborted) return { status: "failed", run: null };
+    if (completion.finishReason === "length") return failed("The model's answer was cut off", modelName);
     answer = completion.content ? safeParse(completion.content) : null;
   } catch (error) {
     if (options.signal?.aborted) return { status: "failed", run: null };
@@ -674,14 +689,21 @@ export async function runArchivist(
     creates += 1;
   }
 
-  const last = settled.at(-1)!;
+  // The first run skips what came before its window; later runs move on only past what they read.
+  const last = firstRun ? settled.at(-1)! : window.at(-1)!;
   await writeState(documents, chatId, stored, {
     lastMessageId: last.id,
     lastMessageAt: last.createdAt,
     failedAt: null,
   });
+  const note =
+    leftForNext > 0
+      ? `${leftForNext} more messages wait for the next run`
+      : olderLeftOut > 0
+        ? `First run: read the newest ${window.length}; ${olderLeftOut} older messages left out`
+        : undefined;
   const run: LmArchivistRunRecord = {
-    ...base("done"),
+    ...base("done", note),
     messageCount: window.length,
     candidateCount: candidates.length,
     updates,
@@ -702,5 +724,5 @@ export async function runArchivist(
     skipped.length,
     run.ms,
   );
-  return { status: "done", run };
+  return { status: "done", run, more: leftForNext > 0 };
 }

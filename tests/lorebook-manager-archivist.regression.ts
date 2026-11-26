@@ -359,6 +359,33 @@ async function main() {
     const runs = await listArchivistRuns();
     assert.ok(runs.length >= 5 && runs[0]!.trigger === "manual", "runs recorded, newest first");
 
+    // ── A long chat: the first run reads the newest window; later runs read oldest first and skip nothing. ──
+    await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 1, unreadMessages: 2 } });
+    await setChatCompendiumBinding(documents, "chat-long", compendium.id);
+    await refreshLiveClaims();
+    answer = () => '{"updates": [], "creates": []}';
+    const lines = (from: number, count: number) =>
+      Array.from({ length: count }, (_, i) =>
+        message(`m${from + i}`, (from + i) % 2 ? "assistant" : "user", `Line ${from + i}.`),
+      );
+    messages = lines(0, 30);
+    const firstLong = await runArchivist("chat-long", { force: true });
+    assert.equal(firstLong.run!.messageCount, 24);
+    assert.match(firstLong.run!.detail ?? "", /First run: read the newest 24; 4 older messages left out/);
+    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 27.") && !modelCalls.at(-1)!.prompt.includes("Line 3."));
+    assert.equal(firstLong.more, false);
+    messages = [...messages, ...lines(30, 40)];
+    const secondLong = await runArchivist("chat-long", { force: true });
+    assert.equal(secondLong.run!.messageCount, 24);
+    assert.equal(secondLong.more, true, "the rest waits for the next run");
+    assert.match(secondLong.run!.detail ?? "", /16 more messages wait/);
+    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 28.") && !modelCalls.at(-1)!.prompt.includes("Line 52."));
+    const thirdLong = await runArchivist("chat-long", { force: true });
+    assert.equal(thirdLong.run!.messageCount, 16);
+    assert.equal(thirdLong.more, false);
+    assert.ok(modelCalls.at(-1)!.prompt.includes("Line 52.") && modelCalls.at(-1)!.prompt.includes("Line 67."));
+    answer = () => '{"updates": [], "creates": []}';
+
     // ── The contributor arms the job on a real turn, never on a preview; stopping clears it. ──
     await saveSettings(documents, { archivist: { mode: "suggest" } });
     const request = { chatId: "chat-1", chatMeta: JSON.parse(ADDED) as Record<string, unknown>, mode: "roleplay" };

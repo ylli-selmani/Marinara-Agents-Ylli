@@ -75,6 +75,7 @@ export function CompendiumModal({
   const latestCastRef = useRef({ characterIds: [] as string[], personaIds: [] as string[] });
   latestCastRef.current = { characterIds, personaIds };
   const [tokenBudget, setTokenBudget] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget);
+  const [queryMessageCount, setQueryMessageCount] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.queryMessageCount);
   const [maxOneHop, setMaxOneHop] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop);
   const [maxTextHits, setMaxTextHits] = useState(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits);
   const [respectBookBudgets, setRespectBookBudgets] = useState(
@@ -92,6 +93,7 @@ export function CompendiumModal({
       setCharacterIds(compendium.characterIds);
       setPersonaIds(compendium.personaIds);
       setTokenBudget(compendium.retrievalSettings.tokenBudget);
+      setQueryMessageCount(compendium.retrievalSettings.queryMessageCount);
       setMaxOneHop(compendium.retrievalSettings.maxOneHop);
       setMaxTextHits(compendium.retrievalSettings.maxTextHits);
       setRespectBookBudgets(compendium.retrievalSettings.respectBookBudgets);
@@ -103,6 +105,7 @@ export function CompendiumModal({
       setCharacterIds([]);
       setPersonaIds([]);
       setTokenBudget(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget);
+      setQueryMessageCount(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.queryMessageCount);
       setMaxOneHop(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop);
       setMaxTextHits(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits);
       setRespectBookBudgets(DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.respectBookBudgets);
@@ -204,6 +207,7 @@ export function CompendiumModal({
     }
     const retrievalSettings: LmCompendiumRetrievalSettings = {
       tokenBudget: Math.max(100, Math.min(128000, Math.round(tokenBudget))),
+      queryMessageCount: Math.max(1, Math.min(10, Math.round(queryMessageCount))),
       maxOneHop: Math.max(0, Math.min(20, Math.round(maxOneHop))),
       maxTextHits: Math.max(0, Math.min(25, Math.round(maxTextHits))),
       respectBookBudgets,
@@ -403,6 +407,25 @@ export function CompendiumModal({
                   if (Number.isFinite(next)) setTokenBudget(next);
                 }}
                 className="mari-chrome-field h-8 w-24 rounded px-2 text-xs tabular-nums"
+              />
+            </label>
+            <label
+              className="flex items-center gap-1.5"
+              title="Live retrieval matches this many of the latest messages (yours and the replies)."
+            >
+              <span className="text-[var(--muted-foreground)]">Messages to match</span>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                step={1}
+                disabled={saving}
+                value={queryMessageCount}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  if (Number.isFinite(next)) setQueryMessageCount(next);
+                }}
+                className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
               />
             </label>
             <label className="flex items-center gap-1.5">

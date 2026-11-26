@@ -3,6 +3,7 @@ import type { LmCompendiumRetrievalSettings, LmEntryNode, LmLorebookSummary } fr
 
 export const DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS: LmCompendiumRetrievalSettings = {
   tokenBudget: 2000,
+  queryMessageCount: 2,
   maxOneHop: 6,
   maxTextHits: 5,
   respectBookBudgets: true,
@@ -33,6 +34,12 @@ export function normalizeCompendiumRetrievalSettings(raw: unknown): LmCompendium
   const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   return {
     tokenBudget: clampInt(record.tokenBudget, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget, 100, 128000),
+    queryMessageCount: clampInt(
+      record.queryMessageCount,
+      DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.queryMessageCount,
+      1,
+      10,
+    ),
     maxOneHop: clampInt(record.maxOneHop, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop, 0, 20),
     maxTextHits: clampInt(record.maxTextHits, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits, 0, 25),
     respectBookBudgets: record.respectBookBudgets !== false,

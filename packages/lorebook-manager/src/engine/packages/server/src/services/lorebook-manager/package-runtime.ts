@@ -39,7 +39,23 @@ export interface LorebookManagerDocumentStore {
   remove(packageId: string, id: string, expectedRevision: number): Promise<boolean>;
 }
 
+export interface LorebookManagerMessageRecord {
+  id: string;
+  role: string;
+  content: string;
+  extra: unknown;
+  createdAt: string;
+  agentContent?: string;
+}
+
+export interface LorebookManagerChatRecord {
+  id: string;
+  characterIds: string[];
+  personaId: string | null;
+}
+
 export interface LorebookManagerRuntimeHost {
+  capabilityApi?: { readonly major: number; readonly minor: number };
   logger: {
     debug(message: string, ...args: unknown[]): void;
     info(message: string, ...args: unknown[]): void;
@@ -50,6 +66,9 @@ export interface LorebookManagerRuntimeHost {
     listCharacters(characterIds?: string[]): Promise<Array<{ id: string; data: unknown; comment: string }>>;
     listPersonas(personaIds?: string[]): Promise<Array<{ id: string; data: unknown }>>;
     listLorebooks(lorebookIds?: string[]): Promise<Array<{ id: string; data: unknown; entries: unknown[] }>>;
+    /** Requires `chat-read`. */
+    listMessages?(chatId: string): Promise<LorebookManagerMessageRecord[]>;
+    getChat?(chatId: string): Promise<LorebookManagerChatRecord | null>;
   };
   persistence: {
     documents: LorebookManagerDocumentStore;

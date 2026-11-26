@@ -28,6 +28,7 @@ import {
   type CreateCompendiumInput,
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
+import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -169,6 +170,10 @@ export interface BuildGraphOptions {
   lorebookIds?: ReadonlySet<string> | null;
   characterIds?: ReadonlySet<string> | null;
   personaIds?: ReadonlySet<string> | null;
+  /** Live retrieval: fetch only the requested books, cards and personas (an absent or empty set loads none). */
+  onlyRequested?: boolean;
+  /** Live retrieval doesn't read mention edges, so skip computing them. */
+  skipMentions?: boolean;
 }
 
 export async function buildLorebookManagerGraphPayload(
@@ -185,10 +190,24 @@ export async function buildLorebookManagerGraphPayload(
   const requestedPersonaIds = options.personaIds ?? null;
 
   const runtime = getLorebookManagerRuntime();
+  const only = options.onlyRequested === true;
+  const idsOrNone = (ids: ReadonlySet<string> | null) => (ids && ids.size > 0 ? [...ids] : null);
   const [rawLorebooks, rawCharacters, rawPersonas] = await Promise.all([
-    runtime.resources.listLorebooks(),
-    runtime.resources.listCharacters(),
-    runtime.resources.listPersonas(),
+    only
+      ? idsOrNone(requestedLorebookIds)
+        ? runtime.resources.listLorebooks(idsOrNone(requestedLorebookIds)!)
+        : Promise.resolve([])
+      : runtime.resources.listLorebooks(),
+    only
+      ? idsOrNone(requestedCharacterIds)
+        ? runtime.resources.listCharacters(idsOrNone(requestedCharacterIds)!)
+        : Promise.resolve([])
+      : runtime.resources.listCharacters(),
+    only
+      ? idsOrNone(requestedPersonaIds)
+        ? runtime.resources.listPersonas(idsOrNone(requestedPersonaIds)!)
+        : Promise.resolve([])
+      : runtime.resources.listPersonas(),
   ]);
 
   const lorebooks: LmLorebookSummary[] = [];
@@ -314,7 +333,7 @@ export async function buildLorebookManagerGraphPayload(
     }
   }
 
-  const mentionEdges = extractMentionEdges(nodes, explicitEdges, extraScanTextByRef);
+  const mentionEdges = options.skipMentions ? [] : extractMentionEdges(nodes, explicitEdges, extraScanTextByRef);
 
   return {
     lorebooks,
@@ -360,6 +379,7 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
     try {
       const body = (request.body ?? {}) as CreateCompendiumInput;
       const compendium = await createCompendium(getLorebookManagerRuntime().persistence.documents, body);
+      await refreshLiveClaimsSafely();
       return reply.code(201).send({ compendium });
     } catch (error) {
       return sendRouteError(reply, error);
@@ -371,6 +391,7 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const body = (request.body ?? {}) as UpdateCompendiumInput;
       const compendium = await updateCompendium(getLorebookManagerRuntime().persistence.documents, id, body);
+      await refreshLiveClaimsSafely();
       return { compendium };
     } catch (error) {
       return sendRouteError(reply, error);
@@ -390,6 +411,7 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
         }
       }
       await deleteCompendium(getLorebookManagerRuntime().persistence.documents, id, expectedRevision);
+      await refreshLiveClaimsSafely();
       return { deleted: true };
     } catch (error) {
       return sendRouteError(reply, error);
@@ -416,6 +438,7 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
         body.compendiumId ?? null,
         typeof body.ifCompendiumId === "string" ? body.ifCompendiumId : null,
       );
+      await refreshLiveClaimsSafely();
       return { binding };
     } catch (error) {
       return sendRouteError(reply, error);

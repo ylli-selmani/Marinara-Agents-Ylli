@@ -665,7 +665,7 @@ const features = [
     category: "misc",
     kind: ["agent"],
     modes: ["conversation", "roleplay", "game"],
-    permissions: ["chat-read", "routes", "storage", "ui"],
+    permissions: ["chat-read", "prompt-context", "routes", "storage", "ui"],
     serverImport: "packages/server/src/services/lorebook-manager/server-entry.ts",
     serverEntry: true,
     clientImport: "packages/client/src/features/lorebook-manager/client-entry.tsx",

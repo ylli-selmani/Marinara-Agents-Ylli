@@ -173,6 +173,8 @@ export interface LmRetrievalResult {
 
 export interface LmCompendiumRetrievalSettings {
   tokenBudget: number;
+  /** Live retrieval matches the last this-many messages (1–10). */
+  queryMessageCount: number;
   maxOneHop: number;
   maxTextHits: number;
   respectBookBudgets: boolean;

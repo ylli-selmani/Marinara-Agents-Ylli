@@ -1,77 +1,12 @@
 import { parseEntityRef } from "./entity-ref.js";
-import type { LmCompendiumRetrievalSettings, LmEntryNode, LmLorebookSummary, LmStage2Gate } from "./schema.js";
+import type { LmEntryNode, LmLorebookSummary } from "./schema.js";
 
-export const DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS: LmCompendiumRetrievalSettings = {
-  tokenBudget: 2000,
-  queryMessageCount: 2,
-  maxOneHop: 6,
-  maxTextHits: 5,
-  respectBookBudgets: true,
-  bookTokenBudgets: {},
-  semanticEnabled: false,
-  semanticThreshold: 0.15,
-  stage2Gate: "instant",
-  librarianConnectionId: null,
-};
-
-const STAGE2_GATES: readonly LmStage2Gate[] = ["instant", "decision", "librarian"];
-
-function clampFloat(value: unknown, fallback: number, min: number, max: number): number {
-  const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-  if (!Number.isFinite(num)) return fallback;
-  return Math.max(min, Math.min(max, Math.round(num * 100) / 100));
-}
-
-function clampInt(value: unknown, fallback: number, min: number, max: number): number {
-  const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-  if (!Number.isFinite(num)) return fallback;
-  return Math.max(min, Math.min(max, Math.round(num)));
-}
-
-export function normalizeBookTokenBudgets(raw: unknown): Record<string, number> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const result: Record<string, number> = {};
-  for (const [bookId, value] of Object.entries(raw as Record<string, unknown>)) {
-    const cleanId = bookId.trim();
-    if (!cleanId) continue;
-    const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-    if (Number.isFinite(num) && num > 0) {
-      result[cleanId] = Math.round(num);
-    }
-  }
-  return result;
-}
-
-export function normalizeCompendiumRetrievalSettings(raw: unknown): LmCompendiumRetrievalSettings {
-  const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  return {
-    tokenBudget: clampInt(record.tokenBudget, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.tokenBudget, 100, 128000),
-    queryMessageCount: clampInt(
-      record.queryMessageCount,
-      DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.queryMessageCount,
-      1,
-      10,
-    ),
-    maxOneHop: clampInt(record.maxOneHop, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxOneHop, 0, 20),
-    maxTextHits: clampInt(record.maxTextHits, DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.maxTextHits, 0, 25),
-    respectBookBudgets: record.respectBookBudgets !== false,
-    bookTokenBudgets: normalizeBookTokenBudgets(record.bookTokenBudgets),
-    semanticEnabled: record.semanticEnabled === true,
-    semanticThreshold: clampFloat(
-      record.semanticThreshold,
-      DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.semanticThreshold,
-      0.05,
-      0.95,
-    ),
-    stage2Gate: STAGE2_GATES.includes(record.stage2Gate as LmStage2Gate)
-      ? (record.stage2Gate as LmStage2Gate)
-      : DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS.stage2Gate,
-    librarianConnectionId:
-      typeof record.librarianConnectionId === "string" && record.librarianConnectionId.trim()
-        ? record.librarianConnectionId.trim()
-        : null,
-  };
-}
+// Retrieval settings moved to settings-helpers.ts with the settings hub; these names stay for older imports.
+export {
+  DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS,
+  normalizeBookTokenBudgets,
+  normalizeCompendiumRetrievalSettings,
+} from "./settings-helpers.js";
 
 /**
  * Collects all Character Card and Persona IDs linked to a chosen set of lorebooks

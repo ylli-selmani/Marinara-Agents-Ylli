@@ -1,11 +1,24 @@
 import { randomUUID } from "node:crypto";
-import { normalizeCompendiumRetrievalSettings } from "../../../../shared/src/features/agents/lorebook-manager/compendium-helpers.js";
+import {
+  diffRecallSettings,
+  migrateLegacyRetrievalSettings,
+  normalizeArchivistOverride,
+  normalizeBookTokenBudgets,
+  normalizeCompendiumOverrides,
+  normalizeRecallOverrides,
+  normalizeRecallSettings,
+  resolveRetrievalSettings,
+} from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import type {
+  LmArchivistOverride,
   LmChatCompendiumBinding,
   LmCompendium,
+  LmCompendiumOverrides,
   LmCompendiumRetrievalSettings,
+  LmRecallSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import type { LorebookManagerDocumentRecord, LorebookManagerDocumentStore } from "./package-runtime.js";
+import { getSettings } from "./settings-store.js";
 
 export const LOREBOOK_MANAGER_PACKAGE_ID = "lorebook-manager";
 export const COMPENDIUM_DOC_KIND = "compendium";
@@ -28,7 +41,17 @@ export interface CreateCompendiumInput {
   characterIds?: string[];
   personaIds?: string[];
   worldMapId?: string | null;
+  /** What this Compendium sets for itself; a group left out follows the defaults. */
+  overrides?: CompendiumOverridesInput;
+  bookTokenBudgets?: Record<string, number>;
+  /** Pre-hub input: fields that differ from the defaults become overrides, `bookTokenBudgets` the per-book budgets. */
   retrievalSettings?: Partial<LmCompendiumRetrievalSettings>;
+}
+
+/** Each group given replaces the stored one wholesale; null clears it (back to the defaults); left out = unchanged. */
+export interface CompendiumOverridesInput {
+  recall?: Partial<LmRecallSettings> | null;
+  archivist?: LmArchivistOverride | null;
 }
 
 export interface UpdateCompendiumInput {
@@ -38,6 +61,12 @@ export interface UpdateCompendiumInput {
   characterIds?: string[];
   personaIds?: string[];
   worldMapId?: string | null;
+  overrides?: CompendiumOverridesInput;
+  bookTokenBudgets?: Record<string, number>;
+  /**
+   * Pre-hub input. Only fields whose value differs from what the Compendium resolves to now become overrides, so a
+   * client that sends the whole object on every save doesn't pin every field.
+   */
   retrievalSettings?: Partial<LmCompendiumRetrievalSettings>;
   expectedRevision?: number;
 }
@@ -57,9 +86,27 @@ function uniqueStrings(value: unknown): string[] {
   return [...seen];
 }
 
-function toCompendium(doc: LorebookManagerDocumentRecord): LmCompendium {
+/**
+ * The stored overrides and per-book budgets. A Compendium saved before the settings hub has only `retrievalSettings`;
+ * it reads as overrides through the migration (lazily: the new shape is written on its next save).
+ */
+function storedSettings(data: Record<string, unknown>): {
+  overrides: LmCompendiumOverrides;
+  bookTokenBudgets: Record<string, number>;
+} {
+  if (data.overrides === undefined && data.retrievalSettings !== undefined) {
+    return migrateLegacyRetrievalSettings(data.retrievalSettings);
+  }
+  return {
+    overrides: normalizeCompendiumOverrides(data.overrides),
+    bookTokenBudgets: normalizeBookTokenBudgets(data.bookTokenBudgets),
+  };
+}
+
+function toCompendium(doc: LorebookManagerDocumentRecord, recallDefaults: Readonly<LmRecallSettings>): LmCompendium {
   const data = asRecord(doc.data);
   const worldMapId = typeof data.worldMapId === "string" && data.worldMapId.trim() ? data.worldMapId.trim() : null;
+  const { overrides, bookTokenBudgets } = storedSettings(data);
   return {
     id: doc.id,
     name: doc.name,
@@ -68,7 +115,8 @@ function toCompendium(doc: LorebookManagerDocumentRecord): LmCompendium {
     characterIds: uniqueStrings(data.characterIds),
     personaIds: uniqueStrings(data.personaIds),
     worldMapId,
-    retrievalSettings: normalizeCompendiumRetrievalSettings(data.retrievalSettings),
+    retrievalSettings: resolveRetrievalSettings(recallDefaults, overrides, bookTokenBudgets),
+    overrides,
     revision: doc.revision,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -80,19 +128,57 @@ function chatBindingDocId(chatId: string): string {
 }
 
 export async function listCompendiums(documents: LorebookManagerDocumentStore): Promise<LmCompendium[]> {
-  const docs = await documents.list(LOREBOOK_MANAGER_PACKAGE_ID, COMPENDIUM_DOC_KIND);
+  const [docs, settings] = await Promise.all([
+    documents.list(LOREBOOK_MANAGER_PACKAGE_ID, COMPENDIUM_DOC_KIND),
+    getSettings(documents),
+  ]);
   return docs
     .filter((doc) => doc.kind === COMPENDIUM_DOC_KIND)
-    .map(toCompendium)
+    .map((doc) => toCompendium(doc, settings.recall))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function getCompendium(documents: LorebookManagerDocumentStore, id: string): Promise<LmCompendium | null> {
   const cleanId = id.trim();
   if (!cleanId) return null;
-  const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, cleanId);
+  const [doc, settings] = await Promise.all([
+    documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, cleanId),
+    getSettings(documents),
+  ]);
   if (!doc || doc.kind !== COMPENDIUM_DOC_KIND) return null;
-  return toCompendium(doc);
+  return toCompendium(doc, settings.recall);
+}
+
+/** Existence only, without reading the settings (bindings check this on every read). */
+async function compendiumExists(documents: LorebookManagerDocumentStore, id: string): Promise<boolean> {
+  const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, id);
+  return doc?.kind === COMPENDIUM_DOC_KIND;
+}
+
+/**
+ * Apply an overrides input to the stored overrides: each group given replaces the stored one (null clears it).
+ * Legacy `retrievalSettings` fields then become overrides only where they differ from `resolvedNow`.
+ */
+function nextOverrides(
+  current: LmCompendiumOverrides,
+  input: CompendiumOverridesInput | undefined,
+  legacy: Partial<LmCompendiumRetrievalSettings> | undefined,
+  resolvedNow: Readonly<LmRecallSettings>,
+): LmCompendiumOverrides {
+  let recall = current.recall;
+  let archivist = current.archivist;
+  if (input && input.recall !== undefined)
+    recall = input.recall === null ? undefined : normalizeRecallOverrides(input.recall);
+  if (input && input.archivist !== undefined) {
+    archivist = input.archivist === null ? undefined : normalizeArchivistOverride(input.archivist);
+  }
+  if (legacy) {
+    const { bookTokenBudgets: _ignored, ...legacyRecall } = legacy;
+    const given = normalizeRecallOverrides(legacyRecall);
+    const changed = diffRecallSettings(resolvedNow, normalizeRecallSettings({ ...resolvedNow, ...given }, resolvedNow));
+    if (Object.keys(changed).length > 0) recall = { ...recall, ...changed };
+  }
+  return normalizeCompendiumOverrides({ recall, archivist });
 }
 
 export async function createCompendium(
@@ -104,6 +190,11 @@ export async function createCompendium(
 
   const now = new Date().toISOString();
   const description = typeof input.description === "string" ? input.description.trim() : "";
+  const settings = await getSettings(documents);
+  const overrides = nextOverrides({}, input.overrides, input.retrievalSettings, settings.recall);
+  const bookTokenBudgets = normalizeBookTokenBudgets(
+    input.bookTokenBudgets ?? input.retrievalSettings?.bookTokenBudgets,
+  );
   const doc = await documents.create({
     id: `compendium:${randomUUID()}`,
     packageId: LOREBOOK_MANAGER_PACKAGE_ID,
@@ -115,12 +206,13 @@ export async function createCompendium(
       characterIds: uniqueStrings(input.characterIds),
       personaIds: uniqueStrings(input.personaIds),
       worldMapId: typeof input.worldMapId === "string" && input.worldMapId.trim() ? input.worldMapId.trim() : null,
-      retrievalSettings: normalizeCompendiumRetrievalSettings(input.retrievalSettings),
+      overrides,
+      bookTokenBudgets,
     },
     createdAt: now,
     updatedAt: now,
   });
-  return toCompendium(doc);
+  return toCompendium(doc, settings.recall);
 }
 
 export async function updateCompendium(
@@ -139,22 +231,21 @@ export async function updateCompendium(
     throw new CompendiumStoreError("Compendium was modified concurrently; refresh and try again", 409);
   }
 
-  const existing = toCompendium(existingDoc);
+  const settings = await getSettings(documents);
+  const existing = toCompendium(existingDoc, settings.recall);
   const nextName = input.name !== undefined ? input.name.trim() : existing.name;
   if (!nextName) throw new CompendiumStoreError("Compendium name is required", 400);
 
   const nextDescription = input.description !== undefined ? input.description.trim() : existing.description;
-  const nextSettings =
-    input.retrievalSettings !== undefined
-      ? normalizeCompendiumRetrievalSettings({
-          ...existing.retrievalSettings,
-          ...input.retrievalSettings,
-          bookTokenBudgets:
-            input.retrievalSettings.bookTokenBudgets !== undefined
-              ? input.retrievalSettings.bookTokenBudgets
-              : existing.retrievalSettings.bookTokenBudgets,
-        })
-      : existing.retrievalSettings;
+  const overrides = nextOverrides(
+    existing.overrides,
+    input.overrides,
+    input.retrievalSettings,
+    existing.retrievalSettings,
+  );
+  const givenBudgets = input.bookTokenBudgets ?? input.retrievalSettings?.bookTokenBudgets;
+  const bookTokenBudgets =
+    givenBudgets !== undefined ? normalizeBookTokenBudgets(givenBudgets) : existing.retrievalSettings.bookTokenBudgets;
 
   const updated = await documents.update({
     id: cleanId,
@@ -172,14 +263,15 @@ export async function updateCompendium(
             ? input.worldMapId.trim()
             : null
           : (existing.worldMapId ?? null),
-      retrievalSettings: nextSettings,
+      overrides,
+      bookTokenBudgets,
     },
     updatedAt: new Date().toISOString(),
   });
   if (!updated) {
     throw new CompendiumStoreError("Compendium update conflicted with a newer revision", 409);
   }
-  return toCompendium(updated);
+  return toCompendium(updated, settings.recall);
 }
 
 export async function deleteCompendium(
@@ -245,7 +337,7 @@ export async function getChatCompendiumBinding(
   const data = asRecord(doc.data);
   const compendiumId =
     typeof data.compendiumId === "string" && data.compendiumId.trim() ? data.compendiumId.trim() : null;
-  const stillExists = compendiumId ? (await getCompendium(documents, compendiumId)) !== null : false;
+  const stillExists = compendiumId ? await compendiumExists(documents, compendiumId) : false;
   return {
     chatId: cleanChatId,
     compendiumId: stillExists ? compendiumId : null,
@@ -265,8 +357,8 @@ export async function setChatCompendiumBinding(
 
   const cleanCompendiumId = typeof compendiumId === "string" && compendiumId.trim() ? compendiumId.trim() : null;
   if (cleanCompendiumId) {
-    const target = await getCompendium(documents, cleanCompendiumId);
-    if (!target) throw new CompendiumStoreError("Selected Compendium was not found", 404);
+    if (!(await compendiumExists(documents, cleanCompendiumId)))
+      throw new CompendiumStoreError("Selected Compendium was not found", 404);
   }
 
   const docId = chatBindingDocId(cleanChatId);

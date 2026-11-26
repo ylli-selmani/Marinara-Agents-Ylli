@@ -1,5 +1,6 @@
 import { parseEntityRef } from "./entity-ref.js";
 import type {
+  LmBm25Strictness,
   LmEntryNode,
   LmGraphPayload,
   LmRetrievalActivatedItem,
@@ -301,7 +302,7 @@ function findMatchingKey(entry: LmEntryNode, text: string): string | null {
   return matchedPrimary;
 }
 
-function tokenizeBm25(text: string): string[] {
+function tokenizeBm25(text: string, extraStopwords?: ReadonlySet<string>): string[] {
   // Macros like {{user}} are placeholders, not words: a greeting stored with a raw {{user}} matched every entry that
   // says {{user}} on "user" (Ylli's test round 2).
   const tokens =
@@ -309,15 +310,44 @@ function tokenizeBm25(text: string): string[] {
       .replace(/\{\{[^{}]*\}\}/gu, " ")
       .toLocaleLowerCase()
       .match(/[\p{L}\p{N}]{2,}/gu) ?? [];
-  return tokens.filter((token) => !STOPWORDS.has(token));
+  return tokens.filter((token) => !STOPWORDS.has(token) && !extraStopwords?.has(token));
+}
+
+/**
+ * Words to skip, split and cleaned the way BM25 reads words (lowercase, letters and digits, two or more), so a
+ * saved word always matches what the tokenizer produces.
+ */
+export function normalizeStopwordList(raw: unknown, limit = 200): string[] {
+  const parts = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    for (const token of part.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []) {
+      seen.add(token);
+      if (seen.size >= limit) return [...seen];
+    }
+  }
+  return [...seen];
+}
+
+/** The score a shared-word hit needs. A one-word query keeps a low fixed floor; longer ones scale with the best hit. */
+export function bm25FloorFor(
+  queryTokenCount: number,
+  topBm25: number,
+  strictness: LmBm25Strictness = "normal",
+): number {
+  if (strictness === "loose") return queryTokenCount <= 1 ? 1.5 : Math.max(3.0, topBm25 * 0.35);
+  if (strictness === "strict") return queryTokenCount <= 1 ? 2.2 : Math.max(5.0, topBm25 * 0.55);
+  return queryTokenCount <= 1 ? 1.8 : Math.max(4.0, topBm25 * 0.45);
 }
 
 function computeBm25Scores(
   entries: readonly LmEntryNode[],
   queryText: string,
+  extraStopwords?: ReadonlySet<string>,
 ): Map<string, { score: number; matchedTerms: string[] }> {
   const scores = new Map<string, { score: number; matchedTerms: string[] }>();
-  const queryTerms = [...new Set(tokenizeBm25(queryText))];
+  // Words to skip only leave the query: the entries' lengths stay as they are, so scores don't shift elsewhere.
+  const queryTerms = [...new Set(tokenizeBm25(queryText, extraStopwords))];
   if (queryTerms.length === 0 || entries.length === 0) return scores;
 
   const docs = entries.map((entry) => {
@@ -521,13 +551,16 @@ export function simulateLorebookRetrieval(
     }
   }
 
-  const bm25Scores = computeBm25Scores(eligibleEntries, queryText);
-  const queryTokenCount = tokenizeBm25(queryText).length;
+  const extraStopwords = input.extraStopwords?.length
+    ? new Set(normalizeStopwordList(input.extraStopwords))
+    : undefined;
+  const bm25Scores = computeBm25Scores(eligibleEntries, queryText, extraStopwords);
+  const queryTokenCount = tokenizeBm25(queryText, extraStopwords).length;
   let topBm25 = 0;
   for (const hit of bm25Scores.values()) {
     if (hit.score > topBm25) topBm25 = hit.score;
   }
-  const bm25Floor = queryTokenCount <= 1 ? 1.8 : Math.max(4.0, topBm25 * 0.45);
+  const bm25Floor = bm25FloorFor(queryTokenCount, topBm25, input.bm25Strictness);
   const maxTextHits = Math.max(0, input.maxTextHits ?? 5);
   const semanticScores = input.semanticScores ?? null;
   const semanticThreshold = Math.max(0, Math.min(1, input.semanticThreshold ?? 0.3));

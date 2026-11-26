@@ -236,6 +236,18 @@ export async function listLiveRuns(limit = 20): Promise<LmChatRuns[]> {
   );
 }
 
+/** Forget every recorded run (Troubleshooting → Clear Activity). Returns how many chats had runs. */
+export async function clearLiveRuns(): Promise<number> {
+  const documents = getLorebookManagerRuntime().persistence.documents;
+  const docs = await documents.list(LOREBOOK_MANAGER_PACKAGE_ID, LIVE_RUN_DOC_KIND);
+  let cleared = 0;
+  for (const doc of docs) {
+    if (doc.kind !== LIVE_RUN_DOC_KIND) continue;
+    if (await documents.remove(LOREBOOK_MANAGER_PACKAGE_ID, doc.id, doc.revision)) cleared += 1;
+  }
+  return cleared;
+}
+
 function liveRunDocId(chatId: string): string {
   return `live_run:${chatId}`;
 }
@@ -339,6 +351,8 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
       maxTextHits: settings.maxTextHits,
       respectBookBudgets: settings.respectBookBudgets,
       bookTokenBudgets: settings.bookTokenBudgets,
+      extraStopwords: settings.extraStopwords,
+      bm25Strictness: settings.bm25Strictness,
     },
     lorebookIds,
   );

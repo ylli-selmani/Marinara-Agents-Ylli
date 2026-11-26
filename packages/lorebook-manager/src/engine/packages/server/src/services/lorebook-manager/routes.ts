@@ -29,9 +29,10 @@ import {
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
-import { listLiveRuns } from "./live-retrieval.js";
+import { clearLiveRuns, listLiveRuns } from "./live-retrieval.js";
 import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
+import { getSettings, resetSettings, saveSettings, type SaveSettingsInput } from "./settings-store.js";
 import { entryVectorSource, indexLorebooks, semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -357,6 +358,14 @@ export async function buildLorebookManagerGraphPayload(
   };
 }
 
+function parseExpectedRevision(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new CompendiumStoreError("expectedRevision must be a whole number", 400);
+  }
+  return value;
+}
+
 function sendRouteError(reply: FastifyReply, error: unknown) {
   if (error instanceof CompendiumStoreError) {
     return reply.code(error.statusCode).send({ error: error.message });
@@ -432,6 +441,54 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.get("/runs", async (_request, reply) => {
     try {
       return { chats: await listLiveRuns() };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  // Troubleshooting: forget every recorded turn (Activity starts empty again). Lore and settings stay.
+  app.delete("/runs", async (_request, reply) => {
+    try {
+      return { cleared: await clearLiveRuns() };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  // The settings hub. Every write refreshes the live claims, whose cached Compendiums hold the resolved settings.
+  app.get("/settings", async (_request, reply) => {
+    try {
+      return { settings: await getSettings(getLorebookManagerRuntime().persistence.documents) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.put("/settings", async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as SaveSettingsInput;
+      const settings = await saveSettings(getLorebookManagerRuntime().persistence.documents, {
+        recall: body.recall,
+        archivist: body.archivist,
+        crawler: body.crawler,
+        expectedRevision: parseExpectedRevision(body.expectedRevision),
+      });
+      await refreshLiveClaimsSafely();
+      return { settings };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/settings/reset", async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { expectedRevision?: unknown };
+      const settings = await resetSettings(
+        getLorebookManagerRuntime().persistence.documents,
+        parseExpectedRevision(body.expectedRevision),
+      );
+      await refreshLiveClaimsSafely();
+      return { settings };
     } catch (error) {
       return sendRouteError(reply, error);
     }

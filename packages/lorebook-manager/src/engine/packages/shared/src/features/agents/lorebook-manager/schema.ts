@@ -177,6 +177,10 @@ export interface LmRetrievalInput {
   semanticScores?: Readonly<Record<string, number>>;
   /** Minimum calibrated similarity for a meaning match (default 0.3, the Engine's own lorebook default). */
   semanticThreshold?: number;
+  /** Words to skip on top of the built-in list, for shared-word (BM25) matching only. */
+  extraStopwords?: readonly string[];
+  /** How far a shared-word hit must stand out to count (default "normal"). */
+  bm25Strictness?: LmBm25Strictness;
 }
 
 export interface LmRetrievalResult {
@@ -188,14 +192,14 @@ export interface LmRetrievalResult {
   cardInheritedSeedRefs: string[];
 }
 
-export interface LmCompendiumRetrievalSettings {
+/** Recall: what live retrieval and Simulate use. Defaults live in the Settings tab; a Compendium may override any field. */
+export interface LmRecallSettings {
   tokenBudget: number;
   /** Live retrieval matches the last this-many messages (1–10). */
   queryMessageCount: number;
   maxOneHop: number;
   maxTextHits: number;
   respectBookBudgets: boolean;
-  bookTokenBudgets: Record<string, number>;
   /** Meaning match: also pick entries whose embeddings are close to the recent messages. Off by default. */
   semanticEnabled: boolean;
   /** Minimum calibrated similarity for a meaning match (0.05–0.95). */
@@ -204,6 +208,62 @@ export interface LmCompendiumRetrievalSettings {
   stage2Gate: LmStage2Gate;
   /** The Librarian's connection. null = the agents' default connection, then the chat's. */
   librarianConnectionId: string | null;
+  /** Words to skip on top of the built-in list (lowercase, one word each). */
+  extraStopwords: string[];
+  /** How far a shared-word hit must stand out from the best one to count. */
+  bm25Strictness: LmBm25Strictness;
+}
+
+export type LmBm25Strictness = "loose" | "normal" | "strict";
+
+/** A Compendium's resolved retrieval settings: the defaults, its overrides, and its own per-book budgets. */
+export interface LmCompendiumRetrievalSettings extends LmRecallSettings {
+  bookTokenBudgets: Record<string, number>;
+}
+
+/** Off; Suggest = every change waits in Review; Automatic = follows the chat's Review Agent Outputs switch. */
+export type LmArchivistMode = "off" | "suggest" | "automatic";
+
+export interface LmArchivistSettings {
+  mode: LmArchivistMode;
+  /** Runs after every this-many assistant turns (1–50). */
+  everyNTurns: number;
+  /** The newest messages it never reads, so a swipe can't write lore (1–10). */
+  unreadMessages: number;
+  /** null = the agents' default connection, then the chat's. */
+  connectionId: string | null;
+}
+
+export type LmCrawlerTrigger = "after_archivist" | "on_demand";
+
+export interface LmCrawlerSettings {
+  trigger: LmCrawlerTrigger;
+  /** null = the Archivist's connection. */
+  connectionId: string | null;
+  /** Entries per call when it tidies whole books (5–50). */
+  batchSize: number;
+}
+
+/** The package's global settings document (the Settings tab). */
+export interface LmSettings {
+  recall: LmRecallSettings;
+  archivist: LmArchivistSettings;
+  crawler: LmCrawlerSettings;
+  /** 0 until first saved. */
+  revision: number;
+  updatedAt: string;
+}
+
+/** The Archivist fields a Compendium may set for itself; its model stays global. */
+export type LmArchivistOverride = Partial<Pick<LmArchivistSettings, "mode" | "everyNTurns">>;
+
+/**
+ * What a Compendium sets for itself. A field that is absent follows the default, so changing a default reaches every
+ * Compendium that didn't set that field.
+ */
+export interface LmCompendiumOverrides {
+  recall?: Partial<LmRecallSettings>;
+  archivist?: LmArchivistOverride;
 }
 
 export type LmStage2Gate = "instant" | "decision" | "librarian";
@@ -262,7 +322,10 @@ export interface LmCompendium {
   characterIds: string[];
   personaIds: string[];
   worldMapId?: string | null;
+  /** Resolved: the defaults plus this Compendium's overrides and per-book budgets. Read-only. */
   retrievalSettings: LmCompendiumRetrievalSettings;
+  /** What this Compendium sets for itself (absent = follows the default). */
+  overrides: LmCompendiumOverrides;
   revision: number;
   createdAt: string;
   updatedAt: string;

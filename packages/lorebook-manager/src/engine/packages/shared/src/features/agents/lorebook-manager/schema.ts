@@ -1,4 +1,5 @@
-export type EntityFamily = "character" | "location" | "faction" | "item" | "creature" | "ability" | "quest" | "lore";
+export type EntityFamily =
+  "character" | "location" | "faction" | "item" | "creature" | "species" | "ability" | "quest" | "lore";
 
 export type LorebookFilterMode = "any" | "include" | "exclude";
 
@@ -8,6 +9,7 @@ export const ENTITY_FAMILIES: readonly EntityFamily[] = [
   "faction",
   "item",
   "creature",
+  "species",
   "ability",
   "quest",
   "lore",

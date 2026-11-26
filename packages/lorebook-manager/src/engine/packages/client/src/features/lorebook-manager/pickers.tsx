@@ -25,7 +25,16 @@ export function RelationPicker({
   ];
 
   if (HostSelect) {
-    return <HostSelect value={value} options={options} onChange={onChange} label={ariaLabel} title={ariaLabel} />;
+    return (
+      <HostSelect
+        value={value}
+        options={options}
+        onChange={onChange}
+        label={ariaLabel}
+        title={ariaLabel}
+        className={fallbackClassName}
+      />
+    );
   }
   return (
     <select
@@ -87,7 +96,7 @@ export function LinkTargetPicker({
         title="Link target"
         placeholder={placeholder}
         searchable
-        className="min-w-0 flex-1"
+        className={fallbackClassName}
       />
     );
   }

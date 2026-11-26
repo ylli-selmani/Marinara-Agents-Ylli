@@ -27,6 +27,7 @@ import {
   Wand2,
   Zap,
   type LucideIcon,
+  Dna,
 } from "lucide-react";
 import {
   buildLorebookGraph,
@@ -97,6 +98,7 @@ export const FAMILY_META: Record<EntityFamily, { label: string; icon: LucideIcon
   faction: { label: "Factions", icon: Shield },
   item: { label: "Items", icon: Package },
   creature: { label: "Creatures", icon: Ghost },
+  species: { label: "Species", icon: Dna },
   ability: { label: "Abilities", icon: Zap },
   quest: { label: "Quests", icon: Compass },
   lore: { label: "Lore", icon: BookOpen },
@@ -153,6 +155,7 @@ export const GRAPH_STYLE = `
   --lm-graph-faction: #ef4444;
   --lm-graph-item: #d97706;
   --lm-graph-creature: #ea580c;
+  --lm-graph-species: #65a30d;
   --lm-graph-ability: #6366f1;
   --lm-graph-quest: #8b5cf6;
   --lm-graph-lore: #64748b;
@@ -175,6 +178,7 @@ export const GRAPH_STYLE = `
   --lm-graph-faction: #f87171;
   --lm-graph-item: #fbbf24;
   --lm-graph-creature: #fb923c;
+  --lm-graph-species: #a3e635;
   --lm-graph-ability: #818cf8;
   --lm-graph-quest: #a78bfa;
   --lm-graph-lore: #94a3b8;

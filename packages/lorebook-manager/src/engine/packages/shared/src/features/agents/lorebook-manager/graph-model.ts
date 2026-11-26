@@ -77,9 +77,6 @@ const ITEM_TAGS = new Set([
 const CREATURE_TAGS = new Set([
   "creature",
   "creatures",
-  "species",
-  "race",
-  "races",
   "monster",
   "monsters",
   "beast",
@@ -91,6 +88,7 @@ const CREATURE_TAGS = new Set([
   "animal",
   "animals",
 ]);
+const SPECIES_TAGS = new Set(["species", "subspecies", "race", "races", "ancestry", "lineage", "kin", "kind"]);
 const ABILITY_TAGS = new Set([
   "ability",
   "abilities",
@@ -145,6 +143,7 @@ function mapSingleTag(token: string): EntityFamily | null {
   if (FACTION_TAGS.has(token)) return "faction";
   if (ITEM_TAGS.has(token)) return "item";
   if (CREATURE_TAGS.has(token)) return "creature";
+  if (SPECIES_TAGS.has(token)) return "species";
   if (ABILITY_TAGS.has(token)) return "ability";
   if (QUEST_TAGS.has(token)) return "quest";
   if (LORE_TAGS.has(token)) return "lore";

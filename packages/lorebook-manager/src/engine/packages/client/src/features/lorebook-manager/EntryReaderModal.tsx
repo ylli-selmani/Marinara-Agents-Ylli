@@ -13,6 +13,7 @@ const TAG_PRESETS = [
   { value: "faction", label: "faction" },
   { value: "item", label: "item" },
   { value: "creature", label: "creature" },
+  { value: "species", label: "species" },
   { value: "ability", label: "ability" },
   { value: "quest", label: "quest" },
 ] as const;

@@ -38,7 +38,18 @@ import { LinkTargetPicker, RelationPicker, type LinkTargetOption } from "./picke
 
 export const RELATION_PRESETS = LM_RELATION_VALUES;
 
-const TAG_OVERRIDES = ["", "lore", "character", "location", "faction", "item", "creature", "ability", "quest"] as const;
+const TAG_OVERRIDES = [
+  "",
+  "lore",
+  "character",
+  "location",
+  "faction",
+  "item",
+  "creature",
+  "species",
+  "ability",
+  "quest",
+] as const;
 const SECTION_AUTO_COLLAPSE = 6;
 
 type PromoteDirection = "outgoing" | "incoming" | "both";
@@ -801,6 +812,7 @@ export function GraphInspector({
                 <option value="faction">faction</option>
                 <option value="item">item</option>
                 <option value="creature">creature</option>
+                <option value="species">species</option>
                 <option value="ability">ability</option>
                 <option value="quest">quest</option>
                 {primaryTag && !TAG_OVERRIDES.includes(primaryTag as (typeof TAG_OVERRIDES)[number]) ? (

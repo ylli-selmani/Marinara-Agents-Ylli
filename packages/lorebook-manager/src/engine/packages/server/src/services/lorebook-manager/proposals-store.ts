@@ -87,9 +87,18 @@ export function mergeNewFacts(content: string, facts: readonly string[]): string
 function resolveCrawlerAdditions(
   patch: Record<string, unknown>,
   current: Record<string, unknown>,
+  source: LmProposal["source"],
 ): Record<string, unknown> {
   const { addKeys, addLinks, ...fields } = patch;
   const resolved: Record<string, unknown> = { ...fields };
+  if (source === "crawler") {
+    // The Crawler only fills a blank summary or tag: one written while its suggestion waited stays.
+    for (const field of ["description", "tag"] as const) {
+      if (field in resolved && typeof current[field] === "string" && (current[field] as string).trim()) {
+        delete resolved[field];
+      }
+    }
+  }
   if (Array.isArray(addKeys)) {
     const keys = Array.isArray(current.keys)
       ? current.keys.filter((key): key is string => typeof key === "string")
@@ -263,7 +272,7 @@ export async function applyProposal(runtime: LorebookManagerRuntimeHost, id: str
     .find((entry) => entry.id === proposal.targetEntryId);
   if (!current) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
   // New facts (the Archivist) merge into the entry's content as it is now, not as it was when they were suggested.
-  const { newFacts: _newFacts, ...fields } = resolveCrawlerAdditions(proposal.patch, current);
+  const { newFacts: _newFacts, ...fields } = resolveCrawlerAdditions(proposal.patch, current, proposal.source);
   const facts = factsOf(proposal.patch);
   const patch =
     facts.length > 0

@@ -46,6 +46,14 @@ const MAX_FACT_CHARS = 400;
 const MAX_CREATES = 5;
 const MAX_CREATE_CHARS = 2_000;
 const MAX_RECORDED_RUNS = 20;
+/** A stalled provider must not hold the package's background queue: one model call gets this long. */
+export const BACKGROUND_MODEL_TIMEOUT_MS = 120_000;
+
+/** The caller's signal (deactivation), plus the deadline. */
+export function backgroundModelSignal(signal?: AbortSignal): AbortSignal {
+  const deadline = AbortSignal.timeout(BACKGROUND_MODEL_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
 
 export const ARCHIVIST_RUN_DOC_KIND = "archivist_run";
 export const ARCHIVIST_STATE_DOC_KIND = "archivist_state";
@@ -232,8 +240,17 @@ async function writeState(
   });
 }
 
-/** Keep the chat's last Archivist runs for Activity. Best effort, like the retrieval runs. */
+/** Keep the chat's last Archivist runs for Activity. */
 async function recordRun(documents: LorebookManagerDocumentStore, record: LmArchivistRunRecord): Promise<void> {
+  // Best effort, like the retrieval runs: a failed Activity write never changes the run's outcome.
+  try {
+    await writeRun(documents, record);
+  } catch (error) {
+    getLorebookManagerRuntime().logger.warn("[lorebook-manager] Could not record a run: %s", error);
+  }
+}
+
+async function writeRun(documents: LorebookManagerDocumentStore, record: LmArchivistRunRecord): Promise<void> {
   const id = runDocId(record.chatId);
   const existing = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, id);
   const previous = Array.isArray((existing?.data as { runs?: unknown } | undefined)?.runs)
@@ -291,7 +308,9 @@ function visibleMessages(messages: readonly LorebookManagerMessageRecord[]): Lor
   });
 }
 
-const messageText = (message: LorebookManagerMessageRecord) => (message.agentContent ?? message.content ?? "").trim();
+/** A message's text, capped so one huge message can't blow the window. */
+const messageText = (message: LorebookManagerMessageRecord) =>
+  (message.agentContent ?? message.content ?? "").trim().slice(0, MAX_WINDOW_CHARS);
 
 /** The newest messages past the watermark that fit the prompt, oldest first. */
 function trimWindow(pending: readonly LorebookManagerMessageRecord[]): LorebookManagerMessageRecord[] {
@@ -517,7 +536,7 @@ export async function runArchivist(
         { role: "system", content: ARCHIVIST_SYSTEM },
         { role: "user", content: archivistUserPrompt(candidates, directory, window) },
       ],
-      { temperature: 0.2, maxTokens: 1_500, signal: options.signal },
+      { temperature: 0.2, maxTokens: 1_500, signal: backgroundModelSignal(options.signal) },
     );
     if (options.signal?.aborted) return { status: "failed", run: null };
     answer = completion.content ? safeParse(completion.content) : null;
@@ -594,8 +613,13 @@ export async function runArchivist(
     updates += 1;
   }
 
+  // Only this Compendium's books: another Compendium may well need its own entry of the same name.
+  const ownBooks = new Set(compendium.lorebookIds);
   const suggestedBefore = (name: string, list: readonly LmProposal[]) =>
-    list.some((proposal) => proposal.kind === "create_entry" && sameName(proposal.entryName, name));
+    list.some(
+      (proposal) =>
+        proposal.kind === "create_entry" && ownBooks.has(proposal.lorebookId) && sameName(proposal.entryName, name),
+    );
   for (const raw of (Array.isArray(parsed.creates) ? parsed.creates : []).slice(0, MAX_CREATES)) {
     const item = asRecord(raw);
     const name = cleanText(item.name, 80);

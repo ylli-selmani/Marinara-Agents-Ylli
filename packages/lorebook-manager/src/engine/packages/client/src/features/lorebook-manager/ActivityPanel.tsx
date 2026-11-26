@@ -212,7 +212,14 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
         </div>
       ) : null}
 
-      <ArchivistActivity chatId={selectedChatId ?? currentChatId} />
+      {/* The open chat even before it has retrieval runs; else the chat picked below. */}
+      <ArchivistActivity
+        chatId={
+          currentChatId && !chats.some((chat) => chat.chatId === currentChatId)
+            ? currentChatId
+            : (selectedChatId ?? currentChatId)
+        }
+      />
 
       {chats.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1">

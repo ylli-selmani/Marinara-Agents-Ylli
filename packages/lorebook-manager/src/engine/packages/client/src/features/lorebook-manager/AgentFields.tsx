@@ -90,8 +90,9 @@ function NumberInput({
         disabled={disabled}
         value={value}
         onChange={(event) => {
+          // As RecallFields: the typed value as is (so "20" can be typed past min 5); Save clamps it.
           const next = Number(event.target.value);
-          if (Number.isFinite(next)) onChange(Math.max(min, Math.min(max, Math.round(next))));
+          if (event.target.value.trim() && Number.isFinite(next)) onChange(Math.round(next));
         }}
         className="mari-chrome-field h-8 w-16 rounded px-2 text-xs tabular-nums"
       />

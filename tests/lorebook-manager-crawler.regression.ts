@@ -261,8 +261,31 @@ async function main() {
     assert.equal(await countUntidied(compendium.id), 1);
     assert.equal(await crawlAfterArchivist({ ...archivedApplied, source: "crawler" }), null, "only Archivist changes");
 
+    // ── An entry the model leaves out stays untidied for the next run. ──
+    answer = () => '{"entries": []}';
+    const leftOut = await runCrawler(compendium.id);
+    assert.equal(leftOut.status, "done");
+    assert.ok(leftOut.run!.skipped.some((item) => item.why.startsWith("not answered")));
+    assert.equal(leftOut.run!.remaining, 1);
+    assert.equal(await countUntidied(compendium.id), 1);
+
+    // ── A summary written while the suggestion waited stays; the blank tag is filled. ──
+    answer = (text) =>
+      JSON.stringify({
+        entries: [{ id: shortId(text, "Unseelie Court"), description: "Fae night court.", tag: "faction" }],
+      });
+    await runCrawler(compendium.id);
+    const courtAgain = (await listProposals(documents, "pending")).find(
+      (p) => p.source === "crawler" && p.targetEntryId === "unseelie",
+    )!;
+    entry("unseelie").description = "Written by hand.";
+    await applyProposal(runtime, courtAgain.id);
+    assert.equal(entry("unseelie").description, "Written by hand.");
+    assert.equal(entry("unseelie").tag, "faction");
+
     const runs = await listCrawlerRuns();
-    assert.ok(runs.length >= 4 && runs[0]!.trigger === "after_archivist", "runs recorded, newest first");
+    assert.ok(runs.length >= 6 && runs.some((run) => run.trigger === "after_archivist"), "runs recorded");
+    assert.ok(runs[0]!.at >= runs.at(-1)!.at, "newest first");
     assert.ok(
       runs.every((run) => run.trigger === "manual" || run.status === "done"),
       "an after-Archivist run with nothing to do isn't recorded",

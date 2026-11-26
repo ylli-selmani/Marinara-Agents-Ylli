@@ -12,7 +12,7 @@ import type {
   LmGraphPayload,
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { runInBackgroundQueue } from "./archivist.js";
+import { backgroundModelSignal, runInBackgroundQueue } from "./archivist.js";
 import { getCompendium, listCompendiums, LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { compendiumForChat } from "./live-claims.js";
 import { getLorebookManagerRuntime, type LorebookManagerDocumentStore } from "./package-runtime.js";
@@ -110,6 +110,15 @@ async function markCrawled(
 }
 
 async function recordRun(documents: LorebookManagerDocumentStore, record: LmCrawlerRunRecord): Promise<void> {
+  // Best effort, like the retrieval runs: a failed Activity write never changes the run's outcome.
+  try {
+    await writeRun(documents, record);
+  } catch (error) {
+    getLorebookManagerRuntime().logger.warn("[lorebook-manager] Could not record a run: %s", error);
+  }
+}
+
+async function writeRun(documents: LorebookManagerDocumentStore, record: LmCrawlerRunRecord): Promise<void> {
   const id = runDocId(record.compendiumId);
   const existing = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, id);
   const previous = Array.isArray((existing?.data as { runs?: unknown } | undefined)?.runs)
@@ -212,6 +221,7 @@ export const CRAWLER_SYSTEM = [
   "links: for the targets listed under the entry, the ones its text really connects it to, each with one relation:",
   `${CRAWLER_RELATIONS.join(", ")}. A link reads "<entry> <relation> <target>": "Student member_of Class 1-A".`,
   "Skip a target the text only names in passing. Never invent; leave a field out when unsure.",
+  'Answer for every entry; an entry with nothing to add is just {"id": "e2"}.',
   'Answer with JSON only: {"entries": [{"id": "e1", "description": "...", "tag": "...", "keys": ["..."],',
   '"links": [{"to": "t3", "relation": "member_of"}]}]}',
 ].join(" ");
@@ -323,11 +333,17 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     candidates = candidates.filter((entry) => wanted.has(entry.id));
   }
   const batch = candidates.slice(0, crawler.batchSize);
-  const remainingAfter = options.entryIds ? 0 : Math.max(0, candidates.length - batch.length);
+  let remainingAfter = options.entryIds ? 0 : Math.max(0, candidates.length - batch.length);
   if (batch.length === 0) {
     // After an Archivist change there's nothing to say when the entry is already tidy: record only Tidy entries.
     if (trigger !== "manual") return { status: "nothing_to_do", run: null };
-    return finish(base("nothing_to_do", "Every entry is tidied"));
+    const waiting = pending.filter((proposal) => proposal.source === "crawler").length;
+    return finish(
+      base(
+        "nothing_to_do",
+        waiting > 0 ? `Nothing left to tidy; ${waiting} Crawler suggestions wait in Review` : "Every entry is tidied",
+      ),
+    );
   }
   const languageModels = runtime.languageModels;
   if (!languageModels) return finish(base("unavailable", "This Engine has no language model host"));
@@ -379,7 +395,11 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
         { role: "system", content: CRAWLER_SYSTEM },
         { role: "user", content: crawlerUserPrompt(batch, linkTargets, nameOf) },
       ],
-      { temperature: 0.2, maxTokens: Math.min(4_000, 300 + batch.length * 160), signal: options.signal },
+      {
+        temperature: 0.2,
+        maxTokens: Math.min(4_000, 300 + batch.length * 160),
+        signal: backgroundModelSignal(options.signal),
+      },
     );
     if (options.signal?.aborted) return { status: "failed", run: null };
     answer = completion.content ? safeParse(completion.content) : null;
@@ -453,8 +473,13 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     proposalIds.push(proposal.id);
   }
 
-  // Every entry the model saw counts as tidied, also the ones it had nothing to add to.
-  await markCrawled(documents, compendiumId, batch);
+  // An entry the model answered for counts as tidied, also with nothing to add; one it left out stays untidied.
+  const tidied = batch.filter((entry) => answered.has(entry.id));
+  await markCrawled(documents, compendiumId, tidied);
+  if (tidied.length < batch.length) {
+    skipped.push({ name: `${batch.length - tidied.length} entries`, why: "not answered, left for the next run" });
+  }
+  remainingAfter += batch.length - tidied.length;
   const run: LmCrawlerRunRecord = {
     ...base("done"),
     entryCount: batch.length,

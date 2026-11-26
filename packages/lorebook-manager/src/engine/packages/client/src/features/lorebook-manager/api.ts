@@ -1,5 +1,10 @@
 import type {
+  LmArchivistOverride,
+  LmArchivistRunRecord,
+  LmArchivistSettings,
   LmChatRuns,
+  LmCrawlerRunRecord,
+  LmCrawlerSettings,
   LmLiveStatus,
   LmProposal,
   LmProposalStatus,
@@ -29,6 +34,9 @@ export const lmQueryKeys = {
   connections: ["lorebook-manager", "connections"] as const,
   settings: ["lorebook-manager", "settings"] as const,
   runs: ["lorebook-manager", "runs"] as const,
+  archivistRuns: ["lorebook-manager", "archivist-runs"] as const,
+  crawlerRuns: ["lorebook-manager", "crawler-runs"] as const,
+  crawlerPending: (compendiumId: string) => ["lorebook-manager", "crawler-pending", compendiumId] as const,
   proposalsRoot: ["lorebook-manager", "proposals"] as const,
   proposals: (status: LmProposalStatus) => ["lorebook-manager", "proposals", status] as const,
   semanticScores: (scopeKey: string, queryText: string) =>
@@ -56,8 +64,8 @@ export interface LmCompendiumSavePayload {
   characterIds: string[];
   personaIds: string[];
   worldMapId?: string | null;
-  /** The Recall fields this Compendium sets itself (replaces the stored ones; {} = follows every default). */
-  overrides: { recall: Partial<LmRecallSettings> };
+  /** The fields this Compendium sets itself, per group (replaces the stored ones; {} = follows every default). */
+  overrides: { recall: Partial<LmRecallSettings>; archivist: LmArchivistOverride };
   bookTokenBudgets: Record<string, number>;
   expectedRevision?: number;
 }
@@ -219,6 +227,8 @@ export async function fetchSettings(): Promise<LmSettings> {
 
 export async function saveSettingsApi(input: {
   recall?: Partial<LmRecallSettings>;
+  archivist?: Partial<LmArchivistSettings>;
+  crawler?: Partial<LmCrawlerSettings>;
   expectedRevision?: number;
 }): Promise<LmSettings> {
   const response = await fetch(`${API_ROOT}/settings`, {
@@ -251,6 +261,47 @@ export async function clearLiveRunsApi(): Promise<number> {
   });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   return ((await response.json()) as { cleared?: number }).cleared ?? 0;
+}
+
+export async function fetchArchivistRuns(): Promise<LmArchivistRunRecord[]> {
+  const payload = await readJson<{ runs?: LmArchivistRunRecord[] }>("/archivist/runs");
+  return Array.isArray(payload.runs) ? payload.runs : [];
+}
+
+/** Run now: read the chat's settled messages at once, whatever the mode and interval. */
+export async function runArchivistApi(chatId: string): Promise<{ status: string; run: LmArchivistRunRecord | null }> {
+  const response = await fetch(`${API_ROOT}/archivist/run`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ chatId }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return (await response.json()) as { status: string; run: LmArchivistRunRecord | null };
+}
+
+export async function fetchCrawlerRuns(): Promise<LmCrawlerRunRecord[]> {
+  const payload = await readJson<{ runs?: LmCrawlerRunRecord[] }>("/crawler/runs");
+  return Array.isArray(payload.runs) ? payload.runs : [];
+}
+
+/** Tidy entries: one Crawler batch over a Compendium's books. */
+export async function runCrawlerApi(compendiumId: string): Promise<{ status: string; run: LmCrawlerRunRecord | null }> {
+  const response = await fetch(`${API_ROOT}/crawler/run`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ compendiumId }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return (await response.json()) as { status: string; run: LmCrawlerRunRecord | null };
+}
+
+export async function fetchCrawlerPending(compendiumId: string): Promise<number> {
+  const payload = await readJson<{ remaining?: number }>(
+    `/crawler/pending?compendiumId=${encodeURIComponent(compendiumId)}`,
+  );
+  return typeof payload.remaining === "number" ? payload.remaining : 0;
 }
 
 export async function fetchLiveRuns(): Promise<LmChatRuns[]> {

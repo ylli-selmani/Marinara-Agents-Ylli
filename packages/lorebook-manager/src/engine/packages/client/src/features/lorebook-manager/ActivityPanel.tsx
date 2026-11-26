@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Network } from "lucide-react";
 import type { LmLiveRunRecord } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { fetchLiveRuns, lmQueryKeys } from "./api";
+import { ArchivistActivity } from "./ArchivistActivity";
 import { REASON_BADGE_STYLE, TIER_LABEL } from "./SimulatePanel";
 
 export interface ActivityPanelProps {
@@ -210,6 +211,8 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
           lorebooks itself, and Simulate shows what Lorebook Manager would pick.
         </div>
       ) : null}
+
+      <ArchivistActivity chatId={selectedChatId ?? currentChatId} />
 
       {chats.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1">

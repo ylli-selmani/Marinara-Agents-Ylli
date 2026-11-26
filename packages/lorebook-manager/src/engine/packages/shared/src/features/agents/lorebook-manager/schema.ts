@@ -395,6 +395,29 @@ export type LmArchivistRunStatus =
   | "nothing_new"
   | "not_due";
 
+/** What a Crawler (Tidy entries) run came to. */
+export type LmCrawlerRunStatus = "done" | "failed" | "unavailable" | "nothing_to_do" | "not_found";
+
+export interface LmCrawlerRunRecord {
+  at: string;
+  compendiumId: string;
+  compendiumName: string | null;
+  status: LmCrawlerRunStatus;
+  /** manual = Tidy entries; after_archivist = an applied Archivist change. */
+  trigger: "manual" | "after_archivist";
+  /** Entries sent to the model this run. */
+  entryCount: number;
+  /** Suggestions made. */
+  proposals: number;
+  /** Entries still untidied after this run (in the Compendium's books). */
+  remaining: number;
+  skipped: Array<{ name: string; why: string }>;
+  proposalIds: string[];
+  model: string | null;
+  ms: number;
+  detail?: string;
+}
+
 export interface LmArchivistRunRecord {
   at: string;
   chatId: string;

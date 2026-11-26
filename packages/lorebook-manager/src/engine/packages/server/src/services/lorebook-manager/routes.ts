@@ -29,6 +29,7 @@ import {
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
 import { listArchivistRuns, runArchivist, runInBackgroundQueue } from "./archivist.js";
+import { countUntidied, crawlAfterArchivist, listCrawlerRuns, runCrawler } from "./crawler.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { clearLiveRuns, listLiveRuns } from "./live-retrieval.js";
 import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
@@ -468,6 +469,39 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  // The Crawler: Tidy entries runs one batch over a Compendium's books; pending says how many are left.
+  app.post("/crawler/run", async (request, reply) => {
+    try {
+      const compendiumId = asRecord(request.body).compendiumId;
+      if (typeof compendiumId !== "string" || !compendiumId)
+        throw new CompendiumStoreError("compendiumId is required", 400);
+      const outcome = await runInBackgroundQueue(() => runCrawler(compendiumId, { trigger: "manual" }));
+      if (outcome.status === "not_found") throw new CompendiumStoreError("Compendium not found", 404);
+      return { status: outcome.status, run: outcome.run };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.get("/crawler/runs", async (_request, reply) => {
+    try {
+      return { runs: await listCrawlerRuns() };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.get("/crawler/pending", async (request, reply) => {
+    try {
+      const compendiumId = (request.query as { compendiumId?: unknown } | undefined)?.compendiumId;
+      if (typeof compendiumId !== "string" || !compendiumId)
+        throw new CompendiumStoreError("compendiumId is required", 400);
+      return { remaining: await countUntidied(compendiumId) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
   app.get("/archivist/runs", async (_request, reply) => {
     try {
       return { runs: await listArchivistRuns() };
@@ -528,7 +562,10 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.post("/proposals/:id/apply", async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
-      return { proposal: await applyProposal(getLorebookManagerRuntime(), id) };
+      const proposal = await applyProposal(getLorebookManagerRuntime(), id);
+      // An applied Archivist change gets tidied in the background when the Crawler runs after the Archivist.
+      void crawlAfterArchivist(proposal);
+      return { proposal };
     } catch (error) {
       return sendRouteError(reply, error);
     }

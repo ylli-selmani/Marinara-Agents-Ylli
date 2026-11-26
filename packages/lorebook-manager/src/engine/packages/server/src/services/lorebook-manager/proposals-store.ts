@@ -80,6 +80,43 @@ export function mergeNewFacts(content: string, facts: readonly string[]): string
   return base ? `${base}\n\n${fresh.join(" ")}` : fresh.join(" ");
 }
 
+/**
+ * The Crawler's additions (keywords, links) resolved against the entry as it is now: new keywords join the current
+ * ones, new links join the current links and never replace one the entry already has.
+ */
+function resolveCrawlerAdditions(
+  patch: Record<string, unknown>,
+  current: Record<string, unknown>,
+): Record<string, unknown> {
+  const { addKeys, addLinks, ...fields } = patch;
+  const resolved: Record<string, unknown> = { ...fields };
+  if (Array.isArray(addKeys)) {
+    const keys = Array.isArray(current.keys)
+      ? current.keys.filter((key): key is string => typeof key === "string")
+      : [];
+    const known = new Set(keys.map(comparableFact));
+    for (const key of addKeys) {
+      if (typeof key !== "string" || !comparableFact(key) || known.has(comparableFact(key))) continue;
+      known.add(comparableFact(key));
+      keys.push(key);
+    }
+    resolved.keys = keys;
+  }
+  if (Array.isArray(addLinks)) {
+    const relationships: Record<string, string> = {};
+    for (const [key, relation] of Object.entries(asRecord(current.relationships))) {
+      if (typeof relation === "string") relationships[key] = relation;
+    }
+    for (const raw of addLinks) {
+      const link = asRecord(raw);
+      if (typeof link.key !== "string" || typeof link.relation !== "string" || !link.key) continue;
+      if (!(link.key in relationships)) relationships[link.key] = link.relation;
+    }
+    resolved.relationships = relationships;
+  }
+  return resolved;
+}
+
 function factsOf(patch: Record<string, unknown>): string[] {
   return Array.isArray(patch.newFacts)
     ? patch.newFacts.filter((fact): fact is string => typeof fact === "string" && fact.trim().length > 0)
@@ -226,12 +263,12 @@ export async function applyProposal(runtime: LorebookManagerRuntimeHost, id: str
     .find((entry) => entry.id === proposal.targetEntryId);
   if (!current) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
   // New facts (the Archivist) merge into the entry's content as it is now, not as it was when they were suggested.
-  const { newFacts: _newFacts, ...fields } = proposal.patch;
+  const { newFacts: _newFacts, ...fields } = resolveCrawlerAdditions(proposal.patch, current);
   const facts = factsOf(proposal.patch);
   const patch =
     facts.length > 0
       ? { ...fields, content: mergeNewFacts(typeof current.content === "string" ? current.content : "", facts) }
-      : proposal.patch;
+      : fields;
   const before = Object.fromEntries(Object.keys(patch).map((key) => [key, current[key] ?? null]));
   try {
     const updated = await updateLorebookEntry(proposal.targetEntryId!, patch);

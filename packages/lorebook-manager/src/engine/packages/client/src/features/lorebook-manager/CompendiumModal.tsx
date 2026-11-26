@@ -8,11 +8,14 @@ import {
   normalizeBookTokenBudgets,
 } from "../../../../shared/src/features/agents/lorebook-manager/compendium-helpers.js";
 import {
+  DEFAULT_ARCHIVIST_SETTINGS,
   DEFAULT_RECALL_SETTINGS,
+  normalizeArchivistOverride,
   normalizeRecallOverrides,
   normalizeRecallSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import type {
+  LmArchivistOverride,
   LmCompendium,
   LmEntityNode,
   LmEntryNode,
@@ -29,6 +32,7 @@ import {
 } from "./api";
 import { confirmWithHostOrBrowser, getHostComponents } from "./host-components";
 import { RecallFields, type RecallKey } from "./RecallFields";
+import { ArchivistOverrideFields } from "./AgentFields";
 
 const MODAL_STYLE = `
 [data-lm-compendium-body] {
@@ -89,9 +93,11 @@ export function CompendiumModal({
   latestCastRef.current = { characterIds, personaIds };
   // Only what this Compendium sets itself; every other Recall field follows the defaults in the Settings tab.
   const [recallOverrides, setRecallOverrides] = useState<Partial<LmRecallSettings>>({});
+  const [archivistOverrides, setArchivistOverrides] = useState<LmArchivistOverride>({});
   const [bookTokenBudgets, setBookTokenBudgets] = useState<Record<string, number>>({});
   const settingsQuery = useQuery({ queryKey: lmQueryKeys.settings, queryFn: fetchSettings, enabled: open });
   const recallDefaults = settingsQuery.data?.recall ?? DEFAULT_RECALL_SETTINGS;
+  const archivistDefaults = settingsQuery.data?.archivist ?? DEFAULT_ARCHIVIST_SETTINGS;
   const recall = useMemo(
     () => normalizeRecallSettings({ ...recallDefaults, ...recallOverrides }, recallDefaults),
     [recallDefaults, recallOverrides],
@@ -110,6 +116,7 @@ export function CompendiumModal({
       setCharacterIds(compendium.characterIds);
       setPersonaIds(compendium.personaIds);
       setRecallOverrides(compendium.overrides?.recall ?? {});
+      setArchivistOverrides(compendium.overrides?.archivist ?? {});
       setBookTokenBudgets(compendium.retrievalSettings.bookTokenBudgets);
     } else {
       setName("");
@@ -118,6 +125,7 @@ export function CompendiumModal({
       setCharacterIds([]);
       setPersonaIds([]);
       setRecallOverrides({});
+      setArchivistOverrides({});
       setBookTokenBudgets({});
     }
     setIndexStatus(null);
@@ -243,7 +251,10 @@ export function CompendiumModal({
         lorebookIds,
         characterIds,
         personaIds,
-        overrides: { recall: normalizeRecallOverrides(recallOverrides) },
+        overrides: {
+          recall: normalizeRecallOverrides(recallOverrides),
+          archivist: normalizeArchivistOverride(archivistOverrides),
+        },
         bookTokenBudgets: filteredBookBudgets,
         expectedRevision: compendium?.revision,
       },
@@ -523,6 +534,22 @@ export function CompendiumModal({
               </div>
             </div>
           ) : null}
+        </div>
+
+        <div className="space-y-2.5 rounded-lg border border-[var(--border)] bg-[var(--background)]/30 p-3">
+          <div>
+            <span className="block font-medium text-[var(--foreground)]">Archivist</span>
+            <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              Whether the Archivist reads this Compendium&apos;s chats, and how often. The connection and the rest
+              follow the Settings tab.
+            </span>
+          </div>
+          <ArchivistOverrideFields
+            defaults={archivistDefaults}
+            overrides={archivistOverrides}
+            onChange={setArchivistOverrides}
+            disabled={saving}
+          />
         </div>
       </div>
 

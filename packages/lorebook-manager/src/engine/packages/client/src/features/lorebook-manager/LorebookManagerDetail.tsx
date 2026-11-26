@@ -1200,6 +1200,7 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
             ) : view === "review" ? (
               <ReviewPanel
                 payload={payload}
+                compendium={activeCompendium}
                 onInspectNode={(ref) => {
                   setSelectedNodeRef(ref);
                   setView("graph");

@@ -1,17 +1,20 @@
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Network, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Network, Sparkles, X } from "lucide-react";
 import type {
+  LmCompendium,
   LmEntryNode,
   LmGraphPayload,
   LmProposal,
   LmProposalStatus,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { decideProposalApi, fetchProposals, lmQueryKeys } from "./api";
+import { decideProposalApi, fetchCrawlerPending, fetchProposals, lmQueryKeys, runCrawlerApi } from "./api";
 
 export interface ReviewPanelProps {
   payload: LmGraphPayload | null;
+  /** The Compendium open in the manager: Tidy entries runs over its books. */
+  compendium: LmCompendium | null;
   onInspectNode: (ref: string) => void;
 }
 
@@ -25,6 +28,8 @@ const FIELD_LABEL: Record<string, string> = {
   name: "Name",
   content: "Content",
   newFacts: "New facts",
+  addKeys: "New keywords",
+  addLinks: "New links",
   description: "Summary",
   keys: "Keys",
   secondaryKeys: "Secondary keys",
@@ -35,8 +40,16 @@ const FIELD_LABEL: Record<string, string> = {
   dynamicState: "Facets",
 };
 
-function formatValue(value: unknown): string {
+function formatValue(value: unknown, field?: string): string {
   if (value === null || value === undefined || value === "") return "—";
+  if (field === "addLinks" && Array.isArray(value)) {
+    return value
+      .map((link) => {
+        const item = (link ?? {}) as { relation?: unknown; name?: unknown };
+        return `${String(item.relation ?? "?")} → ${String(item.name ?? "?")}`;
+      })
+      .join(", ");
+  }
   if (typeof value === "string") return value.length > 400 ? `${value.slice(0, 400)}…` : value;
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (Array.isArray(value)) return value.length > 0 ? value.map(String).join(", ") : "—";
@@ -78,7 +91,7 @@ function ProposalCard({
             {isCreate ? "New entry" : "Update"} · {lorebookName}
           </span>
           <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-            {proposal.source === "crawler" ? "Auto-tag & Link" : "Archivist"}
+            {proposal.source === "crawler" ? "Crawler" : "Archivist"}
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -142,7 +155,7 @@ function ProposalCard({
                 {previous !== undefined ? (
                   <div className="text-[var(--muted-foreground)] line-through">{formatValue(previous)}</div>
                 ) : null}
-                <div>{formatValue(next)}</div>
+                <div>{formatValue(next, field)}</div>
               </dd>
             </div>
           );
@@ -153,10 +166,65 @@ function ProposalCard({
 }
 
 /**
- * Suggested lorebook changes from the Archivist and Auto-tag & Link, when the chat asks to review agent outputs.
+ * Suggested lorebook changes from the Archivist and the Crawler (Tidy entries).
  * Precedent: Long-Term Memory's Review queue (approve / dismiss per item), drawn with this package's Simulate cards.
  */
-export function ReviewPanel({ payload, onInspectNode }: ReviewPanelProps) {
+/** Tidy entries: one Crawler batch over the open Compendium. Precedent: Activity's Archivist Run now. */
+function TidyEntries({ compendium }: { compendium: LmCompendium }) {
+  const queryClient = useQueryClient();
+  const pendingQuery = useQuery({
+    queryKey: lmQueryKeys.crawlerPending(compendium.id),
+    queryFn: () => fetchCrawlerPending(compendium.id),
+  });
+  const [running, setRunning] = useState(false);
+  const remaining = pendingQuery.data;
+  const run = async () => {
+    setRunning(true);
+    try {
+      const outcome = await runCrawlerApi(compendium.id);
+      const record = outcome.run;
+      if (record?.status === "done") {
+        const entries = `${record.entryCount} ${record.entryCount === 1 ? "entry" : "entries"}`;
+        const made = `${record.proposals} ${record.proposals === 1 ? "suggestion" : "suggestions"}`;
+        toast.success(`Looked at ${entries}: ${made}`);
+      } else if (record?.status === "nothing_to_do") {
+        toast("Every entry is tidied");
+      } else {
+        toast.error(record?.detail ?? "The Crawler could not run");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "The Crawler could not run");
+    } finally {
+      setRunning(false);
+      void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
+      void queryClient.invalidateQueries({ queryKey: lmQueryKeys.crawlerPending(compendium.id) });
+      void queryClient.invalidateQueries({ queryKey: lmQueryKeys.crawlerRuns });
+    }
+  };
+  const remainingText =
+    remaining === undefined
+      ? compendium.name
+      : remaining === 0
+        ? "Every entry in " + compendium.name + " is tidied"
+        : remaining + (remaining === 1 ? " entry" : " entries") + " to tidy in " + compendium.name;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <button
+        type="button"
+        disabled={running || remaining === 0}
+        onClick={() => void run()}
+        title="Suggests a summary, a tag, keywords and links for the next batch of entries. One model call."
+        className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"
+      >
+        {running ? <Loader2 size="0.75rem" className="animate-spin" /> : <Sparkles size="0.75rem" />}
+        Tidy entries
+      </button>
+      <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{remainingText}</span>
+    </div>
+  );
+}
+
+export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelProps) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<LmProposalStatus>("pending");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -190,6 +258,8 @@ export function ReviewPanel({ payload, onInspectNode }: ReviewPanelProps) {
       className="space-y-3 pr-1"
       style={{ maxHeight: "clamp(20rem, calc(100vh - 15rem), 46rem)", overflowY: "auto" }}
     >
+      {compendium ? <TidyEntries compendium={compendium} /> : null}
+
       <div className="flex w-fit items-center gap-1 rounded-lg border border-[var(--border)] p-0.5">
         {(Object.keys(STATUS_LABEL) as LmProposalStatus[]).map((value) => (
           <button
@@ -211,7 +281,7 @@ export function ReviewPanel({ payload, onInspectNode }: ReviewPanelProps) {
       ) : proposalsQuery.isLoading ? null : proposals.length === 0 ? (
         <div className="rounded border border-[var(--border)] p-4 text-xs text-[var(--muted-foreground)]">
           {status === "pending"
-            ? "Nothing to review. When a chat's Review Agent Outputs switch is on, the Archivist and Auto-tag & Link put their suggested changes here instead of saving them."
+            ? "Nothing to review. The Archivist's suggestions from your chats and the Crawler's from Tidy entries wait here until you apply or dismiss them."
             : status === "applied"
               ? "No applied suggestions yet."
               : "No dismissed suggestions."}

@@ -4,13 +4,18 @@ import { toast } from "sonner";
 import { Eraser, Loader2, RotateCcw, Save, Sparkles } from "lucide-react";
 import {
   diffRecallSettings,
+  normalizeArchivistSettings,
+  normalizeCrawlerSettings,
   normalizeRecallSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import type {
+  LmArchivistSettings,
   LmCompendium,
+  LmCrawlerSettings,
   LmRecallSettings,
   LmSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import { ArchivistFields, CrawlerFields } from "./AgentFields";
 import {
   clearLiveRunsApi,
   fetchSettings,
@@ -22,12 +27,16 @@ import {
 import { confirmWithHostOrBrowser } from "./host-components";
 import { RecallFields } from "./RecallFields";
 
-type SettingsTab = "recall" | "troubleshooting";
+type SettingsTab = "recall" | "archivist" | "crawler" | "troubleshooting";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "recall", label: "Recall" },
+  { id: "archivist", label: "Archivist" },
+  { id: "crawler", label: "Crawler" },
   { id: "troubleshooting", label: "Troubleshooting" },
 ];
+
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 export interface SettingsPanelProps {
   compendiums: readonly LmCompendium[];
@@ -35,7 +44,7 @@ export interface SettingsPanelProps {
 
 /**
  * The settings hub, after Long-Term Memory's Memory Settings: the defaults every Compendium uses unless it sets its
- * own, one Save for the whole page, and the maintenance actions. The Archivist and Crawler tabs join with them.
+ * own, one Save for the whole page (Recall, Archivist and Crawler together), and the maintenance actions.
  */
 export function SettingsPanel({ compendiums }: SettingsPanelProps) {
   const queryClient = useQueryClient();
@@ -43,13 +52,28 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
   const saved = settingsQuery.data ?? null;
   const [tab, setTab] = useState<SettingsTab>("recall");
   const [draft, setDraft] = useState<LmRecallSettings | null>(null);
+  const [archivistDraft, setArchivistDraft] = useState<LmArchivistSettings | null>(null);
+  const [crawlerDraft, setCrawlerDraft] = useState<LmCrawlerSettings | null>(null);
   const [busy, setBusy] = useState<"save" | "reset" | "index" | "clear" | null>(null);
   const [justSaved, setJustSaved] = useState(false);
 
-  const dirty = Boolean(saved && draft && Object.keys(diffRecallSettings(saved.recall, draft)).length > 0);
+  const recallDirty = Boolean(saved && draft && Object.keys(diffRecallSettings(saved.recall, draft)).length > 0);
+  const archivistDirty = Boolean(saved && archivistDraft && !sameJson(saved.archivist, archivistDraft));
+  const crawlerDirty = Boolean(saved && crawlerDraft && !sameJson(saved.crawler, crawlerDraft));
+  const dirty = recallDirty || archivistDirty || crawlerDirty;
+  const tabDirty: Record<SettingsTab, boolean> = {
+    recall: recallDirty,
+    archivist: archivistDirty,
+    crawler: crawlerDirty,
+    troubleshooting: false,
+  };
   // Follow the server while nothing is edited (first load, a save, a reset, a refetch).
   useEffect(() => {
-    if (saved && !dirty) setDraft(saved.recall);
+    if (saved && !dirty) {
+      setDraft(saved.recall);
+      setArchivistDraft(saved.archivist);
+      setCrawlerDraft(saved.crawler);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved]);
 
@@ -65,6 +89,8 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
   const applySaved = (next: LmSettings) => {
     queryClient.setQueryData(lmQueryKeys.settings, next);
     setDraft(next.recall);
+    setArchivistDraft(next.archivist);
+    setCrawlerDraft(next.crawler);
     // Every Compendium that follows a default now resolves to the new value.
     void queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums });
   };
@@ -73,7 +99,14 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
     if (!saved || !draft || !dirty || busy) return;
     setBusy("save");
     try {
-      applySaved(await saveSettingsApi({ recall: normalizeRecallSettings(draft), expectedRevision: saved.revision }));
+      applySaved(
+        await saveSettingsApi({
+          ...(recallDirty ? { recall: normalizeRecallSettings(draft) } : {}),
+          ...(archivistDirty && archivistDraft ? { archivist: normalizeArchivistSettings(archivistDraft) } : {}),
+          ...(crawlerDirty && crawlerDraft ? { crawler: normalizeCrawlerSettings(crawlerDraft) } : {}),
+          expectedRevision: saved.revision,
+        }),
+      );
       setJustSaved(true);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save the settings");
@@ -153,7 +186,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       </div>
     );
   }
-  if (!saved || !draft) {
+  if (!saved || !draft || !archivistDraft || !crawlerDraft) {
     return (
       <div className="flex items-center gap-2 p-4 text-xs text-[var(--muted-foreground)]">
         <Loader2 aria-hidden="true" size="0.875rem" className="animate-spin" />
@@ -205,6 +238,8 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
               disabled={busy !== null}
               onClick={() => {
                 setDraft(saved.recall);
+                setArchivistDraft(saved.archivist);
+                setCrawlerDraft(saved.crawler);
                 setJustSaved(false);
               }}
               className="mari-chrome-control mari-chrome-control--small text-[var(--destructive)]"
@@ -233,7 +268,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
             className="mari-chrome-control mari-chrome-control--small"
           >
             {item.label}
-            {item.id === "recall" && dirty ? (
+            {tabDirty[item.id] ? (
               <>
                 <span aria-hidden="true" className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-[var(--primary)]" />
                 <span className="sr-only"> (unsaved changes)</span>
@@ -273,6 +308,40 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
           disabled={busy !== null}
           onChange={(key, value) => {
             setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+            setJustSaved(false);
+          }}
+        />
+      </div>
+
+      <div
+        id="lm-settings-panel-archivist"
+        role="tabpanel"
+        aria-labelledby="lm-settings-tab-archivist"
+        hidden={tab !== "archivist"}
+        className="rounded-lg border border-[var(--border)] bg-[var(--background)]/30 p-3"
+      >
+        <ArchivistFields
+          value={archivistDraft}
+          disabled={busy !== null}
+          onChange={(key, value) => {
+            setArchivistDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+            setJustSaved(false);
+          }}
+        />
+      </div>
+
+      <div
+        id="lm-settings-panel-crawler"
+        role="tabpanel"
+        aria-labelledby="lm-settings-tab-crawler"
+        hidden={tab !== "crawler"}
+        className="rounded-lg border border-[var(--border)] bg-[var(--background)]/30 p-3"
+      >
+        <CrawlerFields
+          value={crawlerDraft}
+          disabled={busy !== null}
+          onChange={(key, value) => {
+            setCrawlerDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
             setJustSaved(false);
           }}
         />

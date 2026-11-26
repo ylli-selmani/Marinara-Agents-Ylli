@@ -24,6 +24,7 @@ const STATUS_LABEL: Record<LmProposalStatus, string> = {
 const FIELD_LABEL: Record<string, string> = {
   name: "Name",
   content: "Content",
+  newFacts: "New facts",
   description: "Summary",
   keys: "Keys",
   secondaryKeys: "Secondary keys",

@@ -46,6 +46,8 @@ export interface LorebookManagerMessageRecord {
   extra: unknown;
   createdAt: string;
   agentContent?: string;
+  /** Which swipe of the message is the visible one. */
+  activeSwipeIndex?: number;
 }
 
 export interface LorebookManagerGameStateRecord {
@@ -60,6 +62,9 @@ export interface LorebookManagerChatRecord {
   characterIds: string[];
   personaId: string | null;
   connectionId?: string | null;
+  mode?: string;
+  /** The chat's metadata: a JSON string or an object (Review Agent Outputs, the agents added to the chat). */
+  metadata?: unknown;
 }
 
 /** The Engine's `CapabilityDecisionHost` (optional: absent on older Engines). */

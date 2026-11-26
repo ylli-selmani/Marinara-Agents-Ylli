@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import { claimLorebooksForChat, refreshLiveClaims, resetLiveClaims } from "./live-claims.js";
+import { resumeArchivist, stopArchivist } from "./archivist.js";
 import { contributeLiveLore, type LivePromptContextRequest } from "./live-retrieval.js";
 import { configureLorebookManagerRuntime, type LorebookManagerRuntimeHost } from "./package-runtime.js";
 import { lorebookManagerRoutes, setLiveRetrievalRegistered } from "./routes.js";
@@ -41,6 +42,8 @@ async function registerLiveRetrieval(api: ActivationContext["api"], releases: Ar
   releases.push(api.registerLorebookClaims(claimLorebooksForChat));
   // 5 s (the Engine's cap) so a Stage 2 gate has room; the gate keeps its own shorter deadline, and an Instant
   // Compendium still answers in milliseconds.
+  resumeArchivist();
+  releases.push(() => void stopArchivist());
   releases.push(api.registerPromptContext(contributeLiveLore, { timeoutMs: LIVE_CONTRIBUTOR_TIMEOUT_MS }));
   setLiveRetrievalRegistered(true);
   releases.push(() => setLiveRetrievalRegistered(false));

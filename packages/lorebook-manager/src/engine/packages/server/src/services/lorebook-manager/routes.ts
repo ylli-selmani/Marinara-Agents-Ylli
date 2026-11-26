@@ -28,6 +28,7 @@ import {
   type CreateCompendiumInput,
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
+import { listArchivistRuns, runArchivist, runInBackgroundQueue } from "./archivist.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { clearLiveRuns, listLiveRuns } from "./live-retrieval.js";
 import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
@@ -450,6 +451,26 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.delete("/runs", async (_request, reply) => {
     try {
       return { cleared: await clearLiveRuns() };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  // The Archivist: Run now reads the chat's settled messages past its watermark at once (any mode, any interval).
+  app.post("/archivist/run", async (request, reply) => {
+    try {
+      const chatId = asRecord(request.body).chatId;
+      if (typeof chatId !== "string" || !chatId) throw new CompendiumStoreError("chatId is required", 400);
+      const outcome = await runInBackgroundQueue(() => runArchivist(chatId, { force: true }));
+      return { status: outcome.status, run: outcome.run };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.get("/archivist/runs", async (_request, reply) => {
+    try {
+      return { runs: await listArchivistRuns() };
     } catch (error) {
       return sendRouteError(reply, error);
     }

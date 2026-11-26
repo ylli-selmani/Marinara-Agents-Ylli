@@ -10,6 +10,7 @@ import type {
   LmRetrievalResult,
   LmSemanticRunInfo,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import { armArchivist } from "./archivist.js";
 import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { agentAddedToChat, compendiumForChat } from "./live-claims.js";
 import {
@@ -172,7 +173,7 @@ export function resolveLiveLocation(
   };
 }
 
-function parseExtra(extra: unknown): Record<string, unknown> {
+export function parseExtra(extra: unknown): Record<string, unknown> {
   if (extra && typeof extra === "object" && !Array.isArray(extra)) return extra as Record<string, unknown>;
   if (typeof extra !== "string" || !extra.trim()) return {};
   try {
@@ -424,6 +425,8 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   const startedAt = Date.now();
   const compendium = compendiumForChat(request.chatId);
   if (!compendium || compendium.lorebookIds.length === 0) return null;
+  // A real turn (the send after a Peek too, which reuses its lore below) arms the Archivist; a preview never does.
+  if (request.preview !== true) armArchivist(request.chatId);
   const runtime = getLorebookManagerRuntime();
   const { persistence } = runtime;
   if (typeof persistence.listMessages !== "function") throw new Error("persistence.listMessages is unavailable");

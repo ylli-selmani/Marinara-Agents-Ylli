@@ -383,6 +383,41 @@ export interface LmChatRuns {
 
 export type LmProposalStatus = "pending" | "applied" | "dismissed";
 
+/** What an Archivist run came to. Only Run now records the quiet ones (off, not due, …). */
+export type LmArchivistRunStatus =
+  | "done"
+  | "failed"
+  | "unavailable"
+  | "off"
+  | "not_bound"
+  | "reply_pending"
+  | "cooling_down"
+  | "nothing_new"
+  | "not_due";
+
+export interface LmArchivistRunRecord {
+  at: string;
+  chatId: string;
+  compendiumId: string | null;
+  compendiumName: string | null;
+  status: LmArchivistRunStatus;
+  /** auto = after turns; manual = Run now. */
+  trigger: "auto" | "manual";
+  /** Messages read this run. */
+  messageCount: number;
+  /** Entries looked up and shown in full. */
+  candidateCount: number;
+  /** Suggestions made (an update folded into a pending one counts too). */
+  updates: number;
+  creates: number;
+  /** What the model said that code left out, and why (locked, unknown entry, already known, dismissed before…). */
+  skipped: Array<{ name: string; why: string }>;
+  proposalIds: string[];
+  model: string | null;
+  ms: number;
+  detail?: string;
+}
+
 /** What the Archivist or Auto-tag & Link suggests. */
 export interface LmProposalInput {
   kind: "create_entry" | "update_entry";

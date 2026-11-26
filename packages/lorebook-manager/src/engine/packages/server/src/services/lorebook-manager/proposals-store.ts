@@ -52,6 +52,76 @@ function proposalData(proposal: LmProposal): Record<string, unknown> {
   return data;
 }
 
+/** A fact or text compared loosely: lowercase, letters and digits only, single spaces. */
+export function comparableFact(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/** The facts the content doesn't hold yet (the Engine's Lorebook Keeper merges the same way), each once. */
+export function novelFacts(content: string, facts: readonly string[]): string[] {
+  const known = comparableFact(content);
+  const seen = new Set<string>();
+  return facts.filter((fact) => {
+    const comparable = comparableFact(fact);
+    if (!comparable || known.includes(comparable) || seen.has(comparable)) return false;
+    seen.add(comparable);
+    return true;
+  });
+}
+
+/** The entry's content with the novel facts added as one new paragraph. */
+export function mergeNewFacts(content: string, facts: readonly string[]): string {
+  const fresh = novelFacts(content, facts);
+  if (fresh.length === 0) return content;
+  const base = content.trimEnd();
+  return base ? `${base}\n\n${fresh.join(" ")}` : fresh.join(" ");
+}
+
+function factsOf(patch: Record<string, unknown>): string[] {
+  return Array.isArray(patch.newFacts)
+    ? patch.newFacts.filter((fact): fact is string => typeof fact === "string" && fact.trim().length > 0)
+    : [];
+}
+
+/**
+ * Fold new facts into a pending Archivist update for the same entry, so two runs never leave two suggestions that
+ * overwrite each other. Answers null when the suggestion changed meanwhile (the caller then makes a new one).
+ */
+export async function appendProposalFacts(
+  documents: LorebookManagerDocumentStore,
+  proposal: LmProposal,
+  facts: readonly string[],
+  sourceMessageRefs: LmProposal["sourceMessageRefs"],
+): Promise<LmProposal | null> {
+  const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, proposal.id);
+  const current = doc && doc.kind === PROPOSAL_DOC_KIND ? toProposal(doc.id, doc.revision, doc.data) : null;
+  if (!current || current.status !== "pending") return null;
+  const existing = factsOf(current.patch);
+  const added = novelFacts(existing.join(" "), facts);
+  const refs = [...current.sourceMessageRefs];
+  for (const ref of sourceMessageRefs) {
+    if (!refs.some((known) => known.messageId === ref.messageId && known.swipeIndex === ref.swipeIndex)) refs.push(ref);
+  }
+  const next: LmProposal = {
+    ...current,
+    patch: { ...current.patch, newFacts: [...existing, ...added] },
+    sourceMessageRefs: refs,
+  };
+  const updated = await documents.update({
+    id: next.id,
+    packageId: LOREBOOK_MANAGER_PACKAGE_ID,
+    expectedRevision: current.revision,
+    name: next.entryName || "Lorebook change",
+    description: "",
+    data: proposalData(next),
+    updatedAt: new Date().toISOString(),
+  });
+  return updated ? { ...next, revision: updated.revision } : null;
+}
+
 export async function createProposal(
   documents: LorebookManagerDocumentStore,
   input: LmProposalInput,
@@ -155,9 +225,16 @@ export async function applyProposal(runtime: LorebookManagerRuntimeHost, id: str
     .map((entry) => asRecord(entry))
     .find((entry) => entry.id === proposal.targetEntryId);
   if (!current) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
-  const before = Object.fromEntries(Object.keys(proposal.patch).map((key) => [key, current[key] ?? null]));
+  // New facts (the Archivist) merge into the entry's content as it is now, not as it was when they were suggested.
+  const { newFacts: _newFacts, ...fields } = proposal.patch;
+  const facts = factsOf(proposal.patch);
+  const patch =
+    facts.length > 0
+      ? { ...fields, content: mergeNewFacts(typeof current.content === "string" ? current.content : "", facts) }
+      : proposal.patch;
+  const before = Object.fromEntries(Object.keys(patch).map((key) => [key, current[key] ?? null]));
   try {
-    const updated = await updateLorebookEntry(proposal.targetEntryId!, proposal.patch);
+    const updated = await updateLorebookEntry(proposal.targetEntryId!, patch);
     if (!updated) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
   } catch (error) {
     if (error instanceof CompendiumStoreError) throw error;

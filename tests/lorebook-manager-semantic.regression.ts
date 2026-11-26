@@ -342,11 +342,16 @@ async function serverLane() {
       retrievalSettings: { semanticEnabled: true, queryMessageCount: 1 },
     });
     assert.equal(compendium.retrievalSettings.semanticEnabled, true);
-    assert.equal(compendium.retrievalSettings.semanticThreshold, 0.3);
+    assert.equal(compendium.retrievalSettings.semanticThreshold, 0.15, "default Min. similarity");
     await setChatCompendiumBinding(documents, "sea", compendium.id);
     await refreshLiveClaims();
     messages = [message("1", "user", "A tempest rises over the waves.")];
-    const lore = await contributeLiveLore({ chatId: "sea", chatMeta: {}, mode: "roleplay", wrapFormat: "none" });
+    const lore = await contributeLiveLore({
+      chatId: "sea",
+      chatMeta: { enableAgents: true, activeAgentIds: ["lorebook-manager"] },
+      mode: "roleplay",
+      wrapFormat: "none",
+    });
     assert.match(lore ?? "", /Gales churn the grey ocean\./u, "found by meaning alone");
     assert.doesNotMatch(lore ?? "", /Storm storm storm/u, "an excluded entry never matches by meaning");
     await new Promise((resolve) => setTimeout(resolve, 20));

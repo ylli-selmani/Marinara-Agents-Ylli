@@ -10,7 +10,9 @@ type ActivationContext = {
     registerPrivilegedRoutes(routes: FastifyPluginAsync, options: { prefix: string }): Promise<() => void>;
     registerPromptContext?(contributor: (request: LivePromptContextRequest) => Promise<string | null>): () => void;
     /** Capability API 1.839. */
-    registerLorebookClaims?(resolver: (request: { chatId: string }) => readonly string[] | null): () => void;
+    registerLorebookClaims?(
+      resolver: (request: { chatId: string; chatMeta?: Record<string, unknown> }) => readonly string[] | null,
+    ): () => void;
   };
 };
 

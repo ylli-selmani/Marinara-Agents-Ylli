@@ -55,12 +55,36 @@ export function resetLiveClaims(): void {
   compendiumByChat = new Map();
 }
 
+/** The agent id a chat lists in `activeAgentIds` once Lorebook Manager is added to it. */
+export const LOREBOOK_MANAGER_AGENT_ID = "lorebook-manager";
+
+/**
+ * Is Lorebook Manager added to this chat? The same check as the Engine's Long-Term Memory
+ * (`advanced-memory.ts` `longTermMemoryListed`): agents on for the chat, and this agent in its list. A bound
+ * Compendium does nothing on its own; without the agent the Engine scans the books as usual.
+ */
+export function agentAddedToChat(chatMeta: unknown): boolean {
+  const meta = asRecord(chatMeta);
+  return (
+    meta.enableAgents === true &&
+    Array.isArray(meta.activeAgentIds) &&
+    meta.activeAgentIds.includes(LOREBOOK_MANAGER_AGENT_ID)
+  );
+}
+
 export function compendiumForChat(chatId: string): LmCompendium | null {
   return compendiumByChat.get(chatId) ?? null;
 }
 
-/** The Engine's claim resolver: the bound Compendium's books, which the Engine's own scan then skips. */
-export function claimLorebooksForChat(request: { chatId: string }): string[] | null {
+/**
+ * The Engine's claim resolver: the bound Compendium's books, which the Engine's own scan then skips. Only while the
+ * agent is added to the chat, so removing it hands the books straight back to the Engine.
+ */
+export function claimLorebooksForChat(request: {
+  chatId: string;
+  chatMeta?: Record<string, unknown>;
+}): string[] | null {
+  if (!agentAddedToChat(request.chatMeta)) return null;
   const compendium = compendiumByChat.get(request.chatId);
   return compendium && compendium.lorebookIds.length > 0 ? [...compendium.lorebookIds] : null;
 }

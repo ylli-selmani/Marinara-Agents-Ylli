@@ -8,7 +8,7 @@ import type {
   LmSemanticRunInfo,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
-import { compendiumForChat } from "./live-claims.js";
+import { agentAddedToChat, compendiumForChat } from "./live-claims.js";
 import { getLorebookManagerRuntime, type LorebookManagerMessageRecord } from "./package-runtime.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
@@ -24,6 +24,8 @@ export interface LivePromptContextRequest {
   targetCharacterIds?: string[];
   personaId?: string | null;
   wrapFormat?: "xml" | "markdown" | "none";
+  /** On a regenerate or swipe, the message being replaced (Capability API 1.839). */
+  regenerateMessageId?: string | null;
 }
 
 function parseExtra(extra: unknown): Record<string, unknown> {
@@ -39,11 +41,20 @@ function parseExtra(extra: unknown): Record<string, unknown> {
 
 /**
  * The text Stage 1 matches against: the last `count` user/assistant messages the model can see, oldest first.
- * Messages hidden from the AI and system notes are skipped, like the Engine's own scan.
+ * Messages hidden from the AI and system notes are skipped, like the Engine's own scan. On a regenerate or swipe the
+ * replaced message and everything after it are left out too, so every swipe matches the same text.
  */
-export function recentQueryText(messages: readonly LorebookManagerMessageRecord[], count: number): string {
+export function recentQueryText(
+  messages: readonly LorebookManagerMessageRecord[],
+  count: number,
+  regenerateMessageId?: string | null,
+): string {
+  const regenerateIndex = regenerateMessageId
+    ? messages.findIndex((message) => message.id === regenerateMessageId)
+    : -1;
+  const end = regenerateIndex >= 0 ? regenerateIndex : messages.length;
   const picked: string[] = [];
-  for (let index = messages.length - 1; index >= 0 && picked.length < count; index--) {
+  for (let index = end - 1; index >= 0 && picked.length < count; index--) {
     const message = messages[index]!;
     if (message.role !== "user" && message.role !== "assistant") continue;
     if (parseExtra(message.extra).hiddenFromAI === true) continue;
@@ -184,11 +195,12 @@ async function recordLiveRun(chatId: string, record: LmLiveRunRecord): Promise<v
 }
 
 /**
- * The per-turn contributor. A chat bound to a Compendium gets Stage 1 retrieval over that Compendium's books (which
+ * The per-turn contributor. A chat with the agent added and bound to a Compendium gets Stage 1 retrieval over that Compendium's books (which
  * the Engine's scan skips, because the package claims them). Unbound chats get nothing and the Engine scans as before.
  * Throwing is deliberate on real failures: the Engine then re-scans the claimed books itself, so no lore is lost.
  */
 export async function contributeLiveLore(request: LivePromptContextRequest): Promise<string | null> {
+  if (!agentAddedToChat(request.chatMeta)) return null;
   const compendium = compendiumForChat(request.chatId);
   if (!compendium || compendium.lorebookIds.length === 0) return null;
   const runtime = getLorebookManagerRuntime();
@@ -214,7 +226,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     skipMentions: true,
     vectorSources,
   });
-  const queryText = recentQueryText(messages, settings.queryMessageCount);
+  const queryText = recentQueryText(messages, settings.queryMessageCount, request.regenerateMessageId);
   // Meaning match never fails the turn: on a timeout or error Stage 1 runs on text alone, and the run says why.
   const semantic = vectorSources ? await semanticScoresFor(vectorSources, queryText) : null;
   const result = simulateLorebookRetrieval(

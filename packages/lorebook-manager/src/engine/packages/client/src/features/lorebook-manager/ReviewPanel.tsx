@@ -185,7 +185,10 @@ export function ReviewPanel({ payload, onInspectNode }: ReviewPanelProps) {
   const proposals = proposalsQuery.data ?? [];
 
   return (
-    <div className="space-y-3">
+    <div
+      className="space-y-3 pr-1"
+      style={{ maxHeight: "clamp(20rem, calc(100vh - 15rem), 46rem)", overflowY: "auto" }}
+    >
       <div className="flex w-fit items-center gap-1 rounded-lg border border-[var(--border)] p-0.5">
         {(Object.keys(STATUS_LABEL) as LmProposalStatus[]).map((value) => (
           <button

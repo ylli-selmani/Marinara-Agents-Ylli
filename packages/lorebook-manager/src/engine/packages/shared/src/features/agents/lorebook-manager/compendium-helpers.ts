@@ -9,7 +9,7 @@ export const DEFAULT_COMPENDIUM_RETRIEVAL_SETTINGS: LmCompendiumRetrievalSetting
   respectBookBudgets: true,
   bookTokenBudgets: {},
   semanticEnabled: false,
-  semanticThreshold: 0.3,
+  semanticThreshold: 0.15,
 };
 
 function clampFloat(value: unknown, fallback: number, min: number, max: number): number {

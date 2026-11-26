@@ -132,7 +132,10 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
   const selected = chats.find((chat) => chat.chatId === selectedChatId) ?? null;
 
   return (
-    <div className="space-y-3">
+    <div
+      className="space-y-3 pr-1"
+      style={{ maxHeight: "clamp(20rem, calc(100vh - 15rem), 46rem)", overflowY: "auto" }}
+    >
       {liveRetrieval === false ? (
         <div className="rounded border border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)]">
           Live retrieval needs a newer Marinara Engine (Capability API 1.839). Until then the Engine injects your

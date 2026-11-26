@@ -148,6 +148,9 @@ async function main() {
     ];
     assert.equal(recentQueryText(window, 2), "We walk on.\n\nWe reach the Unseelie Court.");
     assert.equal(recentQueryText(window, 3), "Syliveera waits.\n\nWe walk on.\n\nWe reach the Unseelie Court.");
+    // A swipe of message 2 matches what came before it, never the text of the swipe it replaces.
+    assert.equal(recentQueryText(window, 2, "2"), "Syliveera waits.");
+    assert.equal(recentQueryText(window, 2, "missing"), recentQueryText(window, 2), "an unknown id changes nothing");
 
     const compendium = await createCompendium(documents, {
       name: "Fae",
@@ -158,11 +161,27 @@ async function main() {
     await setChatCompendiumBinding(documents, "chat-1", compendium.id);
     await refreshLiveClaims();
 
-    assert.deepEqual(claimLorebooksForChat({ chatId: "chat-1" }), ["court"]);
-    assert.equal(claimLorebooksForChat({ chatId: "chat-2" }), null, "an unbound chat claims nothing");
+    // Like Long-Term Memory: only while the agent is added to the chat (agents on, and in activeAgentIds).
+    const added = { enableAgents: true, activeAgentIds: ["lorebook-manager"] };
+    assert.deepEqual(claimLorebooksForChat({ chatId: "chat-1", chatMeta: added }), ["court"]);
+    assert.equal(claimLorebooksForChat({ chatId: "chat-2", chatMeta: added }), null, "an unbound chat claims nothing");
+    for (const chatMeta of [{}, { enableAgents: true, activeAgentIds: [] }, { ...added, enableAgents: false }]) {
+      assert.equal(
+        claimLorebooksForChat({ chatId: "chat-1", chatMeta }),
+        null,
+        `a bound chat without the agent claims nothing: ${JSON.stringify(chatMeta)}`,
+      );
+      messages = window;
+      assert.equal(
+        await contributeLiveLore({ chatId: "chat-1", chatMeta, mode: "roleplay", wrapFormat: "xml" }),
+        null,
+        `a bound chat without the agent gets no package lore: ${JSON.stringify(chatMeta)}`,
+      );
+    }
+    assert.equal(documents.docs.get("live_run:chat-1"), undefined, "no run is recorded without the agent");
 
     messages = window;
-    const request = { chatId: "chat-1", chatMeta: {}, mode: "roleplay", wrapFormat: "xml" as const };
+    const request = { chatId: "chat-1", chatMeta: added, mode: "roleplay", wrapFormat: "xml" as const };
     const text = await contributeLiveLore(request);
     assert.ok(text?.startsWith("<world_info>"), String(text));
     assert.match(text!, /The Unseelie Court rules the night\./);
@@ -177,19 +196,21 @@ async function main() {
     messages = [...window, message("6", "assistant", "Syliveera rises.")];
     const withName = await contributeLiveLore(request);
     assert.match(withName!, /Syliveera greets Ylva coldly\./, "{{user}} becomes the chat's persona");
+    const swipe = await contributeLiveLore({ ...request, regenerateMessageId: "6" });
+    assert.doesNotMatch(swipe!, /Syliveera greets/, "a swipe of message 6 doesn't match the swipe it replaces");
 
     assert.equal(await contributeLiveLore({ ...request, chatId: "chat-2" }), null, "unbound chats get nothing");
 
     // The run log for the Activity tab is written in the background.
     await new Promise((resolve) => setTimeout(resolve, 20));
     const runs = (documents.docs.get("live_run:chat-1")?.data as { runs?: Array<{ activated: unknown[] }> })?.runs;
-    assert.equal(runs?.length, 2, "both runs are recorded, newest first");
+    assert.equal(runs?.length, 3, "every run is recorded, newest first");
 
     // Activity: chats with runs, named, newest first, reasons carry their detail.
     const activity = await listLiveRuns();
     assert.equal(activity.length, 1);
     assert.equal(activity[0]!.chatName, "Fae night");
-    const unseelie = activity[0]!.runs[1]!.activated.find((item) => item.ref === "lore:unseelie");
+    const unseelie = activity[0]!.runs[2]!.activated.find((item) => item.ref === "lore:unseelie");
     assert.ok(unseelie?.reasons.some((reason) => reason.kind === "keyword" && reason.detail.length > 0));
 
     // Review: dismiss, apply an update (with an Undo snapshot), apply a create, refuse a locked entry.
@@ -261,7 +282,7 @@ async function main() {
 
     await setChatCompendiumBinding(documents, "chat-1", null);
     await refreshLiveClaims();
-    assert.equal(claimLorebooksForChat({ chatId: "chat-1" }), null, "unbinding releases the claim");
+    assert.equal(claimLorebooksForChat({ chatId: "chat-1", chatMeta: added }), null, "unbinding releases the claim");
   } finally {
     resetLiveClaims();
     release();

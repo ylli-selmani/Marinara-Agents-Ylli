@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
   LmChatRuns,
@@ -22,6 +23,87 @@ import { runStage2Gate, type GateQueryMessage } from "./stage2-gate.js";
 
 export const LIVE_RUN_DOC_KIND = "live_run";
 const MAX_RECORDED_RUNS = 20;
+
+// ── Turn reuse: a swipe (or the send after a Peek) of the same moment gets the same lore. ──
+// Like the Engine's own memory recall, retrieval runs again only when something it reads changed: the messages it
+// matches (a swipe leaves out the reply it replaces, so they're the same), the lore, the Compendium's settings, the
+// cast or the location. Meaning-match timing and the gate's model made swipes differ before (Ylli's test round 3).
+const TURN_REUSE_TTL_MS = 30 * 60 * 1000;
+const TURN_REUSE_MAX = 50;
+
+interface ReusableTurn {
+  at: number;
+  text: string | null;
+  record: LmLiveRunRecord;
+}
+
+const reusableTurns = new Map<string, ReusableTurn>();
+
+export function resetTurnReuse(): void {
+  reusableTurns.clear();
+}
+
+function turnKey(parts: unknown): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/** What of the lore Stage 1 reads; an edit to any entry starts a fresh run. */
+function loreFingerprint(payload: LmGraphPayload): string {
+  return turnKey(
+    payload.nodes.map((node) =>
+      node.nodeType === "lore"
+        ? [
+            node.ref,
+            node.name,
+            node.content,
+            node.description,
+            node.keys,
+            node.secondaryKeys,
+            node.tag,
+            node.enabled,
+            node.constant,
+            node.relationships,
+            node.characterFilterMode,
+            node.characterFilterIds,
+          ]
+        : [node.ref, node.name],
+    ),
+  );
+}
+
+function readReusableTurn(key: string, now: number): ReusableTurn | null {
+  const hit = reusableTurns.get(key);
+  if (!hit) return null;
+  if (now - hit.at > TURN_REUSE_TTL_MS) {
+    reusableTurns.delete(key);
+    return null;
+  }
+  return hit;
+}
+
+function writeReusableTurn(key: string, turn: ReusableTurn): void {
+  reusableTurns.delete(key);
+  reusableTurns.set(key, turn);
+  while (reusableTurns.size > TURN_REUSE_MAX) {
+    const oldest = reusableTurns.keys().next().value;
+    if (oldest === undefined) break;
+    reusableTurns.delete(oldest);
+  }
+}
+
+/**
+ * A run that lost a part to the clock or an error, or ran while vectors were still being made, isn't kept: the next
+ * try (a swipe) may get the whole answer.
+ */
+function degraded(semantic: LmSemanticRunInfo, gate: LmGateRunInfo | null): boolean {
+  return (
+    semantic.status === "timeout" ||
+    semantic.status === "error" ||
+    semantic.status === "no_vectors" ||
+    semantic.missingCount > 0 ||
+    (gate !== null && (gate.status === "timeout" || gate.status === "skipped" || gate.status === "error"))
+  );
+}
 
 /** What the Engine passes a prompt-context contributor (Capability API 1.839). */
 export interface LivePromptContextRequest {
@@ -328,6 +410,36 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   });
   const queryMessages = recentQueryMessages(messages, settings.queryMessageCount, request.regenerateMessageId);
   const queryText = queryMessages.map((message) => message.content).join("\n\n");
+
+  const reuseKey = turnKey([
+    request.chatId,
+    request.mode,
+    request.wrapFormat ?? null,
+    compendium.id,
+    settings,
+    queryMessages,
+    activeCharacterIds,
+    personaId,
+    location ? [location.text, location.entryRefs, location.locationId] : null,
+    loreFingerprint(payload),
+  ]);
+  const reused = readReusableTurn(reuseKey, Date.now());
+  if (reused) {
+    if (request.preview !== true)
+      void recordLiveRun(request.chatId, {
+        ...reused.record,
+        at: new Date().toISOString(),
+        reused: true,
+        totalMs: Date.now() - startedAt,
+      }).catch((error) =>
+        runtime.logger.warn(
+          "[lorebook-manager] Could not record the retrieval run for chat %s: %s",
+          request.chatId,
+          error,
+        ),
+      );
+    return reused.text;
+  }
   // Meaning match never fails the turn: on a timeout or error Stage 1 runs on text alone, and the run says why.
   const semantic = vectorSources ? await semanticScoresFor(vectorSources, queryText) : null;
   const stage1 = simulateLorebookRetrieval(
@@ -366,19 +478,18 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   });
   const result = gate.result;
 
+  const semanticInfo = semantic?.info ?? { ...SEMANTIC_OFF };
+  const record = toLiveRunRecord(
+    compendium,
+    result,
+    new Date().toISOString(),
+    semanticInfo,
+    location?.info ?? null,
+    gate.info,
+    Date.now() - startedAt,
+  );
   if (request.preview !== true)
-    void recordLiveRun(
-      request.chatId,
-      toLiveRunRecord(
-        compendium,
-        result,
-        new Date().toISOString(),
-        semantic?.info ?? { ...SEMANTIC_OFF },
-        location?.info ?? null,
-        gate.info,
-        Date.now() - startedAt,
-      ),
-    ).catch((error) =>
+    void recordLiveRun(request.chatId, record).catch((error) =>
       runtime.logger.warn(
         "[lorebook-manager] Could not record the retrieval run for chat %s: %s",
         request.chatId,
@@ -386,5 +497,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
       ),
     );
 
-  return formatLiveLore(result, payload, { activeCharacterIds, personaId, wrapFormat: request.wrapFormat });
+  const text = formatLiveLore(result, payload, { activeCharacterIds, personaId, wrapFormat: request.wrapFormat });
+  if (!degraded(semanticInfo, gate.info)) writeReusableTurn(reuseKey, { at: Date.now(), text, record });
+  return text;
 }

@@ -45,7 +45,12 @@ function gateLine(gate: NonNullable<LmLiveRunRecord["gate"]>): string {
     case "cached": {
       const kept = gate.checked - dropped;
       const how = gate.status === "cached" ? "same answer as before" : `${gate.ms} ms`;
-      const names = dropped > 0 ? ` (dropped ${gate.dropped.map((item) => item.name).join(", ")})` : "";
+      const orphaned = gate.orphaned ?? [];
+      const names =
+        (dropped > 0 ? ` (dropped ${gate.dropped.map((item) => item.name).join(", ")})` : "") +
+        (orphaned.length > 0
+          ? `; also left out, linked only through those: ${orphaned.map((item) => item.name).join(", ")}`
+          : "");
       return `${mode} kept ${kept} of ${gate.checked} loose matches${names} · ${how}`;
     }
     case "nothing_to_check":
@@ -94,6 +99,11 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
           </span>
         </div>
       </div>
+      {run.reused ? (
+        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+          Same moment as the run before (a swipe, or the send after Peek): the same lore, nothing ran again.
+        </p>
+      ) : null}
       {semantic ? (
         <p className="text-[0.6875rem] text-[var(--muted-foreground)]" title={semantic.detail ?? undefined}>
           {semantic.status === "no_vectors" && semantic.detail

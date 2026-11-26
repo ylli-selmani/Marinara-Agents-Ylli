@@ -227,10 +227,27 @@ function safeParse(raw: string): unknown {
   }
 }
 
+/**
+ * Drop the turned-down entries and the 1-hop entries that came only through them. A 1-hop entry that stays through
+ * another seed loses the reasons and links that pointed at a dropped one, so Activity never explains an entry by
+ * something that isn't in the prompt (Ylli's test round 3: "member_of → Konoha Intelligence Division" after the
+ * gate dropped it).
+ */
 function withoutRejected(result: LmRetrievalResult, rejected: ReadonlySet<string>): LmRetrievalResult {
   if (rejected.size === 0) return result;
   const gone = new Set([...rejected, ...orphanedByRejection(result, rejected)]);
-  const activated = result.activated.filter((item) => !gone.has(item.entry.ref));
+  const activated = result.activated
+    .filter((item) => !gone.has(item.entry.ref))
+    .map((item) =>
+      item.viaRefs.some((ref) => gone.has(ref)) ||
+      item.reasons.some((reason) => reason.fromRef !== undefined && gone.has(reason.fromRef))
+        ? {
+            ...item,
+            viaRefs: item.viaRefs.filter((ref) => !gone.has(ref)),
+            reasons: item.reasons.filter((reason) => reason.fromRef === undefined || !gone.has(reason.fromRef)),
+          }
+        : item,
+    );
   return { ...result, activated, totalTokens: activated.reduce((sum, item) => sum + item.tokens, 0) };
 }
 
@@ -266,9 +283,17 @@ export async function runStage2Gate(
         ...base,
         status,
         ms: Date.now() - started,
+        // Only what the gate turned down; "kept N of M" is checked minus these.
         dropped: result.activated
-          .filter((item) => rejected.has(item.entry.ref) || orphans.has(item.entry.ref))
+          .filter((item) => rejected.has(item.entry.ref))
           .map((item) => ({ ref: item.entry.ref, name: item.entry.name })),
+        ...(orphans.size > 0
+          ? {
+              orphaned: result.activated
+                .filter((item) => orphans.has(item.entry.ref))
+                .map((item) => ({ ref: item.entry.ref, name: item.entry.name })),
+            }
+          : {}),
         ...extra,
       },
     };

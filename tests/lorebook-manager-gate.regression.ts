@@ -253,16 +253,35 @@ async function unitCases() {
       item("harbor", "Harbor", ["keyword"]),
       item("susanoo", "Susanoo", ["bm25"], 30),
       { ...item("uchiha", "Uchiha", ["graph_1hop"], 20), viaRefs: ["lore:susanoo"] },
-      { ...item("akatsuki", "Akatsuki", ["graph_1hop"]), viaRefs: ["lore:susanoo", "lore:harbor"] },
+      {
+        ...item("akatsuki", "Akatsuki", ["graph_1hop"]),
+        viaRefs: ["lore:susanoo", "lore:harbor"],
+        reasons: [
+          { kind: "graph_1hop" as const, detail: "1-hop member_of → Susanoo", score: 1, fromRef: "lore:susanoo" },
+          { kind: "graph_1hop" as const, detail: "1-hop located_in → Harbor", score: 1, fromRef: "lore:harbor" },
+        ],
+      },
     ]);
     const out = await runStage2Gate(decision, withHop, context({ chatId: "hop" }));
     assert.deepEqual(
       out.result.activated.map((row) => row.entry.name),
       ["Harbor", "Akatsuki"],
     );
+    // "Kept N of M" reads checked minus dropped, so dropped holds only what the gate turned down (round 3: "-1 of 5").
     assert.deepEqual(
       out.info?.dropped.map((row) => row.name),
-      ["Susanoo", "Uchiha"],
+      ["Susanoo"],
+    );
+    assert.deepEqual(
+      out.info?.orphaned?.map((row) => row.name),
+      ["Uchiha"],
+    );
+    // Akatsuki stays through Harbor, and no longer claims a link to the dropped Susanoo.
+    const akatsuki = out.result.activated.find((row) => row.entry.name === "Akatsuki")!;
+    assert.deepEqual(akatsuki.viaRefs, ["lore:harbor"]);
+    assert.deepEqual(
+      akatsuki.reasons.map((reason) => reason.detail),
+      ["1-hop located_in → Harbor"],
     );
     assert.equal(out.result.totalTokens, 20, "Harbor 10 + Akatsuki 10");
   } finally {
@@ -473,14 +492,29 @@ async function liveCase() {
     assert.doesNotMatch(peek ?? "", /Gales churn/u, "the Decision model turned the meaning-only pick down");
     assert.match(peek ?? "", /The anchor holds\./u, "a keyword hit is never checked");
     assert.equal(decisionCalls, 1);
-    // The real turn reuses Peek's verdict, so Peek showed exactly what is sent.
+    // The real turn reuses Peek's run (turn reuse), so Peek showed exactly what is sent.
     const lore = await contributeLiveLore(request);
     assert.equal(lore, peek);
     assert.equal(decisionCalls, 1, "no second call for the same scene");
+    // A swipe of that reply: the same messages before it, so the same lore and still no call (round 3: swipes differed).
+    messages = [
+      ...messages,
+      {
+        id: "r1",
+        role: "assistant",
+        content: "The gale tears the sails.",
+        extra: "{}",
+        createdAt: "2026-11-26T00:00:01Z",
+      },
+    ];
+    assert.equal(await contributeLiveLore({ ...request, regenerateMessageId: "r1" }), peek);
+    assert.equal(decisionCalls, 1, "a swipe runs nothing again");
+    messages = messages.slice(0, 1);
     await new Promise((resolve) => setTimeout(resolve, 20));
     const run = (documents.docs.get("live_run:sea")?.data as { runs?: Array<Record<string, any>> })?.runs?.[0];
     assert.equal(run?.gate?.mode, "decision");
-    assert.equal(run?.gate?.status, "cached");
+    assert.equal(run?.reused, true, "the turn after Peek reuses its run");
+    assert.equal(run?.gate?.status, "used", "with the gate result Peek got");
     assert.deepEqual(run?.gate?.dropped, [{ ref: "lore:gale", name: "Gale Sea" }]);
     assert.equal(typeof run?.totalMs, "number");
     assert.ok(run!.totalMs >= run!.durationMs - 1, "the whole turn includes Stage 1");

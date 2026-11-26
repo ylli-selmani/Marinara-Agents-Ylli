@@ -280,6 +280,8 @@ export interface LmGateRunInfo {
   /** Meaning-only picks the gate looked at, and the ones it turned down. */
   checked: number;
   dropped: Array<{ ref: string; name: string }>;
+  /** 1-hop entries that came only through dropped ones and went with them (not counted in `checked`). */
+  orphaned?: Array<{ ref: string; name: string }>;
   ms: number;
   model?: string;
   detail?: string;
@@ -357,6 +359,8 @@ export interface LmLiveRunRecord {
   gate?: LmGateRunInfo;
   /** The contributor's whole time (Stage 1 in `durationMs` is only part of it). Absent on older runs. */
   totalMs?: number;
+  /** A swipe (or the send after a Peek) of an unchanged moment: the earlier run's lore, nothing ran again. */
+  reused?: boolean;
 }
 
 /** The location a live run used: World Maps (linked entries + boost) or the World State tracker (boost only). */

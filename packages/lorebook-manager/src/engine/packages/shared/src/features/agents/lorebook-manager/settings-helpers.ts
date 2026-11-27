@@ -183,6 +183,7 @@ export function defaultSettings(): LmSettings {
     archivist: normalizeArchivistSettings({}),
     crawler: normalizeCrawlerSettings({}),
     prompts: {},
+    sheets: {},
     revision: 0,
     updatedAt: "",
   };

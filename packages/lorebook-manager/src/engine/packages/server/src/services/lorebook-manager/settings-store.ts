@@ -1,4 +1,8 @@
 import {
+  normalizeSheetOverrides,
+  type LmSheetOverrides,
+} from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
+import {
   defaultSettings,
   normalizeArchivistSettings,
   normalizeCrawlerSettings,
@@ -24,6 +28,8 @@ export interface SaveSettingsInput {
   crawler?: Partial<LmCrawlerSettings>;
   /** Edited prompts; a key set to "" (or the built-in text) goes back to the built-in one, a missing key stays. */
   prompts?: Partial<Record<keyof LmPromptOverrides, string | null>>;
+  /** A supplied map replaces all sheet overrides; an absent map keeps them. */
+  sheets?: LmSheetOverrides;
   /** The revision the caller saw (0 = never saved). A newer one answers 409. */
   expectedRevision?: number;
 }
@@ -40,6 +46,7 @@ function toSettings(doc: LorebookManagerDocumentRecord | null): LmSettings {
     archivist: normalizeArchivistSettings(data.archivist),
     crawler: normalizeCrawlerSettings(data.crawler),
     prompts: normalizePromptOverrides(data.prompts),
+    sheets: normalizeSheetOverrides(data.sheets),
     revision: doc.revision,
     updatedAt: doc.updatedAt,
   };
@@ -52,7 +59,7 @@ export async function getSettings(documents: LorebookManagerDocumentStore): Prom
 
 async function writeSettings(
   documents: LorebookManagerDocumentStore,
-  next: Pick<LmSettings, "recall" | "archivist" | "crawler" | "prompts">,
+  next: Pick<LmSettings, "recall" | "archivist" | "crawler" | "prompts" | "sheets">,
   expectedRevision: number | undefined,
 ): Promise<LmSettings> {
   const existing = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, SETTINGS_DOC_ID);
@@ -61,7 +68,13 @@ async function writeSettings(
     throw new CompendiumStoreError("Settings were changed elsewhere; reload them and try again", 409);
   }
   const now = new Date().toISOString();
-  const data = { recall: next.recall, archivist: next.archivist, crawler: next.crawler, prompts: next.prompts };
+  const data = {
+    recall: next.recall,
+    archivist: next.archivist,
+    crawler: next.crawler,
+    prompts: next.prompts,
+    sheets: next.sheets,
+  };
   if (!existing) {
     const created = await documents.create({
       id: SETTINGS_DOC_ID,
@@ -106,6 +119,7 @@ export async function saveSettings(
       crawler: input.crawler
         ? normalizeCrawlerSettings({ ...current.crawler, ...input.crawler }, current.crawler)
         : current.crawler,
+      sheets: input.sheets !== undefined ? normalizeSheetOverrides(input.sheets) : current.sheets,
       prompts: input.prompts ? normalizePromptOverrides({ ...current.prompts, ...input.prompts }) : current.prompts,
     },
     input.expectedRevision,

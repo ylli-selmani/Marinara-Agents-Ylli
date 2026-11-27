@@ -1,3 +1,8 @@
+import {
+  normalizeSheetOverrides,
+  type LmSheetOverrides,
+} from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
+import { SheetFields } from "./SheetFields";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -34,13 +39,14 @@ import { confirmWithHostOrBrowser } from "./host-components";
 import { PromptFields } from "./PromptFields";
 import { RecallFields } from "./RecallFields";
 
-type SettingsTab = "recall" | "archivist" | "crawler" | "prompts" | "troubleshooting";
+type SettingsTab = "recall" | "archivist" | "crawler" | "prompts" | "sheets" | "troubleshooting";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "recall", label: "Recall" },
   { id: "archivist", label: "Archivist" },
   { id: "crawler", label: "Crawler" },
   { id: "prompts", label: "Prompts" },
+  { id: "sheets", label: "Sheets" },
   { id: "troubleshooting", label: "Troubleshooting" },
 ];
 
@@ -64,6 +70,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
   const [archivistDraft, setArchivistDraft] = useState<LmArchivistSettings | null>(null);
   const [crawlerDraft, setCrawlerDraft] = useState<LmCrawlerSettings | null>(null);
   const [promptsDraft, setPromptsDraft] = useState<LmPromptOverrides | null>(null);
+  const [sheetsDraft, setSheetsDraft] = useState<LmSheetOverrides | null>(null);
   const [busy, setBusy] = useState<"save" | "reset" | "index" | "clear" | null>(null);
   const [justSaved, setJustSaved] = useState(false);
 
@@ -73,12 +80,16 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
   const promptsDirty = Boolean(
     saved && promptsDraft && !sameJson(normalizePromptOverrides(saved.prompts), normalizePromptOverrides(promptsDraft)),
   );
-  const dirty = recallDirty || archivistDirty || crawlerDirty || promptsDirty;
+  const sheetsDirty = Boolean(
+    saved && sheetsDraft && !sameJson(normalizeSheetOverrides(saved.sheets), normalizeSheetOverrides(sheetsDraft)),
+  );
+  const dirty = recallDirty || archivistDirty || crawlerDirty || promptsDirty || sheetsDirty;
   const tabDirty: Record<SettingsTab, boolean> = {
     recall: recallDirty,
     archivist: archivistDirty,
     crawler: crawlerDirty,
     prompts: promptsDirty,
+    sheets: sheetsDirty,
     troubleshooting: false,
   };
   // Follow the server while nothing is edited (first load, a save, a reset, a refetch).
@@ -88,6 +99,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       setArchivistDraft(saved.archivist);
       setCrawlerDraft(saved.crawler);
       setPromptsDraft(saved.prompts);
+      setSheetsDraft(saved.sheets);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved]);
@@ -107,6 +119,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
     setArchivistDraft(next.archivist);
     setCrawlerDraft(next.crawler);
     setPromptsDraft(next.prompts);
+    setSheetsDraft(next.sheets);
     // Every Compendium that follows a default now resolves to the new value.
     void queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums });
   };
@@ -128,6 +141,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
                 ),
               }
             : {}),
+          ...(sheetsDirty && sheetsDraft ? { sheets: normalizeSheetOverrides(sheetsDraft) } : {}),
           expectedRevision: saved.revision,
         }),
       );
@@ -210,7 +224,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       </div>
     );
   }
-  if (!saved || !draft || !archivistDraft || !crawlerDraft || !promptsDraft) {
+  if (!saved || !draft || !archivistDraft || !crawlerDraft || !promptsDraft || !sheetsDraft) {
     return (
       <div className="flex items-center gap-2 p-4 text-xs text-[var(--muted-foreground)]">
         <Loader2 aria-hidden="true" size="0.875rem" className="animate-spin" />
@@ -266,6 +280,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
                 setArchivistDraft(saved.archivist);
                 setCrawlerDraft(saved.crawler);
                 setPromptsDraft(saved.prompts);
+                setSheetsDraft(saved.sheets);
                 setJustSaved(false);
               }}
               className="mari-chrome-control mari-chrome-control--small text-[var(--destructive)]"
@@ -385,6 +400,23 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
           disabled={busy !== null}
           onChange={(next) => {
             setPromptsDraft(next);
+            setJustSaved(false);
+          }}
+        />
+      </div>
+
+      <div
+        id="lm-settings-panel-sheets"
+        role="tabpanel"
+        aria-labelledby="lm-settings-tab-sheets"
+        hidden={tab !== "sheets"}
+        className="rounded-lg border border-[var(--border)] bg-[var(--background)]/30 p-3"
+      >
+        <SheetFields
+          value={sheetsDraft}
+          disabled={busy !== null}
+          onChange={(next) => {
+            setSheetsDraft(next);
             setJustSaved(false);
           }}
         />

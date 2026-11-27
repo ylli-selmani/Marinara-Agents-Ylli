@@ -1,3 +1,4 @@
+import { normalizeFieldEdits } from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
 import { LmSelect } from "./LmSelect";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -41,6 +42,7 @@ const FIELD_LABEL: Record<string, string> = {
   name: "Name",
   content: "Content",
   newFacts: "New facts",
+  fieldEdits: "Field edits",
   addKeys: "New keywords",
   removeKeys: "Remove keywords",
   addLinks: "New links",
@@ -135,6 +137,26 @@ function FieldValue({
   editable: boolean;
   onChange: (next: unknown) => void;
 }) {
+  if (field === "fieldEdits") {
+    const edits = normalizeFieldEdits(value);
+    return (
+      <div className="flex flex-wrap gap-1">
+        {edits.map((edit) => (
+          <Chip
+            key={edit.field}
+            label={edit.field}
+            onRemove={editable ? () => onChange(edits.filter((other) => other.field !== edit.field)) : undefined}
+          >
+            {edit.field}:{" "}
+            <span className={`text-[var(--muted-foreground)] ${edit.from === null ? "" : "line-through"}`}>
+              {edit.from ?? "new line"}
+            </span>{" "}
+            → {edit.to}
+          </Chip>
+        ))}
+      </div>
+    );
+  }
   if (editable && TEXT_FIELDS.has(field) && typeof value === "string") {
     return (
       <input
@@ -325,7 +347,11 @@ function ProposalCard({
           const leftOut = pending && (dropped.has(field) || (Array.isArray(next) && next.length === 0));
           const editable =
             pending &&
-            (TEXT_FIELDS.has(field) || LIST_FIELDS.has(field) || field === "addLinks" || field === "wholeWords");
+            (TEXT_FIELDS.has(field) ||
+              LIST_FIELDS.has(field) ||
+              field === "addLinks" ||
+              field === "wholeWords" ||
+              field === "fieldEdits");
           return (
             <div key={field} className="grid gap-0.5 border-t border-[var(--border)] pt-1 first:border-t-0 first:pt-0">
               <dt className="flex items-center justify-between gap-2 text-[0.625rem] font-medium text-[var(--muted-foreground)]">

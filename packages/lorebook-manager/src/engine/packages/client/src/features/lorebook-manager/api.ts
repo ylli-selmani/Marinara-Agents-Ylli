@@ -232,6 +232,7 @@ export async function saveSettingsApi(input: {
   archivist?: Partial<LmArchivistSettings>;
   crawler?: Partial<LmCrawlerSettings>;
   prompts?: Partial<Record<LmPromptKey, string | null>>;
+  sheets?: LmSettings["sheets"];
   expectedRevision?: number;
 }): Promise<LmSettings> {
   const response = await fetch(`${API_ROOT}/settings`, {

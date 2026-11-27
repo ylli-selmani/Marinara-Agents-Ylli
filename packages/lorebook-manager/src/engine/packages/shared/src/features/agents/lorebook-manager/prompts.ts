@@ -106,29 +106,29 @@ const LINKS_FORMAT = [
 ].join("\n");
 
 const ARCHIVIST_INSTRUCTIONS = [
-  "You keep a roleplay's lorebook up to date. You read recent story messages and the lorebook entries they touch.",
-  "Report only lasting facts these messages establish: who someone is or has become, where things and people are,",
-  "relationships, possessions, places, factions, rules of the world.",
-  'Skip moods, passing actions, dialogue, guesses and anything an entry already says. Skip events: "Naruto returned',
-  'after two years" is a story beat for the chat\'s memory, not lore; "Naruto is back in Konoha" may be one.',
-  "File a fact on the entry it is about: a person's change goes on the person, not on the place it happened.",
-  "Skip passing states too: a current mission, what someone is studying or planning right now.",
+  "You keep a roleplay's lorebook up to date as sheets of Field: value lines, not event logs.",
+  "Read recent messages and report only lasting facts or current-state facts they establish. Never invent.",
+  "Never write events, passing actions, dialogue, guesses or unstated values. Events belong to the Memory agent.",
+  "File each fact on the entry it is about. Currently is the replaceable field for temporary details, such as",
+  "where someone is right now or a passing condition. Rewrite it when that state changes; never append a history.",
   "",
-  "updates: new facts for an existing entry, by its id from <entries> or <directory>. Each fact is one short,",
-  "self-contained sentence in narrator voice.",
-  "creates: a new entry for a named person, place, item, faction or idea the story uses that is not in <entries> or",
-  "<directory> under any name. Well-known characters too (from a book, game or show): their entry holds this story's",
-  "version of them. A nameless figure (a guard, a quartermaster) gets none; they belong in their place's entry.",
-  "content: 2-5 sentences of narrator prose. category: one of {{categories}}. keys: 1-4 names or aliases it is",
-  "called by.",
-  "",
-  "Never invent. If nothing lasting happened, answer with empty lists.",
+  "updates: use only c* ids from <entries>, never d* ids from <directory>, whose content you have not seen.",
+  "Each fields item changes one line. field must be in that entry's sheet in <sheets> or already be a Field: line",
+  "in its text. value is the whole new value of that line, combining still-true details with the new fact.",
+  "Do not repeat a value the entry already has. Values are single-line; omit empty or unstated fields, never Unknown.",
+  "creates: a new entry for a named person, place, item, faction or idea absent from <entries> and <directory>",
+  "under any name. Well-known characters too: record this story's version. Nameless figures get no entry.",
+  "category: one of {{categories}}. Use its family template from <sheets>; event uses quest, concept uses lore.",
+  "fields: only fields the messages state, in template order. An empty template stays free text: use short prose content",
+  "instead of fields. keys: 1-4 names or aliases it is called by.",
+  "If nothing changed, answer with empty lists.",
 ].join("\n");
 
 const ARCHIVIST_FORMAT = [
   "Answer with JSON only:",
-  '{"updates": [{"id": "c1", "facts": ["..."]}], "creates": [{"name": "...", "category": "...", "content": "...",',
-  '"keys": ["..."]}]}',
+  '{"updates": [{"id": "c1", "fields": [{"field": "Role", "value": "..."}]}],',
+  '"creates": [{"name": "...", "category": "character", "fields": [{"field": "Role", "value": "..."}], "keys": ["..."]}]}',
+  'For creates with an empty template, use "content": "short prose" instead of "fields".',
 ].join("\n");
 
 const LIBRARIAN_INSTRUCTIONS = [

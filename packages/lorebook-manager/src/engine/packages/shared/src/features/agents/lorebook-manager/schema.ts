@@ -1,3 +1,5 @@
+import type { LmSheetOverrides } from "./sheets.js";
+
 export type EntityFamily =
   "character" | "location" | "faction" | "item" | "creature" | "species" | "ability" | "quest" | "lore";
 
@@ -268,6 +270,7 @@ export interface LmSettings {
   archivist: LmArchivistSettings;
   crawler: LmCrawlerSettings;
   prompts: LmPromptOverrides;
+  sheets: LmSheetOverrides;
   /** 0 until first saved. */
   revision: number;
   updatedAt: string;

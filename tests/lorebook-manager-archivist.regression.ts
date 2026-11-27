@@ -1,3 +1,14 @@
+import {
+  applyFieldEdits,
+  createSheetContent,
+  foldFieldEdits,
+  normalizeFieldEdits,
+  parseSheetLines,
+  sheetFieldEdits,
+  sheetFields,
+  sheetFamily,
+} from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/sheets.js";
+import { composePrompt } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/prompts.js";
 /**
  * B1a: the Archivist. Lookup-then-Diff over settled messages past the watermark, one model call, suggestions into
  * Review. A fake model host answers in the Engine's real shapes; no model is called for real.
@@ -25,6 +36,8 @@ import {
 import { contributeLiveLore } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
 import {
   applyProposal,
+  appendProposalFieldEdits,
+  narrowPatch,
   createProposal,
   dismissProposal,
   listProposals,
@@ -97,8 +110,20 @@ const books = [
         keys: ["Unseelie Court"],
         content: "The Unseelie Court rules the night.",
       },
-      { id: "syliveera", name: "Syliveera", keys: ["Syliveera"], content: "Syliveera greets {{user}} coldly." },
+      {
+        id: "syliveera",
+        name: "Syliveera",
+        keys: ["Syliveera"],
+        content: "Syliveera greets {{user}} coldly.\nRank: Genin\nRole: Envoy",
+        tag: "character",
+      },
       { id: "gate", name: "Thorn Gate", keys: ["Thorn Gate"], locked: true, content: "The Thorn Gate never opens." },
+      {
+        id: "directory-only",
+        name: "Forgotten Lighthouse",
+        keys: ["Forgotten Lighthouse"],
+        content: "A distant lighthouse.",
+      },
     ] as Array<Record<string, unknown>>,
   },
   { id: "cast", data: { name: "Cast", category: "character" }, entries: [] as Array<Record<string, unknown>> },
@@ -119,6 +144,54 @@ async function main() {
     "New.",
   ]);
   assert.equal(mergeNewFacts("A.", ["B.", "A", "C."]), "A.\n\nB. C.");
+
+  assert.equal(sheetFamily("event"), "quest");
+  assert.equal(sheetFamily("concept"), "lore");
+  assert.equal(sheetFamily("something else"), "lore");
+  assert.deepEqual(sheetFields("lore", { lore: ["Never"] }), []);
+  assert.equal(
+    createSheetContent(sheetFields("character"), [
+      { field: "Status", value: "Alive" },
+      { field: "Role", value: "Scout" },
+    ]),
+    "Role: Scout\nStatus: Alive",
+  );
+  assert.deepEqual(
+    sheetFieldEdits("x".repeat(1600) + "\nRank: Genin", ["Rank"], [{ field: "rank", value: "Rank: Chūnin\nnow" }]),
+    [{ field: "Rank", from: "Genin", to: "Chūnin now" }],
+  );
+  assert.deepEqual(sheetFieldEdits("Rank: Genin", ["Rank"], [{ field: "Rank", value: "Genin" }]), []);
+  assert.equal(applyFieldEdits("Old prose.", [{ field: "Role", from: null, to: "Scout" }]), "Old prose.\nRole: Scout");
+  assert.equal(
+    applyFieldEdits("A+B: old\r\nA+B: untouched\r\nTail", [{ field: "A+B", from: "old", to: "A+B: new\nvalue" }]),
+    "A+B: new value\r\nA+B: untouched\r\nTail",
+  );
+  assert.deepEqual(parseSheetLines('https://example.org\n12:30\nShe "said": no\n**Role:** bold\nRole: Scout'), [
+    { field: "Role", value: "Scout" },
+  ]);
+  assert.deepEqual(
+    normalizeFieldEdits([
+      { field: "https://bad", from: null, to: "bad" },
+      { field: "Role", from: 5, to: "bad" },
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    foldFieldEdits([{ field: "Rank", from: "Genin", to: "Chūnin" }], [{ field: "rank", from: "Chūnin", to: "Genin" }]),
+    [],
+  );
+  assert.deepEqual(
+    narrowPatch(
+      { fieldEdits: [{ field: "Rank", from: "Genin", to: "Chūnin" }] },
+      {
+        fieldEdits: [
+          { field: "rank", from: "invented", to: "Jōnin" },
+          { field: "Owner", from: null, to: "No" },
+        ],
+      },
+    ),
+    { fieldEdits: [{ field: "Rank", from: "Genin", to: "Jōnin" }] },
+  );
 
   const documents = makeMemoryDocStore();
   let messages: LorebookManagerMessageRecord[] = [];
@@ -193,7 +266,10 @@ async function main() {
     const compendium = await createCompendium(documents, { name: "Fae", lorebookIds: ["court", "cast"] });
     await setChatCompendiumBinding(documents, "chat-1", compendium.id);
     await refreshLiveClaims();
-    await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 2, readBehind: 1 } });
+    await saveSettings(documents, {
+      archivist: { mode: "suggest", everyNTurns: 2, readBehind: 1 },
+      sheets: { character: ["Rank", "Role", "Affiliation", "Currently"] },
+    });
 
     // ── Not due: two messages are left unread, so only one reply is settled. ──
     messages = [
@@ -216,14 +292,34 @@ async function main() {
         updates: [
           {
             id: shortId(prompt, "Syliveera"),
-            facts: ["Syliveera now serves the Seelie Queen.", "Syliveera greets {{user}} coldly."],
+            fields: [
+              { field: "Rank", value: "Chūnin" },
+              { field: "Role", value: "Envoy" },
+              { field: "Bogus", value: "drop" },
+              { field: "Affiliation", value: " " },
+            ],
           },
-          { id: shortId(prompt, "Thorn Gate"), facts: ["Brannoc forged its lock."] },
-          { id: "c99", facts: ["Nothing."] },
+          { id: shortId(prompt, "Thorn Gate"), fields: [{ field: "Status", value: "Sealed" }] },
+          { id: "d1", fields: [{ field: "Role", value: "Unseen" }] },
+          { id: "c99", fields: [{ field: "Status", value: "Nothing" }] },
         ],
         creates: [
-          { name: "Brannoc the Smith", category: "character", content: "Brannoc is a fae smith.", keys: [] },
-          { name: "unseelie court", category: "faction", content: "A court of the night.", keys: ["Night Court"] },
+          {
+            name: "Brannoc the Smith",
+            category: "character",
+            fields: [
+              { field: "Affiliation", value: "Court" },
+              { field: "Role", value: "Fae smith" },
+              { field: "Bogus", value: "drop" },
+            ],
+            keys: [],
+          },
+          {
+            name: "unseelie court",
+            category: "faction",
+            fields: [{ field: "Type", value: "Court of the night" }],
+            keys: ["Night Court"],
+          },
         ],
       });
     const done = await runArchivist("chat-1");
@@ -237,6 +333,7 @@ async function main() {
       "Archivist connection, then the chat's",
     );
     assert.ok(call.prompt.includes("Brannoc the Smith forged"), "settled messages are read");
+    assert.match(call.prompt, /d1 \| Forgotten Lighthouse/);
     assert.ok(!call.prompt.includes("The night deepens"), "the unread reply is not");
     assert.ok(
       /\[c\d+\] Syliveera /.test(call.prompt) && /\[c\d+\] Thorn Gate /.test(call.prompt),
@@ -246,7 +343,17 @@ async function main() {
     const pending = await listProposals(documents, "pending");
     const update = pending.find((p) => p.kind === "update_entry")!;
     assert.equal(update.targetEntryId, "syliveera");
-    assert.deepEqual(update.patch, { newFacts: ["Syliveera now serves the Seelie Queen."] }, "known facts dropped");
+    assert.deepEqual(
+      update.patch,
+      { fieldEdits: [{ field: "Rank", from: "Genin", to: "Chūnin" }] },
+      "same-value, empty and unknown fields dropped",
+    );
+    assert.equal(call.system, composePrompt("archivist"));
+    assert.match(call.prompt, /<sheets>[\s\S]*character sheet: Rank, Role, Affiliation, Currently/);
+    assert.match(
+      call.prompt,
+      new RegExp(`${shortId(call.prompt, "Syliveera")} sheet: Rank, Role, Affiliation, Currently`),
+    );
     assert.deepEqual(
       update.sourceMessageRefs.map((ref) => `${ref.messageId}:${ref.swipeIndex}`),
       ["u1:0", "a2:0", "u3:0", "a4:2", "u5:0"],
@@ -255,7 +362,7 @@ async function main() {
     const brannoc = pending.find((p) => p.entryName === "Brannoc the Smith")!;
     assert.equal(brannoc.lorebookId, "cast", "a character lands in the character book");
     assert.deepEqual(brannoc.patch, {
-      content: "Brannoc is a fae smith.",
+      content: "Role: Fae smith\nAffiliation: Court",
       keys: ["Brannoc the Smith"],
       tag: "character",
     });
@@ -265,7 +372,11 @@ async function main() {
     assert.equal(dup.lorebookId, "court");
     assert.equal(pending.length, 3, "the locked entry and the unknown id made nothing");
     const run = done.run!;
-    assert.deepEqual(run.skipped.map((s) => s.why).sort(), ["locked", "unknown entry"], JSON.stringify(run.skipped));
+    assert.deepEqual(
+      run.skipped.map((s) => s.why).sort(),
+      ["locked", "unknown entry", "unknown entry"],
+      JSON.stringify(run.skipped),
+    );
     assert.equal(run.updates, 1);
     assert.equal(run.creates, 2);
 
@@ -283,8 +394,18 @@ async function main() {
     ];
     answer = (prompt) =>
       JSON.stringify({
-        updates: [{ id: shortId(prompt, "Syliveera"), facts: ["Syliveera keeps a silver knife."] }],
-        creates: [{ name: "Brannoc the Smith", category: "character", content: "Again.", keys: [] }],
+        updates: [
+          {
+            id: shortId(prompt, "Syliveera"),
+            fields: [
+              { field: "rank", value: "Jōnin" },
+              { field: "Currently", value: "Carries a silver knife" },
+            ],
+          },
+        ],
+        creates: [
+          { name: "Brannoc the Smith", category: "character", fields: [{ field: "Role", value: "Smith" }], keys: [] },
+        ],
       });
     const second = await runArchivist("chat-1");
     assert.equal(second.status, "done");
@@ -293,23 +414,23 @@ async function main() {
     const afterSecond = await listProposals(documents, "pending");
     assert.equal(afterSecond.length, 3, "folded, not a fourth suggestion");
     const folded = afterSecond.find((p) => p.id === update.id)!;
-    assert.deepEqual(folded.patch.newFacts, [
-      "Syliveera now serves the Seelie Queen.",
-      "Syliveera keeps a silver knife.",
+    assert.deepEqual(folded.patch.fieldEdits, [
+      { field: "Rank", from: "Genin", to: "Jōnin" },
+      { field: "Currently", from: null, to: "Carries a silver knife" },
     ]);
     assert.ok(folded.sourceMessageRefs.some((ref) => ref.messageId === "a8"));
     assert.deepEqual(second.run!.skipped, [{ name: "Brannoc the Smith", why: "already suggested" }]);
 
     // ── Apply merges the facts into the entry as it is now; a dismissed create is never suggested again. ──
-    books[0]!.entries[1]!.content = "Syliveera greets {{user}} coldly. She hates iron.";
+    books[0]!.entries[1]!.content = "Syliveera greets {{user}} coldly. She hates iron.\r\nRank: Genin";
     const applied = await applyProposal(runtime, update.id);
     assert.equal(
       books[0]!.entries[1]!.content,
-      "Syliveera greets {{user}} coldly. She hates iron.\n\nSyliveera now serves the Seelie Queen. Syliveera keeps a silver knife.",
+      "Syliveera greets {{user}} coldly. She hates iron.\r\nRank: Jōnin\r\nCurrently: Carries a silver knife",
     );
     assert.deepEqual(
       applied.before,
-      { content: "Syliveera greets {{user}} coldly. She hates iron." },
+      { content: "Syliveera greets {{user}} coldly. She hates iron.\r\nRank: Genin" },
       "before for Undo",
     );
     await dismissProposal(documents, brannoc.id);
@@ -323,7 +444,9 @@ async function main() {
     answer = () =>
       JSON.stringify({
         updates: [],
-        creates: [{ name: "Brannoc the Smith", category: "character", content: "Third.", keys: [] }],
+        creates: [
+          { name: "Brannoc the Smith", category: "character", fields: [{ field: "Role", value: "Smith" }], keys: [] },
+        ],
       });
     const third = await runArchivist("chat-1");
     assert.deepEqual(third.run!.skipped, [{ name: "Brannoc the Smith", why: "dismissed before" }]);
@@ -407,8 +530,8 @@ async function main() {
     answer = (prompt) =>
       JSON.stringify({
         updates: [
-          { id: shortId(prompt, "Syliveera"), facts: ["Syliveera keeps a gold ring."] },
-          { id: shortId(prompt, "Thorn Gate"), facts: ["A new locked fact."] },
+          { id: shortId(prompt, "Syliveera"), fields: [{ field: "Currently", value: "Carries a gold ring" }] },
+          { id: shortId(prompt, "Thorn Gate"), fields: [{ field: "Status", value: "Locked" }] },
         ],
         creates: [],
       });
@@ -432,7 +555,9 @@ async function main() {
     assert.equal(automatic.status, "applied");
     assert.equal(automatic.appliedBy, "automatic");
     assert.deepEqual(automatic.before, { content: beforeAuto });
-    assert.deepEqual(automatic.after, { content: `${beforeAuto}\n\nSyliveera keeps a gold ring.` });
+    assert.deepEqual(automatic.after, {
+      content: beforeAuto.replace("Currently: Carries a silver knife", "Currently: Carries a gold ring"),
+    });
     assert.ok(!(await listProposals(documents, "pending")).some((proposal) => proposal.id === automatic.id));
     assert.ok(autoRun.run!.skipped.some((item) => item.why === "locked"));
 
@@ -463,7 +588,9 @@ async function main() {
       answer = (prompt) => {
         if (shape === "during-call") metadata = { ...JSON.parse(ADDED), agentWriteApprovalRequired: true };
         return JSON.stringify({
-          updates: [{ id: shortId(prompt, "Syliveera"), facts: [`Syliveera carries a ${shape} lantern.`] }],
+          updates: [
+            { id: shortId(prompt, "Syliveera"), fields: [{ field: "Currently", value: `Carries a ${shape} lantern` }] },
+          ],
           creates: [],
         });
       };
@@ -482,8 +609,8 @@ async function main() {
       JSON.stringify({
         updates: [],
         creates: [
-          { name: "Syliveera Envoy", category: "character", content: "Syliveera serves the court." },
-          { name: "Neris", category: "character", content: "Neris is a fae scout." },
+          { name: "Syliveera Envoy", category: "character", fields: [{ field: "Role", value: "Envoy" }] },
+          { name: "Neris", category: "character", fields: [{ field: "Role", value: "Fae scout" }] },
         ],
       });
     const creations = await runArchivist("chat-auto");
@@ -495,7 +622,7 @@ async function main() {
     assert.equal(duplicate.status, "pending");
     assert.equal(createdAuto.status, "applied");
     assert.equal(createdAuto.before, null);
-    assert.equal(createdAuto.after!.content, "Neris is a fae scout.");
+    assert.equal(createdAuto.after!.content, "Role: Fae scout");
     answer = () => JSON.stringify({ entries: [] });
     await crawlAfterArchivist(createdAuto, { waitMs: 0 });
     const neris = books[1]!.entries.find((entry) => entry.id === createdAuto.appliedEntryId)!;
@@ -537,7 +664,26 @@ async function main() {
       patch: { newFacts: ["Syliveera owns a boat."] },
       source: "archivist",
     });
+    const legacyFolded = await appendProposalFieldEdits(
+      documents,
+      newer,
+      [{ field: "Rank", from: "Jōnin", to: "Captain" }],
+      [],
+    );
+    assert.deepEqual(legacyFolded!.patch.newFacts, ["Syliveera owns a boat."]);
+    const cancelled = await appendProposalFieldEdits(
+      documents,
+      legacyFolded!,
+      sheetFieldEdits("Rank: Jōnin", ["Rank"], [{ field: "rank", value: "Jōnin" }], true),
+      [],
+    );
+    assert.deepEqual(cancelled!.patch.fieldEdits, [], "newest baseline value cancels the older edit");
+    await appendProposalFieldEdits(documents, cancelled!, [{ field: "Rank", from: "Jōnin", to: "Captain" }], []);
     await applyProposal(runtime, newer.id);
+    assert.match(String(autoEntry().content), /Syliveera owns a boat\./);
+    assert.match(String(autoEntry().content), /Rank: Captain/);
+    assert.equal(autoEntry().fieldEdits, undefined);
+    assert.equal(autoEntry().newFacts, undefined);
     autoEntry().content = "A newer edit must survive.";
     const editedEntry = structuredClone(autoEntry());
     // Exercise the actual route's status and error body without a server or network listener.
@@ -568,6 +714,43 @@ async function main() {
     assert.deepEqual(conflict, { error: "Changed since: Undo would overwrite newer edits" });
     assert.deepEqual(autoEntry(), editedEntry);
     autoEntry().content = beforeAuto;
+
+    // Empty sheets use prose, including lore/concept and unknown categories; event uses quest fields.
+    await saveSettings(documents, { archivist: { mode: "suggest" }, sheets: { character: [] } });
+    await setChatCompendiumBinding(documents, "chat-prose", compendium.id);
+    await refreshLiveClaims();
+    messages = [
+      message("prose-1", "assistant", "Asha is a watcher. Dawn Vigil guards the road. The Pact binds names."),
+    ];
+    answer = () =>
+      JSON.stringify({
+        updates: [],
+        creates: [
+          { name: "Asha", category: "character", content: "Asha is a watcher." },
+          {
+            name: "Dawn Vigil",
+            category: "event",
+            fields: [
+              { field: "Status", value: "Active" },
+              { field: "Goal", value: "Guard the road" },
+            ],
+          },
+          { name: "The Pact", category: "concept", content: "The Pact binds names." },
+          { name: "Namebinding", category: "unknown", content: "Names can be bound." },
+        ],
+      });
+    const proseRun = await runArchivist("chat-prose", { force: true });
+    const proseProposals = (await listProposals(documents)).filter((proposal) =>
+      proseRun.run!.proposalIds.includes(proposal.id),
+    );
+    assert.equal(proseRun.run!.creates, 4);
+    assert.equal(proseProposals.find((p) => p.entryName === "Asha")!.patch.content, "Asha is a watcher.");
+    assert.equal(
+      proseProposals.find((p) => p.entryName === "Dawn Vigil")!.patch.content,
+      "Goal: Guard the road\nStatus: Active",
+    );
+    assert.equal(proseProposals.find((p) => p.entryName === "The Pact")!.patch.content, "The Pact binds names.");
+    assert.equal(proseProposals.find((p) => p.entryName === "Namebinding")!.patch.content, "Names can be bound.");
 
     // ── The contributor arms the job on a real turn, never on a preview; stopping clears it. ──
     await saveSettings(documents, { archivist: { mode: "suggest" } });

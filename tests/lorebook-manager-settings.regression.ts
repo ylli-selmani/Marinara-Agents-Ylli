@@ -1,3 +1,7 @@
+import {
+  normalizeSheetOverrides,
+  LM_SHEET_TEMPLATES,
+} from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/sheets.js";
 /**
  * Settings hub (A1): one global settings document, Compendiums that store only their overrides, a lazy migration of
  * pre-hub Compendiums, and the words-to-skip / strictness knobs for shared-word matching.
@@ -148,6 +152,16 @@ const message = (id: string, role: string, content: string): LorebookManagerMess
 });
 
 function pureHelpers() {
+  assert.deepEqual(
+    normalizeSheetOverrides({ character: [" Rank ", "rank", "", 5, "Role"], lore: ["No"], unknown: ["No"] }),
+    { character: ["Rank", "Role"] },
+  );
+  assert.deepEqual(normalizeSheetOverrides({ character: [...LM_SHEET_TEMPLATES.character] }), {});
+  const bounded = normalizeSheetOverrides({
+    character: Array.from({ length: 30 }, (_, i) => `${i} ${"x".repeat(60)}`),
+  }).character!;
+  assert.equal(bounded.length, 20);
+  assert.ok(bounded.every((field) => field.length === 40));
   // Overrides keep only the fields given; everything else follows the defaults.
   const overrides = normalizeCompendiumOverrides({ recall: { tokenBudget: "4000", bogus: 1 }, archivist: {} });
   assert.deepEqual(overrides, { recall: { tokenBudget: 4000 } }, "only given fields, empty groups dropped");
@@ -402,9 +416,22 @@ async function storeAndLivePath() {
     assert.match(composePrompt("links", { links: "Use:\n{{relations}}" }), /Use:\n- is_a: /, "variables filled");
     assert.ok(!composePrompt("archivist").includes("{{"), "the built-in prompts have no unfilled variables");
 
+    const withSheets = await saveSettings(documents, {
+      sheets: { character: [" Rank ", "rank", "", "Role"], location: ["Region"] },
+    });
+    assert.deepEqual(withSheets.sheets, { character: ["Rank", "Role"], location: ["Region"] });
+    assert.deepEqual((await getSettings(documents)).sheets, withSheets.sheets);
+    assert.deepEqual(
+      (await saveSettings(documents, { sheets: { item: ["Owner"] } })).sheets,
+      { item: ["Owner"] },
+      "saved map replaces previous overrides",
+    );
+    assert.deepEqual((await saveSettings(documents, { sheets: {} })).sheets, {});
+    await saveSettings(documents, { sheets: { character: ["Rank"] } });
     // Reset: factory defaults again (edited prompts too); Compendium overrides stay.
     const reset = await resetSettings(documents);
     assert.deepEqual(reset.prompts, {});
+    assert.deepEqual(reset.sheets, {});
     assert.equal(reset.recall.tokenBudget, DEFAULT_RECALL_SETTINGS.tokenBudget);
     assert.equal(reset.recall.queryMessageCount, DEFAULT_RECALL_SETTINGS.queryMessageCount);
     assert.deepEqual((await getCompendium(documents, plain.id))!.overrides, { recall: { queryMessageCount: 2 } });

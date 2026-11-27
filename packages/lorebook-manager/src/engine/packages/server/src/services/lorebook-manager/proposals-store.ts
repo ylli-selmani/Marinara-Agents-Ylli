@@ -1,3 +1,9 @@
+import {
+  applyFieldEdits,
+  foldFieldEdits,
+  normalizeFieldEdits,
+  type LmFieldEdit,
+} from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
 import { isDeepStrictEqual } from "node:util";
 import { LM_RELATION_VALUES } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
@@ -159,6 +165,16 @@ export function narrowPatch(original: Record<string, unknown>, edited: unknown):
       if (text) result[field] = field === "tag" ? text.toLowerCase().slice(0, 40) : text.slice(0, 400);
       continue;
     }
+    if (field === "fieldEdits") {
+      const allowed = normalizeFieldEdits(value);
+      const kept = normalizeFieldEdits(proposed).flatMap((edit) => {
+        const known = allowed.find((item) => item.field.toLowerCase() === edit.field.toLowerCase());
+        return known ? [{ ...known, to: edit.to }] : [];
+      });
+      const folded = foldFieldEdits([], kept);
+      if (folded.length > 0) result[field] = folded;
+      continue;
+    }
     if (EDITABLE_LISTS.has(field)) {
       const allowed = new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === "string"));
       const kept = [...new Set((Array.isArray(proposed) ? proposed : []).filter((item) => allowed.has(item)))];
@@ -234,6 +250,38 @@ export async function appendProposalFacts(
   const next: LmProposal = {
     ...current,
     patch: { ...current.patch, newFacts: [...existing, ...added] },
+    sourceMessageRefs: refs,
+  };
+  const updated = await documents.update({
+    id: next.id,
+    packageId: LOREBOOK_MANAGER_PACKAGE_ID,
+    expectedRevision: current.revision,
+    name: next.entryName || "Lorebook change",
+    description: "",
+    data: proposalData(next),
+    updatedAt: new Date().toISOString(),
+  });
+  return updated ? { ...next, revision: updated.revision } : null;
+}
+
+/** Fold fields by name, retaining the first spelling and baseline and the latest value. Legacy facts stay. */
+export async function appendProposalFieldEdits(
+  documents: LorebookManagerDocumentStore,
+  proposal: LmProposal,
+  edits: readonly LmFieldEdit[],
+  sourceMessageRefs: LmProposal["sourceMessageRefs"],
+): Promise<LmProposal | null> {
+  const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, proposal.id);
+  const current = doc && doc.kind === PROPOSAL_DOC_KIND ? toProposal(doc.id, doc.revision, doc.data) : null;
+  if (!current || current.status !== "pending") return null;
+  const fieldEdits = foldFieldEdits(normalizeFieldEdits(current.patch.fieldEdits), edits);
+  const refs = [...current.sourceMessageRefs];
+  for (const ref of sourceMessageRefs) {
+    if (!refs.some((known) => known.messageId === ref.messageId && known.swipeIndex === ref.swipeIndex)) refs.push(ref);
+  }
+  const next: LmProposal = {
+    ...current,
+    patch: { ...current.patch, fieldEdits },
     sourceMessageRefs: refs,
   };
   const updated = await documents.update({
@@ -411,13 +459,21 @@ export async function applyProposal(
     .map((entry) => asRecord(entry))
     .find((entry) => entry.id === proposal.targetEntryId);
   if (!current) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
-  // New facts (the Archivist) merge into the entry's content as it is now, not as it was when they were suggested.
-  const { newFacts: _newFacts, ...fields } = resolveCrawlerAdditions(proposal.patch, current, proposal.source);
+  // Resolve field edits and legacy facts against the full content as it is now.
+  const {
+    newFacts: _newFacts,
+    fieldEdits: _fieldEdits,
+    ...fields
+  } = resolveCrawlerAdditions(proposal.patch, current, proposal.source);
   const facts = factsOf(proposal.patch);
+  const fieldEdits = normalizeFieldEdits(proposal.patch.fieldEdits);
+  const content = typeof current.content === "string" ? current.content : "";
   const patch =
-    facts.length > 0
-      ? { ...fields, content: mergeNewFacts(typeof current.content === "string" ? current.content : "", facts) }
+    facts.length > 0 || fieldEdits.length > 0
+      ? { ...fields, content: applyFieldEdits(mergeNewFacts(content, facts), fieldEdits) }
       : fields;
+  if ("fieldEdits" in proposal.patch && Object.keys(patch).length === 0)
+    throw new CompendiumStoreError("Nothing is left to apply; dismiss the suggestion instead", 400);
   const before = structuredClone(Object.fromEntries(Object.keys(patch).map((key) => [key, current[key] ?? null])));
   let after: Record<string, unknown>;
   try {

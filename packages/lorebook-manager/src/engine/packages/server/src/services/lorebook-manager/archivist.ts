@@ -1,3 +1,10 @@
+import { ENTITY_FAMILIES } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import {
+  createSheetContent,
+  sheetFields,
+  sheetFieldEdits,
+  type LmSheetOverrides,
+} from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import { resolveArchivistSettings } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import type {
@@ -18,12 +25,11 @@ import {
   type LorebookManagerMessageRecord,
 } from "./package-runtime.js";
 import {
-  appendProposalFacts,
+  appendProposalFieldEdits,
   applyProposal,
   comparableFact,
   createProposal,
   listProposals,
-  novelFacts,
 } from "./proposals-store.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { getSettings } from "./settings-store.js";
@@ -53,8 +59,6 @@ const CANDIDATE_LIMIT = 25;
 const CANDIDATE_CONTENT_CHARS = 1_500;
 const DIRECTORY_LIMIT = 400;
 const MAX_UPDATES = 8;
-const MAX_FACTS = 6;
-const MAX_FACT_CHARS = 400;
 const MAX_CREATES = 5;
 const MAX_CREATE_CHARS = 2_000;
 const MAX_RECORDED_RUNS = 20;
@@ -371,6 +375,7 @@ export function archivistUserPrompt(
   candidates: readonly LmEntryNode[],
   directory: readonly LmEntryNode[],
   window: readonly LorebookManagerMessageRecord[],
+  sheets?: LmSheetOverrides,
 ): string {
   const entries = candidates.map((entry, index) => entryBlock(`c${index + 1}`, entry)).join("\n\n");
   const rows = directory.map(
@@ -380,7 +385,15 @@ export function archivistUserPrompt(
   const messages = window
     .map((message) => `${message.role === "user" ? "Player" : "Story"}: ${messageText(message)}`)
     .join("\n\n");
+  const templates = ENTITY_FAMILIES.map(
+    (family) => `${family} sheet: ${sheetFields(family, sheets).join(", ") || "prose"}`,
+  );
+  const entrySheets = candidates.map(
+    (entry, index) =>
+      `c${index + 1} sheet: ${sheetFields(entry.inferredFamily ?? entry.family, sheets).join(", ") || "prose"}`,
+  );
   return [
+    `<sheets>\n${[...templates, ...entrySheets].join("\n")}\n</sheets>`,
     `<entries>\n${entries || "(none)"}\n</entries>`,
     `<directory>\nid | name | tag | keys\n${rows.join("\n") || "(none)"}\n</directory>`,
     `<messages>\n${messages}\n</messages>`,
@@ -534,7 +547,6 @@ export async function runArchivist(
   const directory = loreEntries.filter((entry) => !candidateRefs.has(entry.ref)).slice(0, DIRECTORY_LIMIT);
   const byShortId = new Map<string, LmEntryNode>([
     ...candidates.map((entry, index) => [`c${index + 1}`, entry] as const),
-    ...directory.map((entry, index) => [`d${index + 1}`, entry] as const),
   ]);
 
   // Diff: one model call.
@@ -555,7 +567,7 @@ export async function runArchivist(
     const completion = await model.chatComplete(
       [
         { role: "system", content: composePrompt("archivist", settings.prompts) },
-        { role: "user", content: archivistUserPrompt(candidates, directory, window) },
+        { role: "user", content: archivistUserPrompt(candidates, directory, window, settings.sheets) },
       ],
       {
         ...(archivist.temperature === null ? {} : { temperature: archivist.temperature }),
@@ -622,20 +634,21 @@ export async function runArchivist(
       skipped.push({ name: entry.name, why: "locked" });
       continue;
     }
-    const facts = (Array.isArray(item.facts) ? item.facts : [])
-      .map((fact) => cleanText(fact, MAX_FACT_CHARS))
-      .filter(Boolean)
-      .slice(0, MAX_FACTS);
-    const fresh = novelFacts(entry.content, facts);
+    const open = archivistPending.find(
+      (proposal) => proposal.kind === "update_entry" && proposal.targetEntryId === entry.id,
+    );
+    const fresh = sheetFieldEdits(
+      entry.content,
+      sheetFields(entry.inferredFamily ?? entry.family, settings.sheets),
+      item.fields,
+      Boolean(open),
+    );
     if (fresh.length === 0) {
       skipped.push({ name: entry.name, why: "already known" });
       continue;
     }
-    const open = archivistPending.find(
-      (proposal) => proposal.kind === "update_entry" && proposal.targetEntryId === entry.id,
-    );
     if (open) {
-      const folded = await appendProposalFacts(documents, open, fresh, sourceMessageRefs);
+      const folded = await appendProposalFieldEdits(documents, open, fresh, sourceMessageRefs);
       if (folded) {
         await handleProposal(folded);
         updates += 1;
@@ -647,7 +660,7 @@ export async function runArchivist(
       lorebookId: entry.lorebookId,
       targetEntryId: entry.id,
       entryName: entry.name,
-      patch: { newFacts: fresh },
+      patch: { fieldEdits: fresh },
       reason,
       source: "archivist",
       chatId,
@@ -668,7 +681,17 @@ export async function runArchivist(
   for (const raw of (Array.isArray(parsed.creates) ? parsed.creates : []).slice(0, MAX_CREATES)) {
     const item = asRecord(raw);
     const name = cleanText(item.name, 80);
-    const content = typeof item.content === "string" ? item.content.trim().slice(0, MAX_CREATE_CHARS) : "";
+    const rawCategory = cleanText(item.category, 20).toLowerCase();
+    const category: Category = (ARCHIVIST_CATEGORIES as readonly string[]).includes(rawCategory)
+      ? (rawCategory as Category)
+      : "concept";
+    const template = sheetFields(category, settings.sheets);
+    const content =
+      template.length === 0
+        ? typeof item.content === "string"
+          ? item.content.trim().slice(0, MAX_CREATE_CHARS)
+          : ""
+        : createSheetContent(template, item.fields);
     if (!name || !content) {
       skipped.push({ name: name || "?", why: "empty" });
       continue;
@@ -681,10 +704,6 @@ export async function runArchivist(
       skipped.push({ name, why: "dismissed before" });
       continue;
     }
-    const rawCategory = cleanText(item.category, 20).toLowerCase();
-    const category: Category = (ARCHIVIST_CATEGORIES as readonly string[]).includes(rawCategory)
-      ? (rawCategory as Category)
-      : "concept";
     const keys = [
       ...new Set(
         (Array.isArray(item.keys) ? item.keys : [])

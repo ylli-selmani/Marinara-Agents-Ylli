@@ -84,8 +84,28 @@ export function crawlHash(entry: Pick<LmEntryNode, "name" | "content">): string 
 
 interface CrawlerState {
   crawled: Record<string, string>;
-  /** Runs that looked at an entry without tidying it (no summary, or left out of the answer). */
-  attempts: Record<string, number>;
+  /**
+   * Runs that looked at an entry without tidying it (no summary, or left out of the answer), with what they read: an
+   * edit starts the count over.
+   */
+  attempts: Record<string, { hash: string; count: number }>;
+}
+
+/** Tries for the entry as it is now. */
+function triesOf(state: CrawlerState, entry: LmEntryNode): number {
+  const attempt = state.attempts[entry.id];
+  return attempt && attempt.hash === crawlHash(entry) ? attempt.count : 0;
+}
+
+/** The state with these entries untidied and their tries cleared (Redo, before its run is recorded). */
+function withoutEntries(state: CrawlerState, ids: readonly string[]): CrawlerState {
+  const crawled = { ...state.crawled };
+  const attempts = { ...state.attempts };
+  for (const id of ids) {
+    delete crawled[id];
+    delete attempts[id];
+  }
+  return { crawled, attempts };
 }
 
 async function readState(
@@ -95,62 +115,72 @@ async function readState(
   const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, stateDocId(compendiumId));
   const data = (doc?.data ?? {}) as { crawled?: unknown; attempts?: unknown };
   const crawled: Record<string, string> = {};
-  const attempts: Record<string, number> = {};
+  const attempts: CrawlerState["attempts"] = {};
   if (data.crawled && typeof data.crawled === "object" && !Array.isArray(data.crawled)) {
     for (const [id, hash] of Object.entries(data.crawled as Record<string, unknown>)) {
       if (typeof hash === "string") crawled[id] = hash;
     }
   }
   if (data.attempts && typeof data.attempts === "object" && !Array.isArray(data.attempts)) {
-    for (const [id, count] of Object.entries(data.attempts as Record<string, unknown>)) {
-      if (typeof count === "number" && count > 0) attempts[id] = count;
+    for (const [id, raw] of Object.entries(data.attempts as Record<string, unknown>)) {
+      const attempt = (raw ?? {}) as { hash?: unknown; count?: unknown };
+      if (typeof attempt.hash === "string" && typeof attempt.count === "number" && attempt.count > 0) {
+        attempts[id] = { hash: attempt.hash, count: attempt.count };
+      }
     }
   }
   return { state: { crawled, attempts }, revision: doc ? doc.revision : null };
 }
 
-/** Tidied entries are marked with what the model read; tried ones count a try; untidied ones start over. */
+/**
+ * Untidied entries start over; tidied ones are marked with what the model read; tried ones count a try. Applied to the
+ * state as stored, again on a revision conflict, so a write never silently drops another one.
+ */
 async function saveCrawlState(
   documents: LorebookManagerDocumentStore,
   compendiumId: string,
   change: { tidied?: readonly LmEntryNode[]; tried?: readonly LmEntryNode[]; untidy?: readonly string[] },
 ): Promise<void> {
-  const { state, revision } = await readState(documents, compendiumId);
-  const crawled = { ...state.crawled };
-  const attempts = { ...state.attempts };
-  for (const entry of change.tidied ?? []) {
-    crawled[entry.id] = crawlHash(entry);
-    delete attempts[entry.id];
-  }
-  for (const entry of change.tried ?? []) attempts[entry.id] = (attempts[entry.id] ?? 0) + 1;
-  for (const id of change.untidy ?? []) {
-    delete crawled[id];
-    delete attempts[id];
-  }
-  const now = new Date().toISOString();
-  const data = { compendiumId, crawled, attempts };
-  if (revision === null) {
-    await documents.create({
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { state: stored, revision } = await readState(documents, compendiumId);
+    const state = withoutEntries(stored, change.untidy ?? []);
+    for (const entry of change.tidied ?? []) {
+      state.crawled[entry.id] = crawlHash(entry);
+      delete state.attempts[entry.id];
+    }
+    for (const entry of change.tried ?? []) {
+      state.attempts[entry.id] = { hash: crawlHash(entry), count: triesOf(state, entry) + 1 };
+    }
+    const now = new Date().toISOString();
+    const data = { compendiumId, crawled: state.crawled, attempts: state.attempts };
+    if (revision === null) {
+      await documents.create({
+        id: stateDocId(compendiumId),
+        packageId: LOREBOOK_MANAGER_PACKAGE_ID,
+        kind: CRAWLER_STATE_DOC_KIND,
+        name: `Crawler state for Compendium ${compendiumId}`,
+        description: "",
+        data,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return;
+    }
+    const updated = await documents.update({
       id: stateDocId(compendiumId),
       packageId: LOREBOOK_MANAGER_PACKAGE_ID,
-      kind: CRAWLER_STATE_DOC_KIND,
+      expectedRevision: revision,
       name: `Crawler state for Compendium ${compendiumId}`,
       description: "",
       data,
-      createdAt: now,
       updatedAt: now,
     });
-    return;
+    if (updated) return;
   }
-  await documents.update({
-    id: stateDocId(compendiumId),
-    packageId: LOREBOOK_MANAGER_PACKAGE_ID,
-    expectedRevision: revision,
-    name: `Crawler state for Compendium ${compendiumId}`,
-    description: "",
-    data,
-    updatedAt: now,
-  });
+  getLorebookManagerRuntime().logger.warn(
+    "[lorebook-manager] Crawler state for %s kept changing; not saved",
+    compendiumId,
+  );
 }
 
 async function recordRun(documents: LorebookManagerDocumentStore, record: LmCrawlerRunRecord): Promise<void> {
@@ -236,7 +266,7 @@ function untidied(
   const waiting = new Set(
     pending.filter((proposal) => proposal.source === "crawler").map((proposal) => proposal.targetEntryId),
   );
-  const tries = (entry: LmEntryNode) => state.attempts[entry.id] ?? 0;
+  const tries = (entry: LmEntryNode) => triesOf(state, entry);
   return payload.nodes
     .filter((node): node is LmEntryNode => node.nodeType === "lore" && books.has(node.lorebookId))
     .filter((entry) => !entry.locked && !waiting.has(entry.id) && state.crawled[entry.id] !== crawlHash(entry))
@@ -417,6 +447,11 @@ export interface CrawlerRunOptions {
   /** The chat whose connection backs up the Crawler's own (after an Archivist change). */
   chatId?: string | null;
   signal?: AbortSignal;
+  /**
+   * Redo: these waiting suggestions are replaced. Their entries count as untidied for this run, and the suggestions are
+   * dismissed only once the run is done, so a failed model call loses nothing.
+   */
+  replacing?: readonly string[];
 }
 
 export async function runCrawler(compendiumId: string, options: CrawlerRunOptions = {}): Promise<CrawlerOutcome> {
@@ -449,11 +484,16 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
 
   const settings = await getSettings(documents);
   const crawler = settings.crawler;
-  const [payload, { state }, pending] = await Promise.all([
+  const [payload, { state: stored }, everyPending] = await Promise.all([
     compendiumGraph(compendium, true),
     readState(documents, compendiumId),
     listProposals(documents, "pending"),
   ]);
+  const replacing = new Set(options.replacing ?? []);
+  const pending = everyPending.filter((proposal) => !replacing.has(proposal.id));
+  // Redo asks again from scratch: its entries are untidied and their tries cleared (saved with the run).
+  const redoIds = trigger === "redo" ? (options.entryIds ?? []) : [];
+  const state = withoutEntries(stored, redoIds);
   const everyUntidied = untidied(payload, compendium, state, pending);
   let candidates = everyUntidied;
   if (options.entryIds) {
@@ -658,7 +698,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     if (links.length > 0) patch.addLinks = links.map(({ key, relation, name }) => ({ key, relation, name }));
     // A summary is required where the entry has none: without one the entry isn't tidied, up to MAX_SUMMARY_TRIES.
     if (!entry.description.trim() && !patch.description) {
-      const tries = (state.attempts[entry.id] ?? 0) + 1;
+      const tries = triesOf(state, entry) + 1;
       if (tries >= MAX_SUMMARY_TRIES) {
         tidied.push(entry);
         skipped.push({ name: entry.name, why: `no summary after ${tries} tries` });
@@ -687,7 +727,15 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   // it left out stays untidied and counts a try, so it moves behind the entries not tried yet.
   const leftOut = batch.filter((entry) => !answered.has(entry.id));
   tried.push(...leftOut);
-  await saveCrawlState(documents, compendiumId, { tidied, tried });
+  await saveCrawlState(documents, compendiumId, { untidy: redoIds, tidied, tried });
+  // The suggestions Redo replaced go only now; one decided meanwhile (another tab) stays as it is.
+  for (const id of replacing) {
+    try {
+      await dismissProposal(documents, id);
+    } catch {
+      // Already applied or dismissed.
+    }
+  }
   if (leftOut.length > 0) {
     skipped.push({ name: `${leftOut.length} entries`, why: "not answered, left for the next run" });
   }
@@ -716,8 +764,9 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
 }
 
 /**
- * Redo last batch, for a model hiccup: the newest finished batch's waiting suggestions are dismissed and its entries
- * asked again. An entry whose suggestion from that batch was applied stays as it is.
+ * Redo last batch, for a model hiccup: the newest finished batch's entries are asked again, and its waiting
+ * suggestions are dismissed once the new run is done. An entry whose suggestion from that batch was applied stays as
+ * it is.
  */
 export async function redoLastCrawl(
   compendiumId: string,
@@ -731,17 +780,17 @@ export async function redoLastCrawl(
   if (!last) return { status: "nothing_to_do", run: null, detail: "No batch to redo yet" };
   const fromRun = new Set(last.proposalIds);
   const applied = new Set<string>();
+  const replacing: string[] = [];
   for (const proposal of await listProposals(documents)) {
     if (!fromRun.has(proposal.id) || proposal.kind !== "update_entry" || !proposal.targetEntryId) continue;
     if (proposal.status === "applied") applied.add(proposal.targetEntryId);
-    else if (proposal.status === "pending") await dismissProposal(documents, proposal.id);
+    else if (proposal.status === "pending") replacing.push(proposal.id);
   }
   const again = last.entryIds!.filter((id) => !applied.has(id));
   if (again.length === 0) {
     return { status: "nothing_to_do", run: null, detail: "Every suggestion from the last batch was applied" };
   }
-  await saveCrawlState(documents, compendiumId, { untidy: again });
-  return runCrawler(compendiumId, { entryIds: again, trigger: "redo", signal: options.signal });
+  return runCrawler(compendiumId, { entryIds: again, trigger: "redo", replacing, signal: options.signal });
 }
 
 /** The Compendium an applied Archivist change belongs to: its chat's, else the first one holding its lorebook. */

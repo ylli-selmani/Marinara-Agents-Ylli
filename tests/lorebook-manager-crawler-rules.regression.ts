@@ -250,6 +250,17 @@ async function main() {
     await dismissProposal(documents, clone.id);
     assert.equal(await countUntidied(compendium.id), 1, "tried once without a summary: untidied");
     answer = (p) => JSON.stringify({ entries: [{ id: shortId(p, "Shadow Clone Technique") }] });
+    // An edit starts the count over: the new text gets its own two tries.
+    const originalContent = String(entry("clone").content);
+    entry("clone").content = `${originalContent} Edited.`;
+    const afterEdit = await runCrawler(compendium.id);
+    assert.ok(
+      afterEdit.run!.skipped.some((item) => item.why === "no summary; asked again next run"),
+      "an edited entry isn't given up on its first miss",
+    );
+    entry("clone").content = originalContent;
+    const reverted = await runCrawler(compendium.id);
+    assert.ok(reverted.run!.skipped.some((item) => item.why === "no summary; asked again next run"));
     const second = await runCrawler(compendium.id);
     assert.equal(second.run!.entryCount, 1);
     assert.ok(second.run!.skipped.some((item) => item.why === "no summary after 2 tries"));
@@ -291,6 +302,14 @@ async function main() {
     await runCrawler(compendium.id);
     const waiting = (await listProposals(documents, "pending")).find((proposal) => proposal.targetEntryId === "clone")!;
     assert.equal(waiting.patch.description, "Again.");
+    // A Redo whose model call fails dismisses nothing.
+    answer = () => "not json";
+    assert.equal((await redoLastCrawl(compendium.id)).status, "failed");
+    assert.equal(
+      (await listProposals(documents)).find((proposal) => proposal.id === waiting.id)!.status,
+      "pending",
+      "a failed Redo keeps the suggestion",
+    );
     answer = (p) => JSON.stringify({ entries: [{ id: shortId(p, "Shadow Clone Technique"), description: "Third." }] });
     await redoLastCrawl(compendium.id);
     const redone = await listProposals(documents);

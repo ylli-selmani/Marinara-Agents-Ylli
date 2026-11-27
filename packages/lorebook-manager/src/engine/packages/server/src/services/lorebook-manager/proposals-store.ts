@@ -373,8 +373,9 @@ export async function applyProposal(
       }
     }
     if (applied.length === 0) throw new CompendiumStoreError("None of these entries could be changed", 409);
-    // Entries left out (in Review, or refused) are kept apart, so the next card doesn't list them again.
-    const kept = new Set(applied.map((item) => item.id));
+    // Entries you left out in Review are kept apart, so the next card doesn't list them again. One the Engine refused
+    // (locked, a failed write) is neither: a later card may list it again.
+    const kept = new Set(listed.map((item) => item.id));
     const original = Array.isArray(loaded.patch.wholeWords) ? loaded.patch.wholeWords.map(asRecord) : [];
     const leftOut = original.filter((item) => typeof item.id === "string" && !kept.has(item.id));
     return saveDecision(documents, {

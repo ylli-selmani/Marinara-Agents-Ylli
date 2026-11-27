@@ -418,7 +418,8 @@ function TidyEntries({ compendium }: { compendium: LmCompendium }) {
     <div className="flex flex-wrap items-center gap-2 text-xs">
       <button
         type="button"
-        disabled={running !== null || remaining === 0}
+        // Stays clickable with every entry tidied: it also makes the whole-words card for new entries.
+        disabled={running !== null}
         onClick={() => void run("tidy")}
         title="Suggests a summary, a tag, keyword fixes and links for the next batch of entries. One model call."
         className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"

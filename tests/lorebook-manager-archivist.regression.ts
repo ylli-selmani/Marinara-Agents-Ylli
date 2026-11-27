@@ -17,6 +17,10 @@ import { composePrompt } from "../packages/lorebook-manager/src/engine/packages/
 import assert from "node:assert/strict";
 import {
   ARCHIVIST_SYSTEM,
+  getArchivistBackfillStatus,
+  startArchivistBackfill,
+  stopArchivistBackfill,
+  runInBackgroundQueue,
   armArchivist,
   isArchivistArmed,
   listArchivistRuns,
@@ -57,6 +61,7 @@ import {
   type LorebookManagerMessageRecord,
   type LorebookManagerRuntimeHost,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
+import { activate } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/server-entry.js";
 import { saveSettings } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/settings-store.js";
 
 function makeMemoryDocStore(): LorebookManagerDocumentStore & { docs: Map<string, LorebookManagerDocumentRecord> } {
@@ -132,7 +137,7 @@ const books = [
 // The chat's metadata arrives as a JSON string from the host (capability-persistence `mapChat`).
 const ADDED = JSON.stringify({ enableAgents: true, activeAgentIds: ["lorebook-manager"] });
 
-type Answer = (prompt: string) => string | Error;
+type Answer = (prompt: string) => string | Error | Promise<string | Error>;
 
 async function main() {
   // Pure helpers first.
@@ -225,7 +230,7 @@ async function main() {
             const system = chat.find((m) => m.role === "system")?.content ?? "";
             const prompt = chat.find((m) => m.role === "user")?.content ?? "";
             modelCalls.push({ request, prompt, system });
-            const reply = answer(prompt);
+            const reply = await answer(prompt);
             if (reply instanceof Error) throw reply;
             return { content: reply, finishReason: "stop" };
           },
@@ -519,6 +524,532 @@ async function main() {
     assert.ok(modelCalls.at(-1)!.prompt.includes("Line 53.") && modelCalls.at(-1)!.prompt.includes("Line 68."));
     answer = () => '{"updates": [], "creates": []}';
 
+    // C4: processed keys separate normal forward reads from older history, including swipes.
+    const emptyAnswer = '{"updates": [], "creates": []}';
+    const stateOf = (chatId: string) =>
+      documents.docs.get(`archivist_state:${chatId}`)!.data as {
+        lastMessageId: string | null;
+        lastMessageAt: string | null;
+        failedAt: string | null;
+        processed: string[];
+        forwardFrom: { id: string; at: string };
+      };
+    const bindBackfillChat = async (chatId: string, count = 60, content = (i: number) => `History ${i}.`) => {
+      await saveSettings(documents, { archivist: { mode: "suggest", everyNTurns: 1, readBehind: 0 } });
+      await setChatCompendiumBinding(documents, chatId, compendium.id);
+      await refreshLiveClaims();
+      messages = Array.from({ length: count }, (_, i) => message(`history:${i}`, "assistant", content(i)));
+      answer = () => emptyAnswer;
+      await runArchivist(chatId, { force: true });
+    };
+    const waitBackfill = async (chatId: string) => {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const status = await getArchivistBackfillStatus(chatId);
+        if (status.job?.status !== "running") return status;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("Backfill did not finish");
+    };
+    const holdModel = () => {
+      let entered!: () => void;
+      let finish!: (answer: string) => void;
+      const called = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const completion = new Promise<string>((resolve) => {
+        finish = resolve;
+      });
+      answer = () => {
+        entered();
+        return completion;
+      };
+      return {
+        called,
+        finish: () => {
+          answer = () => emptyAnswer;
+          finish(emptyAnswer);
+        },
+      };
+    };
+
+    await bindBackfillChat("chat-backfill");
+    const initialState = structuredClone(stateOf("chat-backfill"));
+    assert.equal(initialState.processed.length, 24);
+    assert.equal(initialState.forwardFrom.id, "history:36");
+    assert.equal(initialState.lastMessageId, "history:59");
+    assert.equal((await getArchivistBackfillStatus("chat-backfill")).olderUnread, 36);
+    assert.equal((await getArchivistBackfillStatus("chat-backfill")).windowsEstimated, 2);
+    assert.equal(
+      (await runArchivist("chat-backfill", { force: true })).status,
+      "nothing_new",
+      "normal never reads older gaps",
+    );
+    const oldest = await runArchivist("chat-backfill", { mode: "backfill" });
+    assert.equal(oldest.run!.trigger, "backfill");
+    assert.equal(oldest.run!.messageCount, 24);
+    assert.ok(modelCalls.at(-1)!.prompt.includes("History 0.") && modelCalls.at(-1)!.prompt.includes("History 23."));
+    assert.ok(!modelCalls.at(-1)!.prompt.includes("History 24."));
+    assert.equal(
+      (await runArchivist("chat-backfill", { force: true })).status,
+      "nothing_new",
+      "normal still excludes older gaps after an oldest backfill window",
+    );
+    assert.equal((await getArchivistBackfillStatus("chat-backfill")).olderUnread, 12);
+    startArchivistBackfill("chat-backfill");
+    const filled = await waitBackfill("chat-backfill");
+    assert.equal(filled.job!.status, "done");
+    assert.equal(filled.olderUnread, 0);
+    assert.equal(stateOf("chat-backfill").processed.length, 60);
+    assert.deepEqual(stateOf("chat-backfill").forwardFrom, initialState.forwardFrom);
+    assert.equal(stateOf("chat-backfill").lastMessageId, initialState.lastMessageId);
+    assert.equal(stateOf("chat-backfill").lastMessageAt, initialState.lastMessageAt);
+    messages[45] = { ...messages[45]!, activeSwipeIndex: 1, content: "Swiped already-read reply." };
+    assert.equal((await runArchivist("chat-backfill")).run!.messageCount, 1);
+    assert.ok(modelCalls.at(-1)!.prompt.includes("Swiped already-read reply."));
+    assert.ok(stateOf("chat-backfill").processed.includes("history:45:1"));
+    assert.equal(stateOf("chat-backfill").lastMessageId, "history:59", "an old swipe keeps the watermark forward");
+
+    // A competing write wins the revision check: retry must merge its processed key.
+    const originalUpdate = documents.update.bind(documents);
+    let stateWrites = 0;
+    documents.update = async (input) => {
+      if (input.id === "archivist_state:chat-backfill" && ++stateWrites === 1) {
+        const current = documents.docs.get(input.id)!;
+        messages.push(message("cas-concurrent", "assistant", "A concurrently added and read message."));
+        documents.docs.set(input.id, {
+          ...current,
+          revision: current.revision + 1,
+          data: {
+            ...stateOf("chat-backfill"),
+            processed: [...stateOf("chat-backfill").processed, "history:0:7", "cas-concurrent:0"],
+          },
+        });
+        return null;
+      }
+      return originalUpdate(input);
+    };
+    messages = [...messages, message("cas-next", "assistant", "A concurrent read.")];
+    try {
+      await runArchivist("chat-backfill", { force: true });
+    } finally {
+      documents.update = originalUpdate;
+    }
+    assert.equal(stateWrites, 2, "revision conflict retried");
+    assert.ok(
+      stateOf("chat-backfill").processed.includes("history:0:7"),
+      "CAS merge preserves the concurrent processed key",
+    );
+    assert.ok(stateOf("chat-backfill").processed.includes("cas-next:0"));
+    assert.ok(
+      stateOf("chat-backfill").processed.includes("cas-concurrent:0"),
+      "CAS merge preserves reads of newly added messages",
+    );
+
+    // Pruning uses every persisted message, preserving hidden and newly unsettled reads and colon IDs.
+    messages[40] = { ...messages[40]!, extra: JSON.stringify({ hiddenFromAI: true }) };
+    messages = messages.filter((m) => m.id !== "history:41");
+    await saveSettings(documents, { archivist: { readBehind: 2 } });
+    messages.push(message("prune-next", "assistant", "Prune deleted messages."));
+    messages.push(message("prune-last", "assistant", "Last reply."));
+    // An old swipe supplies an unread settled message to force the prune write.
+    messages[46] = { ...messages[46]!, activeSwipeIndex: 2 };
+    await runArchivist("chat-backfill", { force: true });
+    assert.ok(stateOf("chat-backfill").processed.includes("history:40:0"), "hiding never forgets a read");
+    assert.ok(stateOf("chat-backfill").processed.includes("cas-next:0"), "raising Read behind never forgets a read");
+    assert.ok(!stateOf("chat-backfill").processed.includes("history:41:0"), "deleted messages are pruned");
+
+    // A queued normal run gets a turn between the job's two windows.
+    await bindBackfillChat("chat-interleave");
+    let interleaved: ReturnType<typeof runArchivist> | undefined;
+    let firstBackfill = true;
+    const interleaveOrder: string[] = [];
+    const backfillWindows: string[] = [];
+    answer = (prompt) => {
+      backfillWindows.push(prompt);
+      interleaveOrder.push(`window${backfillWindows.length}`);
+      if (firstBackfill) {
+        firstBackfill = false;
+        interleaved = runInBackgroundQueue(() => {
+          interleaveOrder.push("interleaved");
+          return runArchivist("chat-interleave", { force: true });
+        });
+      }
+      return emptyAnswer;
+    };
+    startArchivistBackfill("chat-interleave");
+    const interleaveDone = await waitBackfill("chat-interleave");
+    assert.equal((await interleaved)!.status, "nothing_new");
+    assert.equal(interleaveDone.job!.windowsDone, 2);
+    assert.deepEqual(interleaveOrder, ["window1", "interleaved", "window2"]);
+    assert.ok(backfillWindows[0]!.includes("History 0.") && !backfillWindows[0]!.includes("History 24."));
+    assert.ok(backfillWindows[1]!.includes("History 24.") && !backfillWindows[1]!.includes("History 36."));
+    const backfillRuns = (await listArchivistRuns()).filter(
+      (run) => run.chatId === "chat-interleave" && run.trigger === "backfill",
+    );
+    assert.deepEqual(
+      backfillRuns.map((run) => run.messageCount).sort((a, b) => a - b),
+      [12, 24],
+    );
+
+    // Real routes return 202 immediately, reject duplicate jobs with 409, and stop idempotently.
+    type BackfillHandler = (
+      request: { body?: unknown; query?: unknown },
+      reply: typeof backfillReply,
+    ) => Promise<unknown>;
+    const backfillPosts = new Map<string, BackfillHandler>();
+    const backfillGets = new Map<string, BackfillHandler>();
+    let backfillCode = 200;
+    const backfillReply = {
+      code(code: number) {
+        backfillCode = code;
+        return this;
+      },
+      send(body: unknown) {
+        return body;
+      },
+    };
+    await lorebookManagerRoutes(
+      {
+        get(path: string, handler: BackfillHandler) {
+          backfillGets.set(path, handler);
+        },
+        post(path: string, handler: BackfillHandler) {
+          backfillPosts.set(path, handler);
+        },
+        put() {},
+        patch() {},
+        delete() {},
+      } as never,
+      {},
+    );
+    await bindBackfillChat("chat-stop");
+    const held = holdModel();
+    await backfillPosts.get("/archivist/backfill")!({ body: { chatId: "chat-stop" } }, backfillReply);
+    assert.equal(backfillCode, 202);
+    await held.called;
+    const callsBeforeStop = modelCalls.length;
+    await backfillPosts.get("/archivist/backfill")!({ body: { chatId: "chat-stop" } }, backfillReply);
+    assert.equal(backfillCode, 409);
+    backfillCode = 200;
+    await backfillPosts.get("/archivist/backfill/stop")!({ body: { chatId: "chat-stop" } }, backfillReply);
+    stopArchivistBackfill("chat-stop");
+    assert.equal(backfillCode, 200);
+    assert.equal(
+      (await getArchivistBackfillStatus("chat-stop")).job!.status,
+      "stopped",
+      "Stop is immediate while the model is pending",
+    );
+    await backfillPosts.get("/archivist/backfill")!({ body: { chatId: "chat-stop" } }, backfillReply);
+    assert.equal(backfillCode, 202, "a stopped job can be replaced before its model settles");
+    stopArchivistBackfill("chat-stop");
+    held.finish();
+    await runInBackgroundQueue(async () => {});
+    assert.equal((await waitBackfill("chat-stop")).job!.status, "stopped");
+    assert.equal(modelCalls.length, callsBeforeStop, "Stop never starts another window");
+    assert.equal(stateOf("chat-stop").processed.length, 24, "an aborted model call adds no reads");
+    const routedStatus = (await backfillGets.get("/archivist/backfill")!(
+      { query: { chatId: "chat-stop" } },
+      backfillReply,
+    )) as { olderUnread: number };
+    assert.equal(routedStatus.olderUnread, 36);
+
+    await bindBackfillChat("chat-stop-all");
+    const heldStopAll = holdModel();
+    startArchivistBackfill("chat-stop-all");
+    await heldStopAll.called;
+    const stoppingAll = stopArchivist();
+    assert.equal(
+      (await getArchivistBackfillStatus("chat-stop-all")).job!.status,
+      "stopped",
+      "deactivation marks pending jobs stopped immediately",
+    );
+    heldStopAll.finish();
+    await stoppingAll;
+    resumeArchivist();
+
+    await bindBackfillChat("chat-backfill-failure");
+    answer = () => new Error("Backfill provider failure");
+    startArchivistBackfill("chat-backfill-failure");
+    const failedBackfill = await waitBackfill("chat-backfill-failure");
+    assert.equal(failedBackfill.job!.status, "failed");
+    assert.equal(failedBackfill.job!.detail, "Backfill provider failure");
+    assert.equal(stateOf("chat-backfill-failure").failedAt, null);
+    const failedBackfillLog = (await listArchivistRuns()).find(
+      (run) => run.chatId === "chat-backfill-failure" && run.status === "failed",
+    )!;
+    assert.equal(failedBackfillLog.trigger, "backfill");
+    answer = () => emptyAnswer;
+    messages.push(message("after-failure", "assistant", "Normal work still runs."));
+    assert.equal(
+      (await runArchivist("chat-backfill-failure")).status,
+      "done",
+      "backfill failure causes no auto cooldown",
+    );
+    messages.push(message("manual-after-failure", "assistant", "Run now also runs."));
+    assert.equal((await runArchivist("chat-backfill-failure", { force: true })).status, "done");
+
+    await bindBackfillChat("chat-empty-error");
+    answer = () => new Error("");
+    startArchivistBackfill("chat-empty-error");
+    assert.equal((await waitBackfill("chat-empty-error")).job!.detail, "Backfill failed");
+
+    // Aborting as the model answers prevents proposal, automatic, state, and log writes.
+    await bindBackfillChat("chat-abort-answer");
+    await saveSettings(documents, { archivist: { mode: "automatic" } });
+    const abortController = new AbortController();
+    const beforeAbortDocs = structuredClone([...documents.docs]);
+    const beforeAbortBooks = structuredClone(books);
+    answer = () => {
+      abortController.abort();
+      configureLorebookManagerRuntime(runtime)();
+      return JSON.stringify({
+        updates: [],
+        creates: [{ name: "Aborted scout", category: "character", fields: [{ field: "Role", value: "Scout" }] }],
+      });
+    };
+    try {
+      const outcome = await runArchivist("chat-abort-answer", {
+        mode: "backfill",
+        signal: abortController.signal,
+        runtime,
+      });
+      assert.equal(outcome.run, null);
+      assert.deepEqual([...documents.docs], beforeAbortDocs);
+      assert.deepEqual(books, beforeAbortBooks);
+      assert.equal(
+        await crawlAfterArchivist({ source: "archivist", status: "applied", appliedEntryId: "syliveera" } as never),
+        null,
+        "the Crawler catch never throws when runtime is unbound",
+      );
+    } finally {
+      configureLorebookManagerRuntime(runtime);
+    }
+
+    // GET migrates in memory before any write. Failed runs never contribute to the legacy count.
+    for (const count of [5, 0]) {
+      const chatId = `chat-migrate-${count}`;
+      await bindBackfillChat(chatId, 10);
+      const watermark = messages[7]!;
+      const doc = documents.docs.get(`archivist_state:${chatId}`)!;
+      documents.docs.set(doc.id, {
+        ...doc,
+        data: { lastMessageId: watermark.id, lastMessageAt: watermark.createdAt, failedAt: null },
+      });
+      const log = documents.docs.get(`archivist_run:${chatId}`)!;
+      documents.docs.set(log.id, {
+        ...log,
+        data: {
+          runs: count
+            ? [
+                { at: watermark.createdAt, chatId, status: "done", messageCount: 2 },
+                { at: watermark.createdAt, chatId, status: "failed", messageCount: 100 },
+                { at: watermark.createdAt, chatId, status: "done", messageCount: 3 },
+              ]
+            : [],
+        },
+      });
+      assert.equal((await getArchivistBackfillStatus(chatId)).olderUnread, count ? 3 : 7);
+      assert.equal(stateOf(chatId).processed, undefined, "GET migrates in memory only");
+      const migrated = await runArchivist(chatId, { force: true });
+      assert.equal(migrated.run!.messageCount, 2);
+      assert.ok(!migrated.run!.detail?.includes("First run"));
+      assert.equal(stateOf(chatId).processed.length, (count || 1) + 2);
+      assert.equal(stateOf(chatId).forwardFrom.id, count ? "history:3" : "history:7");
+    }
+
+    // Count visible history even if Read behind rose or the watermark became hidden.
+    for (const hidden of [false, true]) {
+      const chatId = `chat-migrate-visible-${hidden}`;
+      await bindBackfillChat(chatId, 10);
+      const watermark = messages[7]!;
+      const doc = documents.docs.get(`archivist_state:${chatId}`)!;
+      documents.docs.set(doc.id, { ...doc, data: { lastMessageId: watermark.id, lastMessageAt: watermark.createdAt } });
+      const log = documents.docs.get(`archivist_run:${chatId}`)!;
+      documents.docs.set(log.id, {
+        ...log,
+        data: { runs: [{ at: watermark.createdAt, status: "done", messageCount: 3 }] },
+      });
+      if (hidden) messages[7] = { ...watermark, extra: { hiddenFromAI: true } };
+      await saveSettings(documents, { archivist: { readBehind: 5 } });
+      const firstRead = hidden ? 4 : 5;
+      assert.equal((await getArchivistBackfillStatus(chatId)).olderUnread, firstRead);
+      await runArchivist(chatId, { mode: "backfill" });
+      assert.equal(stateOf(chatId).forwardFrom.id, `history:${firstRead}`);
+      assert.deepEqual(
+        stateOf(chatId).processed.slice(0, 3),
+        hidden ? ["history:4:0", "history:5:0", "history:6:0"] : ["history:5:0", "history:6:0", "history:7:0"],
+      );
+    }
+
+    // An id-only boundary survives a write and the following read with an empty timestamp.
+    await bindBackfillChat("chat-empty-at", 4);
+    messages = messages.map((item) => ({ ...item, createdAt: "" }));
+    const emptyAtDoc = documents.docs.get("archivist_state:chat-empty-at")!;
+    documents.docs.set(emptyAtDoc.id, { ...emptyAtDoc, data: { lastMessageId: messages[1]!.id } });
+    documents.docs.delete("archivist_run:chat-empty-at");
+    assert.equal((await runArchivist("chat-empty-at", { force: true })).run!.messageCount, 2);
+    assert.deepEqual(stateOf("chat-empty-at").forwardFrom, { id: "history:1", at: "" });
+    assert.equal((await runArchivist("chat-empty-at", { force: true })).status, "nothing_new");
+    assert.equal((await getArchivistBackfillStatus("chat-empty-at")).olderUnread, 1);
+
+    await bindBackfillChat("chat-missing-watermark", 10);
+    const gone = messages[7]!;
+    const legacyDoc = documents.docs.get("archivist_state:chat-missing-watermark")!;
+    documents.docs.set(legacyDoc.id, { ...legacyDoc, data: { lastMessageId: gone.id, lastMessageAt: gone.createdAt } });
+    const legacyLog = documents.docs.get("archivist_run:chat-missing-watermark")!;
+    documents.docs.set(legacyLog.id, {
+      ...legacyLog,
+      data: { runs: [{ at: gone.createdAt, status: "done", messageCount: 5 }] },
+    });
+    messages = messages.filter((m) => m.id !== gone.id);
+    assert.equal((await getArchivistBackfillStatus("chat-missing-watermark")).olderUnread, 2);
+    assert.equal((await runArchivist("chat-missing-watermark", { force: true })).run!.messageCount, 2);
+    assert.equal(stateOf("chat-missing-watermark").forwardFrom.id, "history:2");
+
+    await bindBackfillChat("chat-zero-hidden", 10);
+    const hiddenWatermark = messages[7]!;
+    const zeroDoc = documents.docs.get("archivist_state:chat-zero-hidden")!;
+    documents.docs.set(zeroDoc.id, {
+      ...zeroDoc,
+      data: { lastMessageId: hiddenWatermark.id, lastMessageAt: hiddenWatermark.createdAt },
+    });
+    documents.docs.delete("archivist_run:chat-zero-hidden");
+    messages[7] = { ...hiddenWatermark, extra: { hiddenFromAI: true } };
+    assert.equal((await getArchivistBackfillStatus("chat-zero-hidden")).olderUnread, 7);
+    await runArchivist("chat-zero-hidden", { force: true });
+    assert.equal(stateOf("chat-zero-hidden").forwardFrom.id, hiddenWatermark.id);
+    assert.ok(stateOf("chat-zero-hidden").processed.includes(`${hiddenWatermark.id}:0`));
+
+    // A host that reports success without saving read keys must not cause a hot backfill loop.
+    await bindBackfillChat("chat-no-progress");
+    documents.update = async (input) => {
+      if (input.id === "archivist_state:chat-no-progress") {
+        return originalUpdate({ ...input, data: stateOf("chat-no-progress") });
+      }
+      return originalUpdate(input);
+    };
+    try {
+      startArchivistBackfill("chat-no-progress");
+      const noProgress = await waitBackfill("chat-no-progress");
+      assert.equal(noProgress.job!.status, "failed");
+      assert.equal(noProgress.job!.windowsDone, 1);
+      assert.match(noProgress.job!.detail!, /no new reads/);
+    } finally {
+      documents.update = originalUpdate;
+    }
+
+    // Vanishing older messages end cleanly before the window or after a no-progress write.
+    const originalListMessages = runtime.persistence.listMessages!;
+    for (const phase of ["before-window", "after-write"]) {
+      const chatId = `chat-vanished-${phase}`;
+      await bindBackfillChat(chatId);
+      let reads = 0;
+      runtime.persistence.listMessages = async () => {
+        if (phase === "before-window" && ++reads === 2) messages = messages.slice(36);
+        return messages;
+      };
+      documents.update = async (input) => {
+        if (phase === "after-write" && input.id === `archivist_state:${chatId}`) {
+          messages = messages.slice(36);
+          return originalUpdate({ ...input, data: stateOf(chatId) });
+        }
+        return originalUpdate(input);
+      };
+      try {
+        startArchivistBackfill(chatId);
+        const vanished = await waitBackfill(chatId);
+        assert.equal(vanished.job!.status, "done");
+        assert.equal(vanished.olderUnread, 0);
+        assert.equal(vanished.job!.detail, undefined);
+      } finally {
+        runtime.persistence.listMessages = originalListMessages;
+        documents.update = originalUpdate;
+      }
+    }
+
+    // Backfill ignores automatic scheduling gates while retaining any existing cooldown and watermark.
+    await bindBackfillChat("chat-bypass");
+    const bypassDoc = documents.docs.get("archivist_state:chat-bypass")!;
+    const failedAt = new Date().toISOString();
+    documents.docs.set(bypassDoc.id, { ...bypassDoc, data: { ...stateOf("chat-bypass"), failedAt } });
+    await saveSettings(documents, { archivist: { mode: "off", everyNTurns: 99 } });
+    metadata = { enableAgents: false, activeAgentIds: [] };
+    messages.push(message("pending-user", "user", "The reply is still pending."));
+    startArchivistBackfill("chat-bypass");
+    assert.equal((await waitBackfill("chat-bypass")).olderUnread, 0);
+    assert.equal(stateOf("chat-bypass").failedAt, failedAt);
+    assert.equal(stateOf("chat-bypass").lastMessageId, "history:59");
+    metadata = ADDED;
+
+    // A hidden boundary still divides messages by persisted order, even with identical timestamps.
+    await bindBackfillChat("chat-hidden-boundary", 3);
+    messages[0] = { ...messages[0]!, createdAt: messages[1]!.createdAt };
+    messages[1] = { ...messages[1]!, extra: { hiddenFromAI: true } };
+    const hiddenBoundaryDoc = documents.docs.get("archivist_state:chat-hidden-boundary")!;
+    documents.docs.set(hiddenBoundaryDoc.id, {
+      ...hiddenBoundaryDoc,
+      data: {
+        ...stateOf("chat-hidden-boundary"),
+        forwardFrom: { id: messages[1]!.id, at: messages[1]!.createdAt },
+        processed: ["history:1:0", "history:2:0"],
+      },
+    });
+    assert.equal((await getArchivistBackfillStatus("chat-hidden-boundary")).olderUnread, 1);
+    assert.equal((await runArchivist("chat-hidden-boundary", { force: true })).status, "nothing_new");
+
+    // Binding and model-host preconditions are checked synchronously before starting a job.
+    await backfillPosts.get("/archivist/backfill")!({ body: { chatId: "unbound-chat" } }, backfillReply);
+    assert.equal(backfillCode, 400);
+    const languageModels = runtime.languageModels;
+    runtime.languageModels = undefined;
+    try {
+      await backfillPosts.get("/archivist/backfill")!({ body: { chatId: "chat-bypass" } }, backfillReply);
+      assert.equal(backfillCode, 501);
+    } finally {
+      runtime.languageModels = languageModels;
+    }
+
+    // The processed-key cap evicts the earliest saved keys while retaining newly read keys.
+    await bindBackfillChat("chat-key-cap", 2);
+    const capDoc = documents.docs.get("archivist_state:chat-key-cap")!;
+    documents.docs.set(capDoc.id, {
+      ...capDoc,
+      data: {
+        ...stateOf("chat-key-cap"),
+        forwardFrom: { id: messages[1]!.id, at: messages[1]!.createdAt },
+        processed: [...Array.from({ length: 20_000 }, (_, i) => `history:0:${i}`), "history:1:0"],
+      },
+    });
+    messages.push(message("cap-new", "assistant", "New capped read."));
+    await runArchivist("chat-key-cap", { force: true });
+    assert.equal(stateOf("chat-key-cap").processed.length, 20_000);
+    assert.ok(!stateOf("chat-key-cap").processed.includes("history:0:0"));
+    assert.ok(stateOf("chat-key-cap").processed.includes("cap-new:0"));
+
+    // Long messages hit the character limit before the count limit; the job stops at 40 windows.
+    await bindBackfillChat("chat-long-backfill", 65, (i) => `Long ${i}:` + "x".repeat(16_000));
+    const longStatus = await getArchivistBackfillStatus("chat-long-backfill");
+    assert.equal(longStatus.olderUnread, 64);
+    assert.equal(longStatus.windowsEstimated, 64);
+    startArchivistBackfill("chat-long-backfill");
+    const capped = await waitBackfill("chat-long-backfill");
+    assert.equal(capped.job!.windowsDone, 40);
+    assert.match(capped.job!.detail!, /safety cap of 40 windows/);
+    assert.equal(capped.olderUnread, 24);
+    assert.equal(
+      (await listArchivistRuns()).filter((run) => run.chatId === "chat-long-backfill").length,
+      41,
+      "expanded log retains the normal run",
+    );
+
+    await bindBackfillChat("chat-exact-cap", 41, (i) => `Long ${i}:` + "x".repeat(16_000));
+    startArchivistBackfill("chat-exact-cap");
+    const exactCap = await waitBackfill("chat-exact-cap");
+    assert.equal(exactCap.job!.windowsDone, 40);
+    assert.equal(exactCap.job!.status, "done");
+    assert.equal(exactCap.job!.detail, undefined);
+    assert.equal(exactCap.olderUnread, 0);
+
     // Automatic uses the same write and Crawler paths, while approval and duplicate creates stay in Review.
     await saveSettings(documents, { archivist: { mode: "automatic", everyNTurns: 1, readBehind: 0 } });
     await setChatCompendiumBinding(documents, "chat-auto", compendium.id);
@@ -751,6 +1282,32 @@ async function main() {
     );
     assert.equal(proseProposals.find((p) => p.entryName === "The Pact")!.patch.content, "The Pact binds names.");
     assert.equal(proseProposals.find((p) => p.entryName === "Namebinding")!.patch.content, "Names can be bound.");
+
+    // A real activation without live-retrieval APIs still loads bindings and owns Backfill's lifecycle.
+    await bindBackfillChat("chat-old-engine");
+    resetLiveClaims();
+    await stopArchivist();
+    const deactivate = await activate({
+      api: {
+        runtime,
+        async registerPrivilegedRoutes() {
+          return () => {};
+        },
+      },
+    });
+    const deactivationHeld = holdModel();
+    startArchivistBackfill("chat-old-engine");
+    await deactivationHeld.called;
+    const deactivationCalls = modelCalls.length;
+    deactivate(); // The global runtime is unbound immediately, before the fake model finishes.
+    deactivationHeld.finish();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    configureLorebookManagerRuntime(runtime);
+    await refreshLiveClaims();
+    assert.equal((await waitBackfill("chat-old-engine")).job!.status, "stopped");
+    assert.equal(modelCalls.length, deactivationCalls);
+    assert.equal(stateOf("chat-old-engine").processed.length, 24);
+    resumeArchivist();
 
     // ── The contributor arms the job on a real turn, never on a preview; stopping clears it. ──
     await saveSettings(documents, { archivist: { mode: "suggest" } });

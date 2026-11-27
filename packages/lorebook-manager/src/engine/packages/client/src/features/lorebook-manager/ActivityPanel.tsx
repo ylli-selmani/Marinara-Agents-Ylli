@@ -215,6 +215,7 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
 
       {/* The open chat even before it has retrieval runs; else the chat picked below. */}
       <ArchivistActivity
+        showBackfill
         chatId={
           !pickedChat && currentChatId && !chats.some((chat) => chat.chatId === currentChatId)
             ? currentChatId

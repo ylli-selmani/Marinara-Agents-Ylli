@@ -228,9 +228,10 @@ export function ArchivistFields({
       <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
         After every few replies, the Archivist reads what happened and suggests new facts for existing entries and new
         entries for people, places and things that matter. Read behind keeps the newest replies unread until they
-        settle. One model call per run, in the background; your replies never wait for it. Locked entries are never
-        touched. Suggestions wait in Review. Automatic applies changes without Review when the chat&apos;s Review Agent
-        Outputs is off; you can undo them in Activity.
+        settle. Backfill (in Activity) reads older messages the Archivist hasn&apos;t read yet. One model call per run,
+        in the background; your replies never wait for it. Locked entries are never touched. Suggestions wait in Review.
+        Automatic applies changes without Review when the chat&apos;s Review Agent Outputs is off; you can undo them in
+        Activity.
       </p>
     </div>
   );

@@ -1,4 +1,6 @@
 import type {
+  LmArchivistBackfillStatus,
+  LmArchivistBackfillJob,
   LmArchivistOverride,
   LmArchivistRunRecord,
   LmArchivistSettings,
@@ -35,6 +37,7 @@ export const lmQueryKeys = {
   connections: ["lorebook-manager", "connections"] as const,
   settings: ["lorebook-manager", "settings"] as const,
   runs: ["lorebook-manager", "runs"] as const,
+  archivistBackfill: (chatId: string) => ["lorebook-manager", "archivist-backfill", chatId] as const,
   archivistRuns: ["lorebook-manager", "archivist-runs"] as const,
   crawlerRuns: ["lorebook-manager", "crawler-runs"] as const,
   crawlerPending: (compendiumId: string) => ["lorebook-manager", "crawler-pending", compendiumId] as const,
@@ -282,6 +285,24 @@ export async function runArchivistApi(chatId: string): Promise<{ status: string;
   });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   return (await response.json()) as { status: string; run: LmArchivistRunRecord | null };
+}
+
+export async function fetchArchivistBackfill(chatId: string): Promise<LmArchivistBackfillStatus> {
+  return readJson<LmArchivistBackfillStatus>(`/archivist/backfill?chatId=${encodeURIComponent(chatId)}`);
+}
+
+export async function changeArchivistBackfill(
+  chatId: string,
+  stop = false,
+): Promise<{ job: LmArchivistBackfillJob | null }> {
+  const response = await fetch(`${API_ROOT}/archivist/backfill${stop ? "/stop" : ""}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ chatId }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return (await response.json()) as { job: LmArchivistBackfillJob | null };
 }
 
 export async function fetchCrawlerRuns(): Promise<LmCrawlerRunRecord[]> {

@@ -28,7 +28,14 @@ import {
   type CreateCompendiumInput,
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
-import { listArchivistRuns, runArchivist, runInBackgroundQueue } from "./archivist.js";
+import {
+  getArchivistBackfillStatus,
+  startArchivistBackfill,
+  stopArchivistBackfill,
+  listArchivistRuns,
+  runArchivist,
+  runInBackgroundQueue,
+} from "./archivist.js";
 import {
   countUntidied,
   crawlAfterArchivist,
@@ -196,6 +203,7 @@ export interface BuildGraphOptions {
 
 export async function buildLorebookManagerGraphPayload(
   requestedOrOptions?: ReadonlySet<string> | BuildGraphOptions | null,
+  runtime = getLorebookManagerRuntime(),
 ): Promise<LmGraphPayload> {
   const options: BuildGraphOptions =
     requestedOrOptions instanceof Set
@@ -207,7 +215,6 @@ export async function buildLorebookManagerGraphPayload(
   const requestedCharacterIds = options.characterIds ?? null;
   const requestedPersonaIds = options.personaIds ?? null;
 
-  const runtime = getLorebookManagerRuntime();
   const only = options.onlyRequested === true;
   const idsOrNone = (ids: ReadonlySet<string> | null) => (ids && ids.size > 0 ? [...ids] : null);
   const [rawLorebooks, rawCharacters, rawPersonas] = await Promise.all([
@@ -471,6 +478,36 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
       if (typeof chatId !== "string" || !chatId) throw new CompendiumStoreError("chatId is required", 400);
       const outcome = await runInBackgroundQueue(() => runArchivist(chatId, { force: true }));
       return { status: outcome.status, run: outcome.run };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.get("/archivist/backfill", async (request, reply) => {
+    try {
+      const chatId = (request.query as { chatId?: unknown } | undefined)?.chatId;
+      if (typeof chatId !== "string" || !chatId) throw new CompendiumStoreError("chatId is required", 400);
+      return await getArchivistBackfillStatus(chatId);
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/archivist/backfill", async (request, reply) => {
+    try {
+      const chatId = asRecord(request.body).chatId;
+      if (typeof chatId !== "string" || !chatId) throw new CompendiumStoreError("chatId is required", 400);
+      return reply.code(202).send({ job: startArchivistBackfill(chatId) });
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/archivist/backfill/stop", async (request, reply) => {
+    try {
+      const chatId = asRecord(request.body).chatId;
+      if (typeof chatId !== "string" || !chatId) throw new CompendiumStoreError("chatId is required", 400);
+      return { job: stopArchivistBackfill(chatId) };
     } catch (error) {
       return sendRouteError(reply, error);
     }

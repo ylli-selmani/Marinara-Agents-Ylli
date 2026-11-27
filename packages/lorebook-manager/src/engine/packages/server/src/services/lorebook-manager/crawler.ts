@@ -1070,7 +1070,11 @@ export async function crawlAfterArchivist(
     if (!compendium) return null;
     return await scheduleCrawl(compendium.id, proposal.appliedEntryId, proposal.chatId, waitMs);
   } catch (error) {
-    getLorebookManagerRuntime().logger.warn("[lorebook-manager] Crawler after an Archivist change failed: %s", error);
+    try {
+      getLorebookManagerRuntime().logger.warn("[lorebook-manager] Crawler after an Archivist change failed: %s", error);
+    } catch {
+      // Deactivation may already have unbound the runtime.
+    }
     return null;
   }
 }

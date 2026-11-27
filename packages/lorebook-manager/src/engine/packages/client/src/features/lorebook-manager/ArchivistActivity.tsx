@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
@@ -7,7 +7,16 @@ import type {
   LmArchivistRunStatus,
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { decideProposalApi, fetchArchivistRuns, fetchProposals, lmQueryKeys, runArchivistApi } from "./api";
+import { confirmWithHostOrBrowser } from "./host-components";
+import {
+  fetchArchivistBackfill,
+  changeArchivistBackfill,
+  decideProposalApi,
+  fetchArchivistRuns,
+  fetchProposals,
+  lmQueryKeys,
+  runArchivistApi,
+} from "./api";
 
 // The Archivist's recent runs for one chat, above the retrieval runs. Precedent: the gate line and RunCard in
 // ActivityPanel (same card border, same muted one-liners).
@@ -93,6 +102,9 @@ function AutomaticChange({ proposal }: { proposal: LmProposal }) {
   );
 }
 
+// Activity and the narrow chat card may both be mounted; either can keep the icon busy.
+const busyOwners = new Map<string, Set<object>>();
+
 /** Lights the chat's Agent activity icon while a run is in flight (Capability API 1.820; older Engines leave it out). */
 function setBusy(chatId: string, busy: boolean) {
   const host = (
@@ -109,19 +121,83 @@ function setBusy(chatId: string, busy: boolean) {
   host?.stores?.agent?.getState?.().setPackageActivity?.("lorebook-manager", chatId, { busy });
 }
 
-export function ArchivistActivity({ chatId, title = "Archivist" }: { chatId: string | null; title?: string }) {
+export function ArchivistActivity({
+  chatId,
+  title = "Archivist",
+  showBackfill = false,
+}: {
+  chatId: string | null;
+  title?: string;
+  showBackfill?: boolean;
+}) {
   const queryClient = useQueryClient();
   const runsQuery = useQuery({
     queryKey: lmQueryKeys.archivistRuns,
     queryFn: fetchArchivistRuns,
     refetchInterval: 15_000,
   });
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState<string | null>(null);
+  const [changingBackfill, setChangingBackfill] = useState(false);
   const proposalsQuery = useQuery({
     queryKey: lmQueryKeys.proposalsRoot,
     queryFn: () => fetchProposals(),
     refetchInterval: 15_000,
   });
+  const backfillQuery = useQuery({
+    queryKey: lmQueryKeys.archivistBackfill(chatId ?? ""),
+    queryFn: () => fetchArchivistBackfill(chatId!),
+    enabled: Boolean(chatId),
+    refetchInterval: (query) =>
+      query.state.status !== "error" && query.state.data?.job?.status === "running" ? 2_000 : 15_000,
+  });
+  const backfill = backfillQuery.isError ? undefined : backfillQuery.data;
+  const job = backfill?.job;
+  const backfilling = job?.status === "running";
+  useEffect(() => {
+    const busyChats = new Set([running, backfilling ? chatId : null]);
+    busyChats.delete(null);
+    const owner = {};
+    for (const id of busyChats) {
+      if (!id) continue;
+      const owners = busyOwners.get(id) ?? new Set<object>();
+      owners.add(owner);
+      busyOwners.set(id, owners);
+      setBusy(id, true);
+    }
+    return () => {
+      for (const id of busyChats) {
+        if (!id) continue;
+        const owners = busyOwners.get(id)!;
+        owners.delete(owner);
+        if (owners.size === 0) {
+          busyOwners.delete(id);
+          setBusy(id, false);
+        }
+      }
+    };
+  }, [chatId, running, backfilling]);
+  const previousBackfill = useRef<{
+    chatId: string | null;
+    startedAt: string;
+    windowsDone: number;
+    status: string;
+  } | null>(null);
+  useEffect(() => {
+    const previous = previousBackfill.current;
+    previousBackfill.current = job
+      ? { chatId, startedAt: job.startedAt, windowsDone: job.windowsDone, status: job.status }
+      : null;
+    if (
+      !job ||
+      previous?.chatId !== chatId ||
+      previous?.startedAt !== job.startedAt ||
+      (previous.windowsDone === job.windowsDone && previous.status === job.status)
+    )
+      return;
+    void queryClient.invalidateQueries({ queryKey: lmQueryKeys.archivistRuns });
+    void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
+    void queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
+  }, [queryClient, chatId, job?.startedAt, job?.windowsDone, job?.status]);
   if (!chatId) return null;
   const proposals = proposalsQuery.data ?? [];
   const automatic = proposals
@@ -137,8 +213,7 @@ export function ArchivistActivity({ chatId, title = "Archivist" }: { chatId: str
   const runs = (runsQuery.data ?? []).filter((run) => run.chatId === chatId).slice(0, 3);
 
   const runNow = async () => {
-    setRunning(true);
-    setBusy(chatId, true);
+    setRunning(chatId);
     try {
       const outcome = await runArchivistApi(chatId);
       if (outcome.run?.status === "done") {
@@ -163,11 +238,33 @@ export function ArchivistActivity({ chatId, title = "Archivist" }: { chatId: str
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "The Archivist could not run");
     } finally {
-      setRunning(false);
-      setBusy(chatId, false);
+      setRunning(null);
+      void queryClient.invalidateQueries({ queryKey: lmQueryKeys.archivistBackfill(chatId) });
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.archivistRuns });
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
+    }
+  };
+
+  const changeBackfill = async (stop = false) => {
+    setChangingBackfill(true);
+    try {
+      if (
+        !stop &&
+        !(await confirmWithHostOrBrowser({
+          title: "Backfill unprocessed?",
+          message: `Reads ${backfill?.olderUnread ?? 0} older messages in about ${backfill?.windowsEstimated ?? 0} model calls, oldest first. Suggestions go to Review (Automatic applies them as usual).`,
+          confirmLabel: "Backfill",
+        }))
+      )
+        return;
+      const result = await changeArchivistBackfill(chatId, stop);
+      queryClient.setQueryData(lmQueryKeys.archivistBackfill(chatId), { ...backfill, job: result.job });
+      void backfillQuery.refetch();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Backfill could not run");
+    } finally {
+      setChangingBackfill(false);
     }
   };
 
@@ -177,15 +274,43 @@ export function ArchivistActivity({ chatId, title = "Archivist" }: { chatId: str
         <span className="font-medium text-[var(--foreground)]">{title}</span>
         <button
           type="button"
-          disabled={running}
+          disabled={Boolean(running)}
           onClick={() => void runNow()}
           title="Reads this chat's settled messages now, whatever the mode and interval. One model call."
           className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"
         >
-          {running ? <Loader2 size="0.75rem" className="animate-spin" /> : null}
+          {running === chatId ? <Loader2 size="0.75rem" className="animate-spin" /> : null}
           Run now
         </button>
       </div>
+      {showBackfill && backfill && (job || backfill.olderUnread > 0) ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
+            {backfilling
+              ? `Backfilling: ${job.windowsDone} of ~${job.windowsDone + backfill.windowsEstimated}`
+              : job?.status === "failed"
+                ? job.detail || "Backfill failed"
+                : job?.status === "stopped"
+                  ? "Stopped"
+                  : job?.status === "done"
+                    ? job.detail || "Backfill done"
+                    : null}
+            {!backfilling && backfill.olderUnread > 0
+              ? `${job ? " · " : ""}${backfill.olderUnread} older messages not read yet`
+              : null}
+          </span>
+          {backfilling || backfill.olderUnread > 0 ? (
+            <button
+              type="button"
+              disabled={changingBackfill}
+              onClick={() => void changeBackfill(backfilling)}
+              className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"
+            >
+              {backfilling ? "Stop" : "Backfill unprocessed"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {runs.length === 0 ? (
         <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
           No Archivist runs for this chat yet. It reads the chat after every few replies once its mode is on.
@@ -202,10 +327,16 @@ export function ArchivistActivity({ chatId, title = "Archivist" }: { chatId: str
             }
           >
             <span className="tabular-nums">{new Date(run.at).toLocaleTimeString()}</span>
-            {run.trigger === "manual" ? " · Run now" : ""} · {runLine(run, proposals)}
+            {run.trigger === "manual" ? " · Run now" : run.trigger === "backfill" ? " · Backfill" : ""} ·{" "}
+            {runLine(run, proposals)}
           </p>
         ))
       )}
+      {backfillQuery.isError ? (
+        <p role="alert" className="text-[var(--destructive)]">
+          Could not load Backfill status
+        </p>
+      ) : null}
       {proposalsQuery.error ? (
         <p role="alert" className="text-[var(--destructive)]">
           Could not load automatic changes

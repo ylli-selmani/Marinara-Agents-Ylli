@@ -8,6 +8,8 @@ import {
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import { resolveArchivistSettings } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
 import type {
+  LmArchivistBackfillJob,
+  LmArchivistBackfillStatus,
   LmArchivistRunRecord,
   LmArchivistRunStatus,
   LmCompendium,
@@ -15,7 +17,7 @@ import type {
   LmGraphPayload,
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
+import { CompendiumStoreError, LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { crawlAfterArchivist } from "./crawler.js";
 import { agentAddedToChat, compendiumForChat } from "./live-claims.js";
 import { parseExtra } from "./live-retrieval.js";
@@ -23,6 +25,7 @@ import {
   getLorebookManagerRuntime,
   type LorebookManagerDocumentStore,
   type LorebookManagerMessageRecord,
+  type LorebookManagerRuntimeHost,
 } from "./package-runtime.js";
 import {
   appendProposalFieldEdits,
@@ -61,7 +64,8 @@ const DIRECTORY_LIMIT = 400;
 const MAX_UPDATES = 8;
 const MAX_CREATES = 5;
 const MAX_CREATE_CHARS = 2_000;
-const MAX_RECORDED_RUNS = 20;
+const MAX_RECORDED_RUNS = 50;
+const MAX_PROCESSED_KEYS = 20_000;
 /**
  * A backstop so nothing holds the package's background queue forever. The host already ends a stream that goes
  * quiet; this only caps a call that keeps streaming, long enough for a 4k-token Crawler answer on a slow model.
@@ -179,6 +183,11 @@ export async function stopArchivist(): Promise<void> {
     running.push(job.running);
   }
   jobs.clear();
+  for (const job of backfillJobs.values()) {
+    if (job.status.status === "running") job.status.status = "stopped";
+    job.controller.abort();
+    running.push(job.running);
+  }
   await Promise.all(running);
 }
 
@@ -187,74 +196,165 @@ export function resumeArchivist(): void {
   stopped = false;
 }
 
-// ── The watermark: the last settled message this chat's Archivist has read. ──
+// ── Read keys, the fixed forward boundary, and the last normal-run watermark. ──
 
 interface ArchivistState {
   lastMessageId: string | null;
   lastMessageAt: string | null;
   failedAt: string | null;
+  processed: string[];
+  forwardFrom: { id: string; at: string } | null;
 }
 
 const stateDocId = (chatId: string) => `archivist_state:${chatId}`;
 const runDocId = (chatId: string) => `archivist_run:${chatId}`;
+const messageKey = (message: LorebookManagerMessageRecord) => `${message.id}:${message.activeSwipeIndex ?? 0}`;
+
+function pruneProcessed(keys: readonly string[], messages: readonly LorebookManagerMessageRecord[]): string[] {
+  const ids = new Set(messages.map((message) => message.id));
+  return [...new Set(keys)].filter((key) => ids.has(key.slice(0, key.lastIndexOf(":")))).slice(-MAX_PROCESSED_KEYS);
+}
 
 async function readState(
   documents: LorebookManagerDocumentStore,
   chatId: string,
-): Promise<{ state: ArchivistState; revision: number | null; name: string }> {
+  messages: readonly LorebookManagerMessageRecord[] | (() => Promise<LorebookManagerMessageRecord[]>),
+): Promise<{
+  state: ArchivistState;
+  revision: number | null;
+  name: string;
+  messages: readonly LorebookManagerMessageRecord[];
+}> {
   const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, stateDocId(chatId));
   const data = (doc?.data ?? {}) as Record<string, unknown>;
   const text = (value: unknown) => (typeof value === "string" && value ? value : null);
+  // Read messages after the document when writing: a concurrent read may refer to a newly added message.
+  const allMessages = typeof messages === "function" ? await messages() : messages;
+  const boundary = asRecord(data.forwardFrom);
+  const state: ArchivistState = {
+    lastMessageId: text(data.lastMessageId),
+    lastMessageAt: text(data.lastMessageAt),
+    failedAt: text(data.failedAt),
+    processed: Array.isArray(data.processed)
+      ? data.processed.filter((key): key is string => typeof key === "string")
+      : [],
+    forwardFrom:
+      text(boundary.id) && typeof boundary.at === "string"
+        ? { id: boundary.id as string, at: boundary.at as string }
+        : null,
+  };
+  if (!Array.isArray(data.processed) && state.lastMessageId) {
+    const log = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, runDocId(chatId));
+    const runs = (log?.data as { runs?: LmArchivistRunRecord[] } | undefined)?.runs ?? [];
+    // Legacy logs kept only 20 runs; migration can recover only the messages those runs counted.
+    const count = runs.reduce((sum, run) => sum + (run.status === "done" ? run.messageCount : 0), 0);
+    if (count === 0) {
+      // Even if Read behind rose or the message became hidden, keep the watermark's exact key and boundary.
+      const watermark = allMessages.find((message) => message.id === state.lastMessageId);
+      state.processed = watermark ? [messageKey(watermark)] : [];
+      state.forwardFrom = { id: state.lastMessageId, at: watermark?.createdAt ?? state.lastMessageAt ?? "" };
+    } else {
+      const visible = visibleMessages(allMessages);
+      let end = visible.findIndex((message) => message.id === state.lastMessageId);
+      if (end < 0 && state.lastMessageAt) {
+        end = visible.findLastIndex((message) => message.createdAt <= state.lastMessageAt!);
+      }
+      const read = visible.slice(Math.max(0, end + 1 - count), end + 1);
+      state.processed = read.map(messageKey);
+      const first = read[0];
+      state.forwardFrom = first
+        ? { id: first.id, at: first.createdAt }
+        : { id: state.lastMessageId, at: state.lastMessageAt ?? "" };
+    }
+  }
+  state.processed = pruneProcessed(state.processed, allMessages);
   return {
-    state: {
-      lastMessageId: text(data.lastMessageId),
-      lastMessageAt: text(data.lastMessageAt),
-      failedAt: text(data.failedAt),
-    },
+    state,
     revision: doc ? doc.revision : null,
     name: doc?.name ?? `Archivist state for chat ${chatId}`,
+    messages: allMessages,
   };
 }
 
+/** Apply the change again on a revision conflict, preserving concurrent reads and the fixed forward boundary. */
 async function writeState(
   documents: LorebookManagerDocumentStore,
   chatId: string,
-  current: { revision: number | null; name: string },
-  next: ArchivistState,
+  listMessages: () => Promise<LorebookManagerMessageRecord[]>,
+  change: Partial<ArchivistState>,
 ): Promise<void> {
-  const now = new Date().toISOString();
-  const data = { chatId, ...next };
-  if (current.revision === null) {
-    await documents.create({
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const current = await readState(documents, chatId, listMessages);
+    const next = { ...current.state, ...change };
+    next.processed = pruneProcessed([...current.state.processed, ...(change.processed ?? [])], current.messages);
+    next.forwardFrom = current.state.forwardFrom ?? change.forwardFrom ?? null;
+    // Re-reading a swipe must not move the normal watermark backwards.
+    if (current.state.lastMessageAt && next.lastMessageAt && current.state.lastMessageAt > next.lastMessageAt) {
+      next.lastMessageId = current.state.lastMessageId;
+      next.lastMessageAt = current.state.lastMessageAt;
+    }
+    const now = new Date().toISOString();
+    const data = { chatId, ...next };
+    if (current.revision === null) {
+      try {
+        await documents.create({
+          id: stateDocId(chatId),
+          packageId: LOREBOOK_MANAGER_PACKAGE_ID,
+          kind: ARCHIVIST_STATE_DOC_KIND,
+          name: current.name,
+          description: "",
+          data,
+          createdAt: now,
+          updatedAt: now,
+        });
+        return;
+      } catch (error) {
+        if (!(await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, stateDocId(chatId)))) throw error;
+        continue;
+      }
+    }
+    const updated = await documents.update({
       id: stateDocId(chatId),
       packageId: LOREBOOK_MANAGER_PACKAGE_ID,
-      kind: ARCHIVIST_STATE_DOC_KIND,
+      expectedRevision: current.revision,
       name: current.name,
       description: "",
       data,
-      createdAt: now,
       updatedAt: now,
     });
-    return;
+    if (updated) return;
   }
-  await documents.update({
-    id: stateDocId(chatId),
-    packageId: LOREBOOK_MANAGER_PACKAGE_ID,
-    expectedRevision: current.revision,
-    name: current.name,
-    description: "",
-    data,
-    updatedAt: now,
+  throw new Error("Archivist state kept changing; reads were not saved");
+}
+
+/** Split by the boundary's position, falling back to its timestamp when the message was deleted. */
+function unreadMessages(
+  state: ArchivistState,
+  messages: readonly LorebookManagerMessageRecord[],
+  allMessages: readonly LorebookManagerMessageRecord[],
+  mode: "normal" | "backfill",
+) {
+  const processed = new Set(state.processed);
+  const boundary = state.forwardFrom;
+  const index = boundary ? allMessages.findIndex((message) => message.id === boundary.id) : -1;
+  const forwardIds = index >= 0 ? new Set(allMessages.slice(index).map((message) => message.id)) : null;
+  return messages.filter((message) => {
+    const forward = !boundary || (forwardIds ? forwardIds.has(message.id) : message.createdAt >= boundary.at);
+    return !processed.has(messageKey(message)) && (mode === "normal" ? forward : Boolean(boundary) && !forward);
   });
 }
 
 /** Keep the chat's last Archivist runs for Activity. */
-async function recordRun(documents: LorebookManagerDocumentStore, record: LmArchivistRunRecord): Promise<void> {
+async function recordRun(
+  documents: LorebookManagerDocumentStore,
+  record: LmArchivistRunRecord,
+  logger: LorebookManagerRuntimeHost["logger"],
+): Promise<void> {
   // Best effort, like the retrieval runs: a failed Activity write never changes the run's outcome.
   try {
     await writeRun(documents, record);
   } catch (error) {
-    getLorebookManagerRuntime().logger.warn("[lorebook-manager] Could not record a run: %s", error);
+    logger.warn("[lorebook-manager] Could not record a run: %s", error);
   }
 }
 
@@ -305,7 +405,7 @@ export async function listArchivistRuns(): Promise<LmArchivistRunRecord[]> {
 export interface ArchivistOutcome {
   status: LmArchivistRunStatus;
   run: LmArchivistRunRecord | null;
-  /** Settled messages are still past the watermark: the job runs again. */
+  /** Unprocessed settled messages remain in this mode: the job runs again. */
   more?: boolean;
 }
 
@@ -339,7 +439,7 @@ const messageText = (message: LorebookManagerMessageRecord) =>
   (message.agentContent ?? message.content ?? "").trim().slice(0, MAX_WINDOW_CHARS);
 
 /**
- * The messages past the watermark that fit the prompt, in chat order. With a watermark: the oldest ones, so nothing
+ * The unprocessed messages that fit the prompt, in chat order. With a forward boundary: oldest first, so nothing
  * is skipped (the rest waits for the next run). On a chat's first run: the newest ones, so an old chat's history
  * isn't archived in dozens of calls.
  */
@@ -437,13 +537,21 @@ function bookFor(category: Category, compendium: LmCompendium, payload: LmGraphP
 
 export async function runArchivist(
   chatId: string,
-  options: { signal?: AbortSignal; force?: boolean } = {},
+  options: {
+    signal?: AbortSignal;
+    force?: boolean;
+    mode?: "normal" | "backfill";
+    runtime?: LorebookManagerRuntimeHost;
+  } = {},
 ): Promise<ArchivistOutcome> {
   const startedAt = Date.now();
-  const runtime = getLorebookManagerRuntime();
+  if (options.signal?.aborted) return { status: "failed", run: null };
+  const runtime = options.runtime ?? getLorebookManagerRuntime();
+  const backfill = options.mode === "backfill";
+  const force = options.force || backfill;
   const { persistence } = runtime;
   const documents = persistence.documents;
-  const trigger: LmArchivistRunRecord["trigger"] = options.force ? "manual" : "auto";
+  const trigger: LmArchivistRunRecord["trigger"] = backfill ? "backfill" : options.force ? "manual" : "auto";
   const compendium = compendiumForChat(chatId);
   const base = (status: LmArchivistRunStatus, detail?: string): LmArchivistRunRecord => ({
     at: new Date().toISOString(),
@@ -462,64 +570,62 @@ export async function runArchivist(
     ms: Date.now() - startedAt,
     ...(detail ? { detail } : {}),
   });
-  // Quiet outcomes are recorded only for Run now, so the user sees why nothing happened.
+  const aborted = (): ArchivistOutcome => ({ status: "failed", run: null });
+  // Manual outcomes are recorded so the user sees why nothing happened.
   const quiet = async (status: LmArchivistRunStatus, detail?: string): Promise<ArchivistOutcome> => {
-    const run = options.force ? base(status, detail) : null;
-    if (run) await recordRun(documents, run);
+    if (options.signal?.aborted) return aborted();
+    const run = force ? base(status, detail) : null;
+    if (run) await recordRun(documents, run, runtime.logger);
     return { status, run };
   };
 
   if (typeof persistence.listMessages !== "function") return quiet("unavailable", "This Engine can't read chats");
   const chat = typeof persistence.getChat === "function" ? await persistence.getChat(chatId) : null;
-  if (!options.force && !agentAddedToChat(parseExtra(chat?.metadata))) return quiet("off");
+  if (!force && !agentAddedToChat(parseExtra(chat?.metadata))) return quiet("off");
   if (!compendium || compendium.lorebookIds.length === 0)
     return quiet("not_bound", "No Compendium is bound to this chat");
   const settings = await getSettings(documents);
   const archivist = resolveArchivistSettings(settings.archivist, compendium.overrides);
-  if (archivist.mode === "off" && !options.force) return quiet("off");
+  if (archivist.mode === "off" && !force) return quiet("off");
 
-  const messages = visibleMessages(await persistence.listMessages(chatId));
-  if (!options.force && messages.at(-1)?.role === "user") return quiet("reply_pending");
+  const allMessages = await persistence.listMessages(chatId);
+  const messages = visibleMessages(allMessages);
+  if (!force && messages.at(-1)?.role === "user") return quiet("reply_pending");
   const settled = settledMessages(messages, archivist.readBehind);
 
-  const stored = await readState(documents, chatId);
+  const stored = await readState(documents, chatId, allMessages);
   const { state } = stored;
-  if (!options.force && state.failedAt && Date.now() - Date.parse(state.failedAt) < ARCHIVIST_FAILURE_COOLDOWN_MS) {
+  if (!force && state.failedAt && Date.now() - Date.parse(state.failedAt) < ARCHIVIST_FAILURE_COOLDOWN_MS) {
     return quiet("cooling_down");
   }
-  let start = 0;
-  if (state.lastMessageId) {
-    const index = settled.findIndex((message) => message.id === state.lastMessageId);
-    if (index >= 0) start = index + 1;
-    else if (state.lastMessageAt) {
-      // The watermark message is gone (deleted, rewound): carry on after its time.
-      const after = settled.findIndex((message) => message.createdAt > state.lastMessageAt!);
-      start = after >= 0 ? after : settled.length;
-    }
-  }
-  const pending = settled.slice(start);
+  const pending = unreadMessages(state, settled, allMessages, backfill ? "backfill" : "normal");
   if (pending.length === 0) return quiet("nothing_new", "No settled messages since the last run");
   const replies = pending.filter((message) => message.role === "assistant").length;
-  if (!options.force && replies < archivist.everyNTurns) return quiet("not_due");
+  if (!force && replies < archivist.everyNTurns) return quiet("not_due");
 
   const languageModels = runtime.languageModels;
   if (!languageModels) return quiet("unavailable", "This Engine has no language model host");
-  const firstRun = !state.lastMessageId;
+  const firstRun = !backfill && !state.forwardFrom;
   const window = trimWindow(pending, !firstRun);
   const leftForNext = firstRun ? 0 : pending.length - window.length;
   const olderLeftOut = firstRun ? pending.length - window.length : 0;
+
+  if (options.signal?.aborted) return aborted();
 
   // Lookup: Stage 1 over the window, wide open, picks the entries these messages touch.
   const lorebookIds = new Set(compendium.lorebookIds);
   const characterIds = [...new Set([...compendium.characterIds, ...(chat?.characterIds ?? [])])];
   const personaId = chat?.personaId ?? null;
-  const payload = await buildLorebookManagerGraphPayload({
-    lorebookIds,
-    characterIds: new Set(characterIds),
-    personaIds: new Set(personaId ? [personaId] : []),
-    onlyRequested: true,
-    skipMentions: true,
-  });
+  const payload = await buildLorebookManagerGraphPayload(
+    {
+      lorebookIds,
+      characterIds: new Set(characterIds),
+      personaIds: new Set(personaId ? [personaId] : []),
+      onlyRequested: true,
+      skipMentions: true,
+    },
+    runtime,
+  );
   const loreEntries = payload.nodes.filter(
     (node): node is LmEntryNode => node.nodeType === "lore" && lorebookIds.has(node.lorebookId),
   );
@@ -551,11 +657,17 @@ export async function runArchivist(
 
   // Diff: one model call.
   const failed = async (detail: string, model: string | null): Promise<ArchivistOutcome> => {
+    if (options.signal?.aborted) return aborted();
     const run = { ...base("failed", detail), messageCount: window.length, candidateCount: candidates.length, model };
-    await writeState(documents, chatId, stored, { ...state, failedAt: new Date().toISOString() });
-    await recordRun(documents, run);
+    if (!backfill)
+      await writeState(documents, chatId, () => persistence.listMessages!(chatId), {
+        failedAt: new Date().toISOString(),
+      });
+    if (options.signal?.aborted) return aborted();
+    await recordRun(documents, run, runtime.logger);
     return { status: "failed", run };
   };
+  if (options.signal?.aborted) return aborted();
   let modelName: string | null = null;
   let answer: unknown;
   try {
@@ -563,6 +675,7 @@ export async function runArchivist(
       connectionId: archivist.connectionId,
       chatConnectionId: chat?.connectionId ?? null,
     });
+    if (options.signal?.aborted) return aborted();
     modelName = model.model;
     const completion = await model.chatComplete(
       [
@@ -575,7 +688,7 @@ export async function runArchivist(
         signal: backgroundModelSignal(options.signal),
       },
     );
-    if (options.signal?.aborted) return { status: "failed", run: null };
+    if (options.signal?.aborted) return aborted();
     if (completion.finishReason === "length") {
       return failed("The model's answer was cut off: raise Max tokens in Settings → Archivist", modelName);
     }
@@ -612,10 +725,10 @@ export async function runArchivist(
     parseExtra(currentChat.metadata).agentWriteApprovalRequired !== true;
   const handleProposal = async (proposal: LmProposal) => {
     proposalIds.push(proposal.id);
-    if (!automatic || proposal.duplicateOfEntryId) return;
+    if (options.signal?.aborted || !automatic || proposal.duplicateOfEntryId) return;
     try {
       const applied = await applyProposal(runtime, proposal.id, undefined, undefined, "automatic");
-      void crawlAfterArchivist(applied);
+      if (!options.signal?.aborted) void crawlAfterArchivist(applied);
     } catch (error) {
       // A refused write stays pending so Review can explain and retry it.
       skipped.push({ name: proposal.entryName, why: error instanceof Error ? error.message : "Could not apply" });
@@ -647,6 +760,7 @@ export async function runArchivist(
       skipped.push({ name: entry.name, why: "already known" });
       continue;
     }
+    if (options.signal?.aborted) return aborted();
     if (open) {
       const folded = await appendProposalFieldEdits(documents, open, fresh, sourceMessageRefs);
       if (folded) {
@@ -655,6 +769,7 @@ export async function runArchivist(
         continue;
       }
     }
+    if (options.signal?.aborted) return aborted();
     const proposal = await createProposal(documents, {
       kind: "update_entry",
       lorebookId: entry.lorebookId,
@@ -719,6 +834,7 @@ export async function runArchivist(
         keys.some((key) => sameName(key, entry.name)),
     );
     // Until the Crawler writes real keys and a tag (B2), the name keeps a new entry findable in play.
+    if (options.signal?.aborted) return aborted();
     const proposal = await createProposal(documents, {
       kind: "create_entry",
       lorebookId: bookFor(category, compendium, payload),
@@ -735,12 +851,18 @@ export async function runArchivist(
     creates += 1;
   }
 
-  // The first run skips what came before its window; later runs move on only past what they read.
-  const last = firstRun ? settled.at(-1)! : window.at(-1)!;
-  await writeState(documents, chatId, stored, {
-    lastMessageId: last.id,
-    lastMessageAt: last.createdAt,
-    failedAt: null,
+  if (options.signal?.aborted) return aborted();
+  const last = window.at(-1)!;
+  await writeState(documents, chatId, () => persistence.listMessages!(chatId), {
+    processed: window.map(messageKey),
+    ...(!backfill
+      ? {
+          lastMessageId: last.id,
+          lastMessageAt: last.createdAt,
+          failedAt: null,
+          forwardFrom: { id: window[0]!.id, at: window[0]!.createdAt },
+        }
+      : {}),
   });
   const note =
     leftForNext > 0
@@ -759,7 +881,8 @@ export async function runArchivist(
     model: modelName,
     ms: Date.now() - startedAt,
   };
-  await recordRun(documents, run);
+  if (options.signal?.aborted) return aborted();
+  await recordRun(documents, run, runtime.logger);
   runtime.logger.debug(
     "[lorebook-manager] Archivist chat %s: %d messages, %d candidates, %d updates, %d creates, %d skipped, %d ms",
     chatId,
@@ -771,4 +894,147 @@ export async function runArchivist(
     run.ms,
   );
   return { status: "done", run, more: leftForNext > 0 };
+}
+
+// Backfill jobs live only in memory: a restart cannot leave a persisted running flag.
+interface BackfillJob {
+  status: LmArchivistBackfillJob;
+  controller: AbortController;
+  running?: Promise<void>;
+}
+const backfillJobs = new Map<string, BackfillJob>();
+
+async function olderUnreadMessages(chatId: string, runtime: LorebookManagerRuntimeHost) {
+  const compendium = compendiumForChat(chatId);
+  const settings = await getSettings(runtime.persistence.documents);
+  const archivist = compendium
+    ? resolveArchivistSettings(settings.archivist, compendium.overrides)
+    : settings.archivist;
+  const messages = await runtime.persistence.listMessages!(chatId);
+  const settled = settledMessages(visibleMessages(messages), archivist.readBehind);
+  const { state } = await readState(runtime.persistence.documents, chatId, messages);
+  return { pending: unreadMessages(state, settled, messages, "backfill"), state };
+}
+
+export async function getArchivistBackfillStatus(chatId: string): Promise<LmArchivistBackfillStatus> {
+  const runtime = getLorebookManagerRuntime();
+  const pending =
+    typeof runtime.persistence.listMessages === "function" ? (await olderUnreadMessages(chatId, runtime)).pending : [];
+  let windowsEstimated = 0;
+  for (let start = 0; start < pending.length;) {
+    start += trimWindow(pending.slice(start), true).length;
+    windowsEstimated += 1;
+  }
+  return { olderUnread: pending.length, windowsEstimated, job: backfillJobs.get(chatId)?.status ?? null };
+}
+
+export function startArchivistBackfill(chatId: string): LmArchivistBackfillJob {
+  if (backfillJobs.get(chatId)?.status.status === "running")
+    throw new CompendiumStoreError("Backfill is already running for this chat", 409);
+  const runtime = getLorebookManagerRuntime();
+  if (stopped) throw new CompendiumStoreError("The Archivist is stopped", 409);
+  const compendium = compendiumForChat(chatId);
+  if (!compendium || compendium.lorebookIds.length === 0)
+    throw new CompendiumStoreError("No Compendium is bound to this chat", 400);
+  if (!runtime.languageModels) throw new CompendiumStoreError("This Engine has no language model host", 501);
+  if (typeof runtime.persistence.listMessages !== "function")
+    throw new CompendiumStoreError("This Engine can't read chats", 501);
+  const job: BackfillJob = {
+    status: { status: "running", startedAt: new Date().toISOString(), windowsDone: 0 },
+    controller: new AbortController(),
+  };
+  backfillJobs.set(chatId, job);
+  const { signal } = job.controller;
+  // Capture the runtime before returning: deactivation unbinds the global runtime immediately.
+  job.running = (async () => {
+    try {
+      while (!signal.aborted && job.status.windowsDone < 40) {
+        // Each window joins the queue separately, letting Run now and the Crawler take their turn.
+        const result = await runInBackgroundQueue(async () => {
+          if (signal.aborted) return null;
+          const before = await olderUnreadMessages(chatId, runtime);
+          if (signal.aborted || before.pending.length === 0) return null;
+          const windowStartedAt = Date.now();
+          let outcome: ArchivistOutcome;
+          try {
+            outcome = await runArchivist(chatId, { mode: "backfill", signal, runtime });
+          } catch (error) {
+            if (signal.aborted) return null;
+            const run: LmArchivistRunRecord = {
+              at: new Date().toISOString(),
+              chatId,
+              compendiumId: compendium.id,
+              compendiumName: compendium.name,
+              status: "failed",
+              trigger: "backfill",
+              messageCount: trimWindow(before.pending, true).length,
+              candidateCount: 0,
+              updates: 0,
+              creates: 0,
+              skipped: [],
+              proposalIds: [],
+              model: null,
+              ms: Date.now() - windowStartedAt,
+              detail: error instanceof Error ? error.message : String(error),
+            };
+            await recordRun(runtime.persistence.documents, run, runtime.logger);
+            outcome = { status: "failed", run };
+          }
+          if (signal.aborted) return null;
+          const after = await olderUnreadMessages(chatId, runtime);
+          const previous = new Set(before.state.processed);
+          return {
+            outcome,
+            remaining: after.pending.length,
+            added: after.state.processed.some((key) => !previous.has(key)),
+          };
+        });
+        if (signal.aborted) break;
+        if (!result) {
+          job.status.status = "done";
+          return;
+        }
+        if (result.outcome.status === "nothing_new" && result.remaining === 0) {
+          job.status.status = "done";
+          return;
+        }
+        if (result.outcome.status !== "done") {
+          job.status.status = "failed";
+          job.status.detail = result.outcome.run?.detail || "Backfill failed";
+          return;
+        }
+        job.status.windowsDone += 1;
+        if (result.remaining === 0) {
+          job.status.status = "done";
+          return;
+        }
+        if (!result.added) {
+          job.status.status = "failed";
+          job.status.detail = "Backfill stopped because the window added no new reads";
+          return;
+        }
+      }
+      if (signal.aborted) return;
+      const remaining = await olderUnreadMessages(chatId, runtime);
+      if (signal.aborted) return;
+      job.status.status = "done";
+      if (remaining.pending.length > 0)
+        job.status.detail = "Stopped at the safety cap of 40 windows; Backfill again to continue";
+    } catch (error) {
+      job.status.status = signal.aborted ? "stopped" : "failed";
+      if (!signal.aborted)
+        job.status.detail = (error instanceof Error ? error.message : String(error)) || "Backfill failed";
+    }
+  })();
+  return { ...job.status };
+}
+
+/** Idempotent; an in-flight model call may finish or honor the abort before the job settles. */
+export function stopArchivistBackfill(chatId: string): LmArchivistBackfillJob | null {
+  const job = backfillJobs.get(chatId);
+  if (job?.status.status === "running") {
+    job.status.status = "stopped";
+    job.controller.abort();
+  }
+  return job?.status ?? null;
 }

@@ -32,18 +32,9 @@ async function registerLiveRetrieval(api: ActivationContext["api"], releases: Ar
     api.runtime.logger.info("[lorebook-manager] Live retrieval needs Capability API 1.839; it stays off");
     return;
   }
-  releases.push(resetLiveClaims);
-  try {
-    await refreshLiveClaims();
-  } catch (error) {
-    // Start with no bindings rather than fail activation; the next Compendium or binding write fills the cache.
-    api.runtime.logger.error(error, "[lorebook-manager] Could not load chat bindings for live retrieval");
-  }
   releases.push(api.registerLorebookClaims(claimLorebooksForChat));
   // 5 s (the Engine's cap) so a Stage 2 gate has room; the gate keeps its own shorter deadline, and an Instant
   // Compendium still answers in milliseconds.
-  resumeArchivist();
-  releases.push(() => void stopArchivist());
   releases.push(api.registerPromptContext(contributeLiveLore, { timeoutMs: LIVE_CONTRIBUTOR_TIMEOUT_MS }));
   setLiveRetrievalRegistered(true);
   releases.push(() => setLiveRetrievalRegistered(false));
@@ -54,7 +45,17 @@ export async function activate({ api }: ActivationContext) {
   const unwind = () => {
     while (releases.length > 0) releases.pop()!();
   };
+  resumeArchivist();
+  releases.push(() => void stopArchivist());
+  releases.push(resetLiveClaims);
   try {
+    try {
+      // Run now and Backfill also need bindings on Engines without live retrieval.
+      await refreshLiveClaims();
+    } catch (error) {
+      // Start with no bindings rather than fail activation; the next binding write fills the cache.
+      api.runtime.logger.error(error, "[lorebook-manager] Could not load chat bindings for live retrieval");
+    }
     releases.push(await api.registerPrivilegedRoutes(lorebookManagerRoutes, { prefix: "/api/lorebook-manager" }));
     await registerLiveRetrieval(api, releases);
     ready = true;

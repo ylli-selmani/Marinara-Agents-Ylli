@@ -443,8 +443,8 @@ export interface LmArchivistRunRecord {
   compendiumId: string | null;
   compendiumName: string | null;
   status: LmArchivistRunStatus;
-  /** auto = after turns; manual = Run now. */
-  trigger: "auto" | "manual";
+  /** auto = after turns; manual = Run now; backfill = older unread history. */
+  trigger: "auto" | "manual" | "backfill";
   /** Messages read this run. */
   messageCount: number;
   /** Entries looked up and shown in full. */
@@ -501,4 +501,17 @@ export interface LmChatCompendiumBinding {
   compendiumId: string | null;
   revision: number;
   updatedAt: string;
+}
+
+export interface LmArchivistBackfillJob {
+  status: "running" | "done" | "stopped" | "failed";
+  startedAt: string;
+  windowsDone: number;
+  detail?: string;
+}
+
+export interface LmArchivistBackfillStatus {
+  olderUnread: number;
+  windowsEstimated: number;
+  job: LmArchivistBackfillJob | null;
 }

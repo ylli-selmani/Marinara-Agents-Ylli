@@ -24,6 +24,8 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
   const edits = normalizePromptOverrides(value);
   const definition = promptDefinition(selected);
   const edited = edits[selected] !== undefined;
+  // A cleared box is a draft too: Reset brings the built-in text back, and leaving it empty does the same.
+  const drafted = value[selected] !== undefined;
   const text = value[selected] ?? definition.instructions;
   const missing = definition.variables.filter((variable) => edited && !text.includes(`{{${variable.name}}}`));
   const textId = `lm-prompt-${selected}`;
@@ -62,7 +64,7 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
           </label>
           <button
             type="button"
-            disabled={disabled || !edited}
+            disabled={disabled || !drafted}
             onClick={() => {
               const next = { ...value };
               delete next[selected];
@@ -74,7 +76,9 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
             Reset to built-in
           </button>
         </div>
-        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{definition.description}</p>
+        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+          {definition.description} An empty box uses the built-in text.
+        </p>
         <textarea
           id={textId}
           rows={16}
@@ -82,6 +86,12 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
           maxLength={LM_PROMPT_MAX_CHARS}
           value={text}
           onChange={(event) => onChange({ ...value, [selected]: event.target.value })}
+          onBlur={() => {
+            if (value[selected] === undefined || value[selected]!.trim()) return;
+            const next = { ...value };
+            delete next[selected];
+            onChange(next);
+          }}
           className="mari-chrome-field min-h-48 w-full rounded px-2.5 py-2 text-sm md:text-xs"
         />
         {definition.variables.length > 0 ? (

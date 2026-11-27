@@ -294,6 +294,14 @@ export async function deleteCompendium(
   const removed = await documents.remove(LOREBOOK_MANAGER_PACKAGE_ID, cleanId, revision);
   if (!removed) throw new CompendiumStoreError("Could not delete Compendium due to revision conflict", 409);
 
+  // Its Crawler state goes too, or the Graph's "Not tidied" marker would still count what it tidied.
+  try {
+    const crawlState = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, `crawler_state:${cleanId}`);
+    if (crawlState) await documents.remove(LOREBOOK_MANAGER_PACKAGE_ID, crawlState.id, crawlState.revision);
+  } catch {
+    // Best effort: a leftover state only keeps entries counted as tidied.
+  }
+
   // Clear every chat binding that still points at the deleted Compendium. Best effort per binding:
   // getChatCompendiumBinding also treats a dangling id as unbound, so a lost race here is harmless.
   let bindingDocs: Awaited<ReturnType<typeof documents.list>> = [];

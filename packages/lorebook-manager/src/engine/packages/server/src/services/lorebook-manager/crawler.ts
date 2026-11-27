@@ -34,7 +34,8 @@ import { getSettings } from "./settings-store.js";
 
 const CONTENT_CHARS = 1_500;
 const MAX_LINK_TARGETS = 12;
-const MAX_TARGETS = 200;
+// Enough ids for the largest batch (50) with every entry's full list (12 mentions + 4 by meaning).
+const MAX_TARGETS = 800;
 // Every added key is a trusted match: few, and only names the story uses (Ylli's round 5: "red-haired shinobi").
 const MAX_KEYS_ADDED = 2;
 const MAX_KEYS_TOTAL = 12;

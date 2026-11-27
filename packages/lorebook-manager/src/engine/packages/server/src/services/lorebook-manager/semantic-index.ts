@@ -58,6 +58,8 @@ interface DecodedDoc {
 
 const decodedDocs = new Map<string, DecodedDoc>();
 const baselineBySpace = new Map<string, number>();
+/** Entry-against-entry floor: the calibration texts embedded as documents (asymmetric models differ from queries). */
+const documentBaselineBySpace = new Map<string, number>();
 const inFlightIndex = new Map<string, Promise<{ embedded: number; failed: number }>>();
 const failedAt = new Map<string, number>();
 
@@ -276,6 +278,16 @@ async function warmBaseline(host: LorebookManagerEmbeddingHost): Promise<number 
   return baseline;
 }
 
+async function warmDocumentBaseline(host: LorebookManagerEmbeddingHost): Promise<number | null> {
+  const known = documentBaselineBySpace.get(host.spaceId);
+  if (known !== undefined) return known;
+  const embedded = await host.embed(CALIBRATION_TEXTS, undefined, "document");
+  if (!embedded || embedded.length !== CALIBRATION_TEXTS.length) return null;
+  const baseline = similarityBaseline(embedded);
+  documentBaselineBySpace.set(host.spaceId, baseline);
+  return baseline;
+}
+
 async function embedMissing(
   host: LorebookManagerEmbeddingHost,
   missing: ResolvedVectors["missing"],
@@ -470,10 +482,16 @@ export async function similarEntries(
     if (!host) return result;
     const { vectors } = await resolveVectors(sources, host.spaceId);
     if (vectors.size < 2) return result;
-    let baseline = baselineBySpace.get(host.spaceId);
+    let baseline = documentBaselineBySpace.get(host.spaceId);
     if (baseline === undefined) {
-      const warmed = await withDeadline(() => warmBaseline(host), options.timeoutMs ?? 10_000);
-      if (typeof warmed !== "number") return result;
+      // A host that failed to calibrate isn't asked again for a minute: each batch would wait out the deadline.
+      const failedKey = `document-baseline:${host.spaceId}`;
+      if (Date.now() - (failedAt.get(failedKey) ?? 0) < FAILURE_COOLDOWN_MS) return result;
+      const warmed = await withDeadline(() => warmDocumentBaseline(host), options.timeoutMs ?? 10_000);
+      if (typeof warmed !== "number") {
+        failedAt.set(failedKey, Date.now());
+        return result;
+      }
       baseline = warmed;
     }
     const limit = options.limit ?? 4;
@@ -534,6 +552,7 @@ export async function indexLorebooks(lorebookIds: readonly string[]): Promise<Lm
 export function resetSemanticIndexState(): void {
   decodedDocs.clear();
   baselineBySpace.clear();
+  documentBaselineBySpace.clear();
   inFlightIndex.clear();
   failedAt.clear();
 }

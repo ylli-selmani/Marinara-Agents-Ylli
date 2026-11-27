@@ -598,6 +598,12 @@ export function LorebookGraph({
     queryFn: () => fetchUntidiedEntryIds(shownBookIds),
     enabled: mark === "untidied" && shownBookIds.length > 0,
   });
+  // An edit changes what counts as tidied: ask again whenever the Graph's entries change.
+  const refetchUntidied = untidiedQuery.refetch;
+  const untidiedMarkOn = mark === "untidied";
+  useEffect(() => {
+    if (untidiedMarkOn) void refetchUntidied();
+  }, [payload.nodes, untidiedMarkOn, refetchUntidied]);
   /** Entries with no ID link either way (a mention isn't one). */
   const unlinkedRefs = useMemo(() => {
     const linked = new Set<string>();

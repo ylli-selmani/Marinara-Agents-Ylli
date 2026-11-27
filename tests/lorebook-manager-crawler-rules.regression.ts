@@ -6,7 +6,10 @@
  * Run: npx tsx --tsconfig tests/tsconfig.regressions.json tests/lorebook-manager-crawler-rules.regression.ts
  */
 import assert from "node:assert/strict";
-import { createCompendium } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/compendiums-store.js";
+import {
+  createCompendium,
+  deleteCompendium,
+} from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/compendiums-store.js";
 import {
   CRAWLER_LINKS_SYSTEM,
   CRAWLER_SYSTEM,
@@ -459,6 +462,11 @@ async function main() {
       "pending",
       "the old suggestion stays",
     );
+
+    // ── Deleting the Compendium takes its Crawler state along (the marker reads every state). ──
+    assert.ok(await documents.getById("lorebook-manager", `crawler_state:${compendium.id}`), "state before");
+    await deleteCompendium(documents, compendium.id);
+    assert.equal(await documents.getById("lorebook-manager", `crawler_state:${compendium.id}`), null, "state gone");
   } finally {
     resetLiveClaims();
     release();

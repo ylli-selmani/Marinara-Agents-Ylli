@@ -417,6 +417,11 @@ async function main() {
       (p) => p.source === "crawler" && p.targetEntryId === "unseelie",
     )!;
     assert.deepEqual(keysKept.patch, { addKeys: ["Night Court"] }, "the keys stand without the links");
+    // Its links were never asked, so it isn't tidied: once the suggestion is decided, the next run asks again.
+    await dismissProposal(documents, keysKept.id);
+    answer = () => JSON.stringify({ entries: [] });
+    await runCrawler(compendium.id);
+    assert.match(tidyPrompt(), /\[e\d+\] Unseelie Court\n/, "asked again after a failed links call");
 
     const runs = await listCrawlerRuns();
     assert.ok(runs.length >= 6 && runs.some((run) => run.trigger === "after_archivist"), "runs recorded");

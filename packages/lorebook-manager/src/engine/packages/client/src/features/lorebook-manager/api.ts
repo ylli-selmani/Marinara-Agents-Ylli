@@ -297,6 +297,20 @@ export async function runCrawlerApi(compendiumId: string): Promise<{ status: str
   return (await response.json()) as { status: string; run: LmCrawlerRunRecord | null };
 }
 
+/** Redo last batch: dismisses its waiting suggestions and asks the model again about its entries. */
+export async function redoCrawlerApi(
+  compendiumId: string,
+): Promise<{ status: string; run: LmCrawlerRunRecord | null; detail: string | null }> {
+  const response = await fetch(`${API_ROOT}/crawler/redo`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify({ compendiumId }),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return (await response.json()) as { status: string; run: LmCrawlerRunRecord | null; detail: string | null };
+}
+
 export async function fetchCrawlerPending(compendiumId: string): Promise<number> {
   const payload = await readJson<{ remaining?: number }>(
     `/crawler/pending?compendiumId=${encodeURIComponent(compendiumId)}`,

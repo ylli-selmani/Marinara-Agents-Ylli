@@ -411,10 +411,12 @@ export interface LmCrawlerRunRecord {
   compendiumId: string;
   compendiumName: string | null;
   status: LmCrawlerRunStatus;
-  /** manual = Tidy entries; after_archivist = an applied Archivist change. */
-  trigger: "manual" | "after_archivist";
+  /** manual = Tidy entries; after_archivist = an applied Archivist change; redo = Redo last batch. */
+  trigger: "manual" | "after_archivist" | "redo";
   /** Entries sent to the model this run. */
   entryCount: number;
+  /** Their ids, so Redo last batch can ask again (runs before round 6 have none). */
+  entryIds?: string[];
   /** Suggestions made. */
   proposals: number;
   /** Entries still untidied after this run (in the Compendium's books). */
@@ -451,7 +453,8 @@ export interface LmArchivistRunRecord {
 
 /** What the Archivist or Auto-tag & Link suggests. */
 export interface LmProposalInput {
-  kind: "create_entry" | "update_entry";
+  /** update_book: one change to several entries of a lorebook (whole words on), listed in the patch. */
+  kind: "create_entry" | "update_entry" | "update_book";
   lorebookId: string;
   targetEntryId?: string | null;
   entryName: string;

@@ -29,7 +29,7 @@ import {
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
 import { listArchivistRuns, runArchivist, runInBackgroundQueue } from "./archivist.js";
-import { countUntidied, crawlAfterArchivist, listCrawlerRuns, runCrawler } from "./crawler.js";
+import { countUntidied, crawlAfterArchivist, listCrawlerRuns, redoLastCrawl, runCrawler } from "./crawler.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { clearLiveRuns, listLiveRuns } from "./live-retrieval.js";
 import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
@@ -478,6 +478,20 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
       const outcome = await runInBackgroundQueue(() => runCrawler(compendiumId, { trigger: "manual" }));
       if (outcome.status === "not_found") throw new CompendiumStoreError("Compendium not found", 404);
       return { status: outcome.status, run: outcome.run };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  // Redo last batch: the newest finished batch's waiting suggestions are dismissed and its entries asked again.
+  app.post("/crawler/redo", async (request, reply) => {
+    try {
+      const compendiumId = asRecord(request.body).compendiumId;
+      if (typeof compendiumId !== "string" || !compendiumId)
+        throw new CompendiumStoreError("compendiumId is required", 400);
+      const outcome = await runInBackgroundQueue(() => redoLastCrawl(compendiumId));
+      if (outcome.status === "not_found") throw new CompendiumStoreError("Compendium not found", 404);
+      return { status: outcome.status, run: outcome.run, detail: outcome.detail ?? null };
     } catch (error) {
       return sendRouteError(reply, error);
     }

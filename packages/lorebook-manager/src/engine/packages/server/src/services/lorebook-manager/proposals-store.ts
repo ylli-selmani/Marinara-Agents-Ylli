@@ -21,7 +21,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function toProposal(id: string, revision: number, raw: unknown): LmProposal | null {
   const data = asRecord(raw);
-  const kind = data.kind === "create_entry" || data.kind === "update_entry" ? data.kind : null;
+  const kind =
+    data.kind === "create_entry" || data.kind === "update_entry" || data.kind === "update_book" ? data.kind : null;
   const status = PROPOSAL_STATUSES.includes(data.status as LmProposalStatus) ? (data.status as LmProposalStatus) : null;
   const lorebookId = typeof data.lorebookId === "string" ? data.lorebookId : "";
   if (!kind || !status || !lorebookId) return null;
@@ -158,6 +159,23 @@ export function narrowPatch(original: Record<string, unknown>, edited: unknown):
     if (EDITABLE_LISTS.has(field)) {
       const allowed = new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === "string"));
       const kept = [...new Set((Array.isArray(proposed) ? proposed : []).filter((item) => allowed.has(item)))];
+      if (kept.length > 0) result[field] = kept;
+      continue;
+    }
+    if (field === "wholeWords") {
+      // A whole-words card lists entries; you can leave single ones out.
+      const known = new Map(
+        (Array.isArray(value) ? value : [])
+          .map((item) => asRecord(item))
+          .filter((item) => typeof item.id === "string")
+          .map((item) => [item.id as string, item] as const),
+      );
+      const kept: Record<string, unknown>[] = [];
+      for (const raw of Array.isArray(proposed) ? proposed : []) {
+        const id = asRecord(raw).id;
+        const item = typeof id === "string" ? known.get(id) : undefined;
+        if (item && !kept.includes(item)) kept.push(item);
+      }
       if (kept.length > 0) result[field] = kept;
       continue;
     }
@@ -340,6 +358,32 @@ export async function applyProposal(
   if (proposal.kind === "create_entry") {
     const created = await createLorebookEntry(proposal.lorebookId, { name: proposal.entryName, ...proposal.patch });
     return saveDecision(documents, { ...proposal, status: "applied", appliedEntryId: created.id, decidedAt });
+  }
+
+  if (proposal.kind === "update_book") {
+    // Whole words on, entry by entry: one the Engine refuses (locked meanwhile, deleted) is left out of what's applied.
+    const listed = Array.isArray(proposal.patch.wholeWords) ? proposal.patch.wholeWords.map(asRecord) : [];
+    const applied: Record<string, unknown>[] = [];
+    for (const item of listed) {
+      if (typeof item.id !== "string") continue;
+      try {
+        if (await updateLorebookEntry(item.id, { matchWholeWords: true })) applied.push(item);
+      } catch {
+        // Locked or gone: the rest still apply.
+      }
+    }
+    if (applied.length === 0) throw new CompendiumStoreError("None of these entries could be changed", 409);
+    // Entries left out (in Review, or refused) are kept apart, so the next card doesn't list them again.
+    const kept = new Set(applied.map((item) => item.id));
+    const original = Array.isArray(loaded.patch.wholeWords) ? loaded.patch.wholeWords.map(asRecord) : [];
+    const leftOut = original.filter((item) => typeof item.id === "string" && !kept.has(item.id));
+    return saveDecision(documents, {
+      ...proposal,
+      patch: { wholeWords: applied, ...(leftOut.length > 0 ? { leftOut } : {}) },
+      status: "applied",
+      before: Object.fromEntries(applied.map((item) => [item.id as string, { matchWholeWords: false }])),
+      decidedAt,
+    });
   }
 
   const [book] = await listLorebooks([proposal.lorebookId]);

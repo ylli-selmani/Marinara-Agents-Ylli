@@ -13,12 +13,16 @@ export interface LmRelationDefinition {
 
 export const LM_RELATIONS: readonly LmRelationDefinition[] = [
   { value: "related_to", hint: "General two-way link, when nothing more specific fits", symmetric: true },
-  { value: "part_of", hint: "A piece of something: Roswaal's Personality → Roswaal", symmetric: false },
-  { value: "is_a", hint: "A kind or instance of: Dark Elf → High Elf, Shiza → Dark Fae", symmetric: false },
+  {
+    value: "part_of",
+    hint: "A split-off section of the same subject: Roswaal's Personality → Roswaal",
+    symmetric: false,
+  },
+  { value: "is_a", hint: "A kind, form or instance of: Dark Elf → High Elf, Shiza → Dark Fae", symmetric: false },
   { value: "member_of", hint: "Belongs to a group: Student → Class 1-A", symmetric: false },
   { value: "leads", hint: "Rules or heads a group: Syliveera → Unseelie Court", symmetric: false },
   { value: "located_in", hint: "Lives or sits inside a place: Fae → Fae Realm", symmetric: false },
-  { value: "owns", hint: "Has an item or property: Knight → Sword", symmetric: false },
+  { value: "owns", hint: "Has an item, power or bloodline: Knight → Sword", symmetric: false },
   { value: "ally_of", hint: "Friends or allies, both ways", symmetric: true },
   { value: "rival_of", hint: "Enemies or rivals, both ways", symmetric: true },
   {

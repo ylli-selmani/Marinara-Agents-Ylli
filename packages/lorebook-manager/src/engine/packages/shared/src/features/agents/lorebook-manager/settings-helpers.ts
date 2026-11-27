@@ -54,7 +54,8 @@ export const DEFAULT_ARCHIVIST_SETTINGS: Readonly<LmArchivistSettings> = Object.
   readBehind: 1,
   connectionId: null,
   maxTokens: 4096,
-  temperature: null,
+  // The Engine agents' default (DEFAULT_AGENT_TEMPERATURE); blank in Settings still means the model's own.
+  temperature: 0.7,
 } satisfies LmArchivistSettings);
 
 export const DEFAULT_CRAWLER_SETTINGS: Readonly<LmCrawlerSettings> = Object.freeze({
@@ -63,7 +64,7 @@ export const DEFAULT_CRAWLER_SETTINGS: Readonly<LmCrawlerSettings> = Object.free
   batchSize: 20,
   // Twice the Archivist's: 20 entries' answers plus a thinking model's reasoning cut off at 3,500 (Ylli's round 5).
   maxTokens: 8192,
-  temperature: null,
+  temperature: 0.7,
 } satisfies LmCrawlerSettings);
 
 /** The defaults a fresh install resolves to, before anything is saved. Kept for the Compendium dialog's first draw. */

@@ -714,7 +714,7 @@ assert.ok(
 // Round 5 (B tests): located_in follows outgoing links only. The World State naming a town brings the town, never
 // every place in it; a place named in the scene brings its town.
 {
-  const template = simNodes.find((node) => node.ref === "lore:class1a")!;
+  const template = simNodes.find((node) => node.ref === "lore:class1a") as LmEntryNode;
   const place = (id: string, name: string, relationships: Record<string, string>) => ({
     ...template,
     ref: `lore:${id}`,
@@ -723,7 +723,7 @@ assert.ok(
     keys: [name],
     content: `${name}.`,
     tag: "location",
-    family: "location",
+    family: "location" as const,
     relationships,
   });
   const townPayload: LmGraphPayload = {

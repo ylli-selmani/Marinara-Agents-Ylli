@@ -1,16 +1,25 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Loader2, Network, RotateCcw, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Network, Redo2, RotateCcw, Sparkles, X } from "lucide-react";
 import { LM_RELATIONS } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
   LmCompendium,
+  LmCrawlerRunRecord,
   LmEntryNode,
   LmGraphPayload,
   LmProposal,
   LmProposalStatus,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { decideProposalApi, fetchCrawlerPending, fetchProposals, lmQueryKeys, runCrawlerApi } from "./api";
+import {
+  decideProposalApi,
+  fetchCrawlerPending,
+  fetchCrawlerRuns,
+  fetchProposals,
+  lmQueryKeys,
+  redoCrawlerApi,
+  runCrawlerApi,
+} from "./api";
 
 export interface ReviewPanelProps {
   payload: LmGraphPayload | null;
@@ -40,6 +49,8 @@ const FIELD_LABEL: Record<string, string> = {
   constant: "Always on",
   relationships: "Links",
   dynamicState: "Facets",
+  wholeWords: "Turn on whole words",
+  leftOut: "Left out",
 };
 
 /** Fields Review lets you trim or reword before Apply; the server takes only less, a relation or reworded text. */
@@ -55,6 +66,13 @@ interface ReviewLink {
 }
 
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Your trims per suggestion version, kept while Lorebook Manager stays open: leaving Review and coming back (or a
+ * refetch that redraws the list) shows the card as you left it.
+ */
+const draftCache = new Map<string, { draft: Record<string, unknown>; dropped: string[] }>();
+const draftKey = (proposal: LmProposal) => `${proposal.id}:${proposal.revision}`;
 
 function formatValue(value: unknown, field?: string): string {
   if (value === null || value === undefined || value === "") return "—";
@@ -136,6 +154,22 @@ function FieldValue({
       </div>
     );
   }
+  if ((field === "wholeWords" || field === "leftOut") && Array.isArray(value)) {
+    const items = value as Array<{ id: string; name: string }>;
+    return (
+      <div className="flex flex-wrap gap-1">
+        {items.map((item) => (
+          <Chip
+            key={item.id}
+            label={item.name}
+            onRemove={editable ? () => onChange(items.filter((other) => other.id !== item.id)) : undefined}
+          >
+            {item.name}
+          </Chip>
+        ))}
+      </div>
+    );
+  }
   if (editable && field === "addLinks" && Array.isArray(value)) {
     const links = value as ReviewLink[];
     return (
@@ -187,12 +221,18 @@ function ProposalCard({
   onInspectNode: (ref: string) => void;
 }) {
   const isCreate = proposal.kind === "create_entry";
+  const isBook = proposal.kind === "update_book";
   const pending = proposal.status === "pending";
   const duplicate = proposal.duplicateOfEntryId ? `lore:${proposal.duplicateOfEntryId}` : null;
   // The suggestion as you trimmed it; a field left out entirely is dropped from what Apply sends.
-  const [draft, setDraft] = useState<Record<string, unknown>>(() => ({ ...proposal.patch }));
-  const [dropped, setDropped] = useState<ReadonlySet<string>>(() => new Set());
+  const cached = draftCache.get(draftKey(proposal));
+  const [draft, setDraft] = useState<Record<string, unknown>>(() => cached?.draft ?? { ...proposal.patch });
+  const [dropped, setDropped] = useState<ReadonlySet<string>>(() => new Set(cached?.dropped ?? []));
   const edited = pending && (dropped.size > 0 || !sameJson(draft, proposal.patch));
+  useEffect(() => {
+    if (edited) draftCache.set(draftKey(proposal), { draft, dropped: [...dropped] });
+    else draftCache.delete(draftKey(proposal));
+  }, [draft, dropped, edited, proposal]);
   const kept = Object.fromEntries(
     Object.entries(draft).filter(([field, value]) => !dropped.has(field) && !isBlank(value)),
   );
@@ -208,7 +248,7 @@ function ProposalCard({
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <span className="truncate font-medium">{proposal.entryName || current?.name || "Untitled entry"}</span>
           <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
-            {isCreate ? "New entry" : "Update"} · {lorebookName}
+            {isCreate ? "New entry" : isBook ? "Lorebook" : "Update"} · {lorebookName}
           </span>
           <span className="text-[0.625rem] text-[var(--muted-foreground)]">
             {proposal.source === "crawler" ? "Crawler" : "Archivist"}
@@ -283,7 +323,9 @@ function ProposalCard({
         {Object.entries(shown).map(([field, next]) => {
           const previous = isCreate ? undefined : previousOf(field);
           const leftOut = pending && (dropped.has(field) || (Array.isArray(next) && next.length === 0));
-          const editable = pending && (TEXT_FIELDS.has(field) || LIST_FIELDS.has(field) || field === "addLinks");
+          const editable =
+            pending &&
+            (TEXT_FIELDS.has(field) || LIST_FIELDS.has(field) || field === "addLinks" || field === "wholeWords");
           return (
             <div key={field} className="grid gap-0.5 border-t border-[var(--border)] pt-1 first:border-t-0 first:pt-0">
               <dt className="flex items-center justify-between gap-2 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
@@ -335,26 +377,32 @@ function TidyEntries({ compendium }: { compendium: LmCompendium }) {
     queryKey: lmQueryKeys.crawlerPending(compendium.id),
     queryFn: () => fetchCrawlerPending(compendium.id),
   });
-  const [running, setRunning] = useState(false);
+  const runsQuery = useQuery({ queryKey: lmQueryKeys.crawlerRuns, queryFn: fetchCrawlerRuns });
+  const [running, setRunning] = useState<"tidy" | "redo" | null>(null);
   const remaining = pendingQuery.data;
-  const run = async () => {
-    setRunning(true);
+  // Redo asks again about the newest finished batch (runs before round 6 didn't keep their entries).
+  const lastBatch = (runsQuery.data ?? []).find(
+    (record) => record.compendiumId === compendium.id && record.status === "done" && (record.entryIds?.length ?? 0) > 0,
+  );
+  const run = async (kind: "tidy" | "redo") => {
+    setRunning(kind);
     try {
-      const outcome = await runCrawlerApi(compendium.id);
+      const outcome: { status: string; run: LmCrawlerRunRecord | null; detail?: string | null } =
+        kind === "redo" ? await redoCrawlerApi(compendium.id) : await runCrawlerApi(compendium.id);
       const record = outcome.run;
       if (record?.status === "done") {
         const entries = `${record.entryCount} ${record.entryCount === 1 ? "entry" : "entries"}`;
         const made = `${record.proposals} ${record.proposals === 1 ? "suggestion" : "suggestions"}`;
-        toast.success(`Looked at ${entries}: ${made}`);
-      } else if (record?.status === "nothing_to_do") {
-        toast(record.detail ?? "Every entry is tidied");
+        toast.success(`Looked at ${entries}: ${made}`, record.detail ? { description: record.detail } : undefined);
+      } else if (record?.status === "nothing_to_do" || outcome.status === "nothing_to_do") {
+        toast(record?.detail ?? outcome.detail ?? "Every entry is tidied");
       } else {
         toast.error(record?.detail ?? "The Crawler could not run");
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "The Crawler could not run");
     } finally {
-      setRunning(false);
+      setRunning(null);
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.crawlerPending(compendium.id) });
       void queryClient.invalidateQueries({ queryKey: lmQueryKeys.crawlerRuns });
@@ -370,14 +418,26 @@ function TidyEntries({ compendium }: { compendium: LmCompendium }) {
     <div className="flex flex-wrap items-center gap-2 text-xs">
       <button
         type="button"
-        disabled={running || remaining === 0}
-        onClick={() => void run()}
+        disabled={running !== null || remaining === 0}
+        onClick={() => void run("tidy")}
         title="Suggests a summary, a tag, keyword fixes and links for the next batch of entries. One model call."
         className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"
       >
-        {running ? <Loader2 size="0.75rem" className="animate-spin" /> : <Sparkles size="0.75rem" />}
+        {running === "tidy" ? <Loader2 size="0.75rem" className="animate-spin" /> : <Sparkles size="0.75rem" />}
         Tidy entries
       </button>
+      {lastBatch ? (
+        <button
+          type="button"
+          disabled={running !== null}
+          onClick={() => void run("redo")}
+          title="When the model had a hiccup: dismisses the last batch's waiting suggestions and asks again about its entries. Applied ones stay. One model call."
+          className="mari-chrome-control mari-chrome-control--small inline-flex items-center gap-1 disabled:opacity-45"
+        >
+          {running === "redo" ? <Loader2 size="0.75rem" className="animate-spin" /> : <Redo2 size="0.75rem" />}
+          Redo last batch
+        </button>
+      ) : null}
       <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{remainingText}</span>
     </div>
   );
@@ -387,7 +447,12 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<LmProposalStatus>("pending");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const proposalsQuery = useQuery({ queryKey: lmQueryKeys.proposals(status), queryFn: () => fetchProposals(status) });
+  // Polls like Activity: a Crawler run after an Archivist Apply lands here without leaving and coming back (round 6).
+  const proposalsQuery = useQuery({
+    queryKey: lmQueryKeys.proposals(status),
+    queryFn: () => fetchProposals(status),
+    refetchInterval: 15_000,
+  });
 
   const entriesById = useMemo(() => {
     const map = new Map<string, LmEntryNode>();
@@ -400,6 +465,7 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
     setBusyId(proposal.id);
     try {
       await decideProposalApi(proposal.id, decision, patch, patch ? proposal.revision : undefined);
+      draftCache.delete(draftKey(proposal));
       toast.success(decision === "apply" ? "Change applied" : "Suggestion dismissed");
       await queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
       if (decision === "apply") await queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });

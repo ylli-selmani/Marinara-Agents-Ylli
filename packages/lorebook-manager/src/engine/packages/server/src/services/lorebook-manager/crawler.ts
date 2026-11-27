@@ -16,7 +16,7 @@ import { backgroundModelSignal, runInBackgroundQueue } from "./archivist.js";
 import { getCompendium, listCompendiums, LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { compendiumForChat } from "./live-claims.js";
 import { getLorebookManagerRuntime, type LorebookManagerDocumentStore } from "./package-runtime.js";
-import { comparableFact, createProposal, listProposals } from "./proposals-store.js";
+import { comparableFact, createProposal, dismissProposal, listProposals } from "./proposals-store.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { getSettings } from "./settings-store.js";
 
@@ -44,12 +44,19 @@ export const CRAWLER_STATE_DOC_KIND = "crawler_state";
 /**
  * Relations the Crawler may write: the specific ones. `related_to` says nothing a mention doesn't, and the Crawler
  * spammed it to everything an entry names (Ylli's round 5); a person can still add it. `represents` hides an entry
- * while its card is active: a person's call too.
+ * while its card is active: a person's call too. `part_of` pulls hardest, both ways, and is meant for a section split
+ * off the same subject; the model used it for "a form of" and "belongs to" (round 6), so only a person writes it.
  */
 const CRAWLER_RELATION_DEFS = LM_RELATIONS.filter(
-  (relation) => relation.value !== "related_to" && relation.value !== "represents",
+  (relation) => !["related_to", "represents", "part_of"].includes(relation.value),
 );
 const CRAWLER_RELATIONS = CRAWLER_RELATION_DEFS.map((relation) => relation.value);
+/** Relations that form a ladder: a link goes to the closest rung, never one the entry already reaches through it. */
+const LADDER_RELATIONS = new Set(["is_a", "member_of", "located_in"]);
+/** Tries for a summary before an entry is left as it is, so a model that keeps skipping one can't hold the queue. */
+const MAX_SUMMARY_TRIES = 2;
+/** Scripts with no spaces between words: whole words would stop such a key from matching inside a sentence. */
+const NO_WORD_GAPS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u;
 const AFTER_ARCHIVIST_WAIT_MS = 20_000;
 /** A steady stream of Applies can't hold the run back longer than this after the first one. */
 const AFTER_ARCHIVIST_MAX_WAITS = 3;
@@ -59,9 +66,10 @@ const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
 
 /**
  * Bumped when the Crawler's rules change enough to look again: every entry is untidied once (2: round 5's prompt, with
- * key removal, "always on" and no related_to). Costs nothing until Tidy entries runs.
+ * key removal, "always on" and no related_to; 3: round 6, summaries required, no part_of, key swaps). Costs nothing
+ * until Tidy entries runs.
  */
-const CRAWLER_RULES_VERSION = 2;
+const CRAWLER_RULES_VERSION = 3;
 
 /** What the model read of an entry: its name and content, under these rules. A change to either untidies it again. */
 export function crawlHash(entry: Pick<LmEntryNode, "name" | "content">): string {
@@ -76,6 +84,8 @@ export function crawlHash(entry: Pick<LmEntryNode, "name" | "content">): string 
 
 interface CrawlerState {
   crawled: Record<string, string>;
+  /** Runs that looked at an entry without tidying it (no summary, or left out of the answer). */
+  attempts: Record<string, number>;
 }
 
 async function readState(
@@ -83,26 +93,42 @@ async function readState(
   compendiumId: string,
 ): Promise<{ state: CrawlerState; revision: number | null }> {
   const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, stateDocId(compendiumId));
-  const raw = (doc?.data as { crawled?: unknown } | undefined)?.crawled;
+  const data = (doc?.data ?? {}) as { crawled?: unknown; attempts?: unknown };
   const crawled: Record<string, string> = {};
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    for (const [id, hash] of Object.entries(raw as Record<string, unknown>)) {
+  const attempts: Record<string, number> = {};
+  if (data.crawled && typeof data.crawled === "object" && !Array.isArray(data.crawled)) {
+    for (const [id, hash] of Object.entries(data.crawled as Record<string, unknown>)) {
       if (typeof hash === "string") crawled[id] = hash;
     }
   }
-  return { state: { crawled }, revision: doc ? doc.revision : null };
+  if (data.attempts && typeof data.attempts === "object" && !Array.isArray(data.attempts)) {
+    for (const [id, count] of Object.entries(data.attempts as Record<string, unknown>)) {
+      if (typeof count === "number" && count > 0) attempts[id] = count;
+    }
+  }
+  return { state: { crawled, attempts }, revision: doc ? doc.revision : null };
 }
 
-async function markCrawled(
+/** Tidied entries are marked with what the model read; tried ones count a try; untidied ones start over. */
+async function saveCrawlState(
   documents: LorebookManagerDocumentStore,
   compendiumId: string,
-  entries: readonly LmEntryNode[],
+  change: { tidied?: readonly LmEntryNode[]; tried?: readonly LmEntryNode[]; untidy?: readonly string[] },
 ): Promise<void> {
   const { state, revision } = await readState(documents, compendiumId);
   const crawled = { ...state.crawled };
-  for (const entry of entries) crawled[entry.id] = crawlHash(entry);
+  const attempts = { ...state.attempts };
+  for (const entry of change.tidied ?? []) {
+    crawled[entry.id] = crawlHash(entry);
+    delete attempts[entry.id];
+  }
+  for (const entry of change.tried ?? []) attempts[entry.id] = (attempts[entry.id] ?? 0) + 1;
+  for (const id of change.untidy ?? []) {
+    delete crawled[id];
+    delete attempts[id];
+  }
   const now = new Date().toISOString();
-  const data = { compendiumId, crawled };
+  const data = { compendiumId, crawled, attempts };
   if (revision === null) {
     await documents.create({
       id: stateDocId(compendiumId),
@@ -196,22 +222,26 @@ function gapScore(entry: LmEntryNode): number {
   return (entry.description.trim() ? 0 : 4) + (entry.tag.trim() ? 0 : 2) + (entry.keys.length < 2 ? 1 : 0);
 }
 
-/** Entries the Crawler may still tidy: unlocked, changed since it last looked, no Crawler suggestion waiting. */
+/**
+ * Entries the Crawler may still tidy: unlocked, changed since it last looked, no Crawler suggestion waiting. Entries
+ * already tried come last, so a model that keeps skipping one summary can't hold the rest back.
+ */
 function untidied(
   payload: LmGraphPayload,
   compendium: LmCompendium,
-  crawled: Record<string, string>,
+  state: CrawlerState,
   pending: readonly LmProposal[],
 ): LmEntryNode[] {
   const books = new Set(compendium.lorebookIds);
   const waiting = new Set(
     pending.filter((proposal) => proposal.source === "crawler").map((proposal) => proposal.targetEntryId),
   );
+  const tries = (entry: LmEntryNode) => state.attempts[entry.id] ?? 0;
   return payload.nodes
     .filter((node): node is LmEntryNode => node.nodeType === "lore" && books.has(node.lorebookId))
-    .filter((entry) => !entry.locked && !waiting.has(entry.id) && crawled[entry.id] !== crawlHash(entry))
+    .filter((entry) => !entry.locked && !waiting.has(entry.id) && state.crawled[entry.id] !== crawlHash(entry))
     .map((entry, index) => ({ entry, index }))
-    .sort((a, b) => gapScore(b.entry) - gapScore(a.entry) || a.index - b.index)
+    .sort((a, b) => tries(a.entry) - tries(b.entry) || gapScore(b.entry) - gapScore(a.entry) || a.index - b.index)
     .map((item) => item.entry);
 }
 
@@ -225,25 +255,29 @@ export async function countUntidied(compendiumId: string): Promise<number> {
     readState(documents, compendiumId),
     listProposals(documents, "pending"),
   ]);
-  return untidied(payload, compendium, state.crawled, pending).length;
+  return untidied(payload, compendium, state, pending).length;
 }
 
 // ── The prompt ──
 
 export const CRAWLER_SYSTEM = [
-  "You tidy a roleplay's lorebook so the right entries come up during play. For each entry in <entries>, suggest",
-  "only what is clearly missing or wrong. Most entries need little; an empty answer is a good answer.",
+  "You tidy a roleplay's lorebook so the right entries come up during play. Every entry in <entries> gets an answer.",
   "",
-  "description: one plain sentence saying what the entry is (who, what or where). Only if the entry has none.",
+  "description: REQUIRED for every entry whose description says (none): one plain sentence saying what the entry is",
+  "(who, what or where), from its text. It is the most important field; never skip it for such an entry. Leave it",
+  "out only where the entry has one already.",
   "tag: one or two lowercase words for its kind (character, location, item, faction, species, ability, event,",
   "concept, ...). Only if the entry has none.",
+  "",
+  "Everything else: only what is clearly missing or wrong. Most entries need few or no keyword and link changes.",
   "",
   "Keywords bring an entry into the story whenever one appears in the chat, without any further check. So:",
   "addKeys: at most 2 names or aliases the story really calls it by and the entry lacks. Never descriptions",
   '("red-haired shinobi"), titles of other things, or generic phrases.',
   "removeKeys: keys the entry already has that are too broad on their own: a common word that would bring it in for",
-  'unrelated text ("Ten" for Ten-Tails, "Team" for Team Guy, "Dark", "water"). Copy them exactly. Never the',
-  "entry's own name, and leave it at least one key.",
+  'unrelated text ("Ten" for Ten-Tails, "Team" for Team Guy, "Dark", "water"), or one word of a longer name ("Shadow"',
+  'for Shadow Clone Technique). A key marked "also a key of N other entries" is a strong sign. Copy them exactly.',
+  "Never the entry's own name. To replace an entry's only key, put the better one in addKeys.",
   'constant: false, only for an entry marked "always on: yes" that isn\'t lore every scene needs (a person, place or',
   "event that matters only when it comes up).",
   "",
@@ -251,11 +285,13 @@ export const CRAWLER_SYSTEM = [
   'the target along. It reads "<entry> <relation> <target>". Only these relations:',
   ...CRAWLER_RELATION_DEFS.map((relation) => `- ${relation.value}: ${relation.hint}`),
   "Link only when the relation is plainly true from the entry's text. Naming, mentioning or comparing a target is",
-  "not a link: an encounter prompt that names three teams links to none of them. At most 3 links per entry, only to",
-  "targets listed under that entry. When no relation above fits exactly, leave the link out.",
+  "not a link: an encounter prompt that names three teams links to none of them. Link to the closest kind, group or",
+  "place only: an entry that is_a Ninjutsu gets no is_a Jutsu as well. Something that belongs to someone (a",
+  "bloodline, a weapon) gets no link to its owner; the owner's own entry links to it with owns. At most 3 links per",
+  "entry, only to targets listed under that entry. When no relation above fits exactly, leave the link out.",
   "",
-  "Never invent; leave a field out when unsure. Answer for every entry; one with nothing to add is just",
-  '{"id": "e2"}. Answer with JSON only:',
+  "Never invent keys or links; leave them out when unsure. An entry that has a description and needs nothing else is",
+  'just {"id": "e2"}. Answer with JSON only:',
   '{"entries": [{"id": "e1", "description": "...", "tag": "...", "addKeys": ["..."], "removeKeys": ["..."],',
   '"constant": false, "links": [{"to": "t3", "relation": "member_of"}]}]}',
 ].join("\n");
@@ -268,6 +304,8 @@ export function crawlerUserPrompt(
   batch: readonly LmEntryNode[],
   linkTargets: ReadonlyMap<string, ReadonlyArray<{ shortId: string; node: LmEntryNode | LmEntityNode }>>,
   nameOf: (ref: string) => string,
+  /** How many entries in the Compendium have each key (compared loosely): a shared key is a broad one. */
+  keyUse: ReadonlyMap<string, number> = new Map(),
 ): string {
   const blocks = batch.map((entry, index) => {
     const content = entry.content.length > CONTENT_CHARS ? `${entry.content.slice(0, CONTENT_CHARS)}…` : entry.content;
@@ -275,11 +313,15 @@ export function crawlerUserPrompt(
       .map(([target, relation]) => `${relation} ${nameOf(target)}`)
       .join(", ");
     const targets = (linkTargets.get(entry.ref) ?? []).map((item) => `${item.shortId} ${displayName(item.node)}`);
+    const keys = entry.keys.map((key) => {
+      const others = (keyUse.get(comparableFact(key)) ?? 1) - 1;
+      return others > 0 ? `${key} (also a key of ${others} other ${others === 1 ? "entry" : "entries"})` : key;
+    });
     return [
       `[e${index + 1}] ${entry.name}`,
       `description: ${entry.description.trim() || "(none)"}`,
       `tag: ${entry.tag.trim() || "(none)"}`,
-      `keys: ${entry.keys.join(", ") || "(none)"}`,
+      `keys: ${keys.join(", ") || "(none)"}`,
       ...(entry.constant ? ["always on: yes"] : []),
       `links: ${links || "(none)"}`,
       `targets: ${targets.join("; ") || "(none)"}`,
@@ -311,11 +353,61 @@ export interface CrawlerLink {
   name: string;
 }
 
+/**
+ * Whole words on, one card per lorebook listing its entries that have it off (the Engine's default). No model: "Ame"
+ * matching inside "game" is a setting, not a judgement (Ylli's round 6). An entry listed on an earlier card (applied,
+ * dismissed or waiting) isn't listed again, nor one with regex keys or a key in a script without spaces.
+ */
+async function suggestWholeWords(
+  documents: LorebookManagerDocumentStore,
+  payload: LmGraphPayload,
+  compendium: LmCompendium,
+): Promise<number> {
+  const listed = new Set(
+    (await listProposals(documents))
+      .filter((proposal) => proposal.kind === "update_book")
+      .flatMap((proposal) =>
+        [proposal.patch.wholeWords, proposal.patch.leftOut].flatMap((list) => (Array.isArray(list) ? list : [])),
+      )
+      .map((item) => asRecord(item).id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  let count = 0;
+  for (const lorebookId of compendium.lorebookIds) {
+    const entries = payload.nodes.filter(
+      (node): node is LmEntryNode =>
+        node.nodeType === "lore" &&
+        node.lorebookId === lorebookId &&
+        !node.matchWholeWords &&
+        !node.useRegex &&
+        !node.locked &&
+        node.keys.length > 0 &&
+        !node.keys.some((key) => NO_WORD_GAPS.test(key)) &&
+        !listed.has(node.id),
+    );
+    if (entries.length === 0) continue;
+    await createProposal(documents, {
+      kind: "update_book",
+      lorebookId,
+      entryName: payload.lorebooks.find((book) => book.id === lorebookId)?.name ?? "Lorebook",
+      patch: { wholeWords: entries.map((entry) => ({ id: entry.id, name: entry.name })) },
+      reason:
+        'Whole words is off, so a key also matches inside longer words ("Ame" in "game"). On, a key matches only as a ' +
+        "word of its own; a plural then needs its own key.",
+      source: "crawler",
+    });
+    count += entries.length;
+  }
+  return count;
+}
+
 // ── The run ──
 
 export interface CrawlerOutcome {
   status: LmCrawlerRunStatus;
   run: LmCrawlerRunRecord | null;
+  /** Why nothing ran, when no run was recorded. */
+  detail?: string;
 }
 
 export interface CrawlerRunOptions {
@@ -362,26 +454,29 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     readState(documents, compendiumId),
     listProposals(documents, "pending"),
   ]);
-  let candidates = untidied(payload, compendium, state.crawled, pending);
+  const everyUntidied = untidied(payload, compendium, state, pending);
+  let candidates = everyUntidied;
   if (options.entryIds) {
     const wanted = new Set(options.entryIds);
     candidates = candidates.filter((entry) => wanted.has(entry.id));
   }
   const batch = candidates.slice(0, crawler.batchSize);
-  let remainingAfter = options.entryIds ? 0 : Math.max(0, candidates.length - batch.length);
+  let remainingAfter = trigger === "after_archivist" ? 0 : Math.max(0, everyUntidied.length - batch.length);
+  const wholeWords = trigger === "manual" ? await suggestWholeWords(documents, payload, compendium) : 0;
+  const wholeWordsNote =
+    wholeWords > 0
+      ? `Whole words: a suggestion for ${wholeWords} ${wholeWords === 1 ? "entry" : "entries"} waits in Review`
+      : undefined;
   if (batch.length === 0) {
     // After an Archivist change there's nothing to say when the entry is already tidy: record only Tidy entries.
-    if (trigger !== "manual") return { status: "nothing_to_do", run: null };
+    if (trigger === "after_archivist") return { status: "nothing_to_do", run: null };
     const books = new Set(compendium.lorebookIds);
     const waiting = pending.filter(
       (proposal) => proposal.source === "crawler" && books.has(proposal.lorebookId),
     ).length;
-    return finish(
-      base(
-        "nothing_to_do",
-        waiting > 0 ? `Nothing left to tidy; ${waiting} Crawler suggestions wait in Review` : "Every entry is tidied",
-      ),
-    );
+    const nothing =
+      waiting > 0 ? `Nothing left to tidy; ${waiting} Crawler suggestions wait in Review` : "Every entry is tidied";
+    return finish(base("nothing_to_do", wholeWordsNote ? `${nothing}. ${wholeWordsNote}` : nothing));
   }
   const languageModels = runtime.languageModels;
   if (!languageModels) return finish(base("unavailable", "This Engine has no language model host"));
@@ -413,6 +508,35 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     }
     linkTargets.set(entry.ref, targets);
   }
+  // A key several entries share is a broad one; the prompt says so next to it.
+  const ownBooks = new Set(compendium.lorebookIds);
+  const keyUse = new Map<string, number>();
+  for (const node of payload.nodes) {
+    if (node.nodeType !== "lore" || !ownBooks.has(node.lorebookId)) continue;
+    for (const key of new Set(node.keys.map(comparableFact))) if (key) keyUse.set(key, (keyUse.get(key) ?? 0) + 1);
+  }
+  // Ladders (is_a, member_of, located_in): a target the entry already reaches through a lower rung is dropped.
+  const linksOf = (ref: string) => {
+    const node = nodesByRef.get(ref);
+    if (!node || node.nodeType !== "lore") return [];
+    return Object.entries(node.relationships).map(([key, relation]) => ({
+      ref: parseEntityRef(key)?.ref ?? key,
+      relation: String(relation).trim().toLowerCase(),
+    }));
+  };
+  const reaches = (fromRef: string, relation: string, targetRef: string): boolean => {
+    const seen = new Set([fromRef]);
+    const queue = [fromRef];
+    while (queue.length > 0) {
+      for (const link of linksOf(queue.shift()!)) {
+        if (link.relation !== relation || seen.has(link.ref)) continue;
+        if (link.ref === targetRef) return true;
+        seen.add(link.ref);
+        queue.push(link.ref);
+      }
+    }
+    return false;
+  };
 
   let modelName: string | null = null;
   let answer: unknown;
@@ -431,7 +555,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     const completion = await model.chatComplete(
       [
         { role: "system", content: CRAWLER_SYSTEM },
-        { role: "user", content: crawlerUserPrompt(batch, linkTargets, nameOf) },
+        { role: "user", content: crawlerUserPrompt(batch, linkTargets, nameOf, keyUse) },
       ],
       {
         ...(crawler.temperature === null ? {} : { temperature: crawler.temperature }),
@@ -455,6 +579,8 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   const proposalIds: string[] = [];
   const byEntryId = new Map<string, LmEntryNode>(batch.map((entry, index) => [`e${index + 1}`, entry]));
   const answered = new Set<string>();
+  const tidied: LmEntryNode[] = [];
+  const tried: LmEntryNode[] = [];
   for (const raw of parsed.entries) {
     const item = asRecord(raw);
     const shortId = cleanText(item.id, 12);
@@ -469,19 +595,18 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     if (description && !entry.description.trim()) patch.description = description;
     const tag = cleanText(item.tag, TAG_CHARS).toLowerCase();
     if (tag && !entry.tag.trim()) patch.tag = tag;
-    // A too-broad key out: only one the entry has, never its own name, and at least one key stays.
+    // A too-broad key out: only one the entry has, never its own name, and at least one key stays (checked below).
     const ownName = comparableFact(entry.name);
     const removeKeys: string[] = [];
     for (const key of Array.isArray(item.removeKeys) ? item.removeKeys : []) {
       const wanted = comparableFact(cleanText(key, 60));
       const existing = entry.keys.find((candidate) => comparableFact(candidate) === wanted);
       if (!wanted || !existing || wanted === ownName || removeKeys.includes(existing)) continue;
-      if (entry.keys.length - removeKeys.length <= 1) break;
       removeKeys.push(existing);
     }
-    if (removeKeys.length > 0) patch.removeKeys = removeKeys;
     if (item.constant === false && entry.constant) patch.constant = false;
-    const known = new Set([...entry.keys, entry.name].map(comparableFact));
+    // The entry's name may join its keys: a swap ("Shadow" out, "Shadow Clone Technique" in) needs it.
+    const known = new Set(entry.keys.map(comparableFact));
     const addKeys: string[] = [];
     // `keys` was phase 1's name for the field; an older prompt's answer still reads.
     const keysAnswer = Array.isArray(item.addKeys) ? item.addKeys : Array.isArray(item.keys) ? item.keys : [];
@@ -496,8 +621,11 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
       addKeys.push(clean);
     }
     if (addKeys.length > 0) patch.addKeys = addKeys;
+    // Without a better key in addKeys, the last one stays.
+    while (removeKeys.length > 0 && entry.keys.length - removeKeys.length + addKeys.length < 1) removeKeys.pop();
+    if (removeKeys.length > 0) patch.removeKeys = removeKeys;
     const allowed = new Map((linkTargets.get(entry.ref) ?? []).map((target) => [target.shortId, target.node]));
-    const addLinks: CrawlerLink[] = [];
+    const addLinks: Array<CrawlerLink & { ref: string }> = [];
     for (const rawLink of Array.isArray(item.links) ? item.links : []) {
       const link = asRecord(rawLink);
       const to = cleanText(link.to, 12);
@@ -513,9 +641,34 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
       }
       const key = toRelationshipKey(node.ref);
       if (addLinks.some((existing) => existing.key === key) || addLinks.length >= MAX_LINKS_ADDED) continue;
-      addLinks.push({ key, relation, name: displayName(node) });
+      addLinks.push({ key, relation, name: displayName(node), ref: node.ref });
     }
-    if (addLinks.length > 0) patch.addLinks = addLinks;
+    const links = addLinks.filter((link) => {
+      if (!LADDER_RELATIONS.has(link.relation)) return true;
+      const rungs = [
+        ...linksOf(entry.ref)
+          .filter((other) => other.relation === link.relation)
+          .map((other) => other.ref),
+        ...addLinks.filter((other) => other.relation === link.relation).map((other) => other.ref),
+      ];
+      const lower = rungs.find((ref) => ref !== link.ref && reaches(ref, link.relation, link.ref));
+      if (lower) skipped.push({ name: `${entry.name} → ${link.name}`, why: `already under ${nameOf(lower)}` });
+      return !lower;
+    });
+    if (links.length > 0) patch.addLinks = links.map(({ key, relation, name }) => ({ key, relation, name }));
+    // A summary is required where the entry has none: without one the entry isn't tidied, up to MAX_SUMMARY_TRIES.
+    if (!entry.description.trim() && !patch.description) {
+      const tries = (state.attempts[entry.id] ?? 0) + 1;
+      if (tries >= MAX_SUMMARY_TRIES) {
+        tidied.push(entry);
+        skipped.push({ name: entry.name, why: `no summary after ${tries} tries` });
+      } else {
+        tried.push(entry);
+        skipped.push({ name: entry.name, why: "no summary; asked again next run" });
+      }
+    } else {
+      tidied.push(entry);
+    }
     if (Object.keys(patch).length === 0) continue;
     const proposal = await createProposal(documents, {
       kind: "update_entry",
@@ -530,16 +683,19 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     proposalIds.push(proposal.id);
   }
 
-  // An entry the model answered for counts as tidied, also with nothing to add; one it left out stays untidied.
-  const tidied = batch.filter((entry) => answered.has(entry.id));
-  await markCrawled(documents, compendiumId, tidied);
-  if (tidied.length < batch.length) {
-    skipped.push({ name: `${batch.length - tidied.length} entries`, why: "not answered, left for the next run" });
+  // An entry the model answered for counts as tidied, also with nothing to add (but its summary, if it had none); one
+  // it left out stays untidied and counts a try, so it moves behind the entries not tried yet.
+  const leftOut = batch.filter((entry) => !answered.has(entry.id));
+  tried.push(...leftOut);
+  await saveCrawlState(documents, compendiumId, { tidied, tried });
+  if (leftOut.length > 0) {
+    skipped.push({ name: `${leftOut.length} entries`, why: "not answered, left for the next run" });
   }
   remainingAfter += batch.length - tidied.length;
   const run: LmCrawlerRunRecord = {
-    ...base("done"),
+    ...base("done", wholeWordsNote),
     entryCount: batch.length,
+    entryIds: batch.map((entry) => entry.id),
     proposals: proposalIds.length,
     remaining: remainingAfter,
     skipped,
@@ -557,6 +713,35 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     run.ms,
   );
   return finish(run);
+}
+
+/**
+ * Redo last batch, for a model hiccup: the newest finished batch's waiting suggestions are dismissed and its entries
+ * asked again. An entry whose suggestion from that batch was applied stays as it is.
+ */
+export async function redoLastCrawl(
+  compendiumId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<CrawlerOutcome> {
+  const documents = getLorebookManagerRuntime().persistence.documents;
+  if (!(await getCompendium(documents, compendiumId))) return { status: "not_found", run: null };
+  const last = (await listCrawlerRuns()).find(
+    (run) => run.compendiumId === compendiumId && run.status === "done" && (run.entryIds?.length ?? 0) > 0,
+  );
+  if (!last) return { status: "nothing_to_do", run: null, detail: "No batch to redo yet" };
+  const fromRun = new Set(last.proposalIds);
+  const applied = new Set<string>();
+  for (const proposal of await listProposals(documents)) {
+    if (!fromRun.has(proposal.id) || proposal.kind !== "update_entry" || !proposal.targetEntryId) continue;
+    if (proposal.status === "applied") applied.add(proposal.targetEntryId);
+    else if (proposal.status === "pending") await dismissProposal(documents, proposal.id);
+  }
+  const again = last.entryIds!.filter((id) => !applied.has(id));
+  if (again.length === 0) {
+    return { status: "nothing_to_do", run: null, detail: "Every suggestion from the last batch was applied" };
+  }
+  await saveCrawlState(documents, compendiumId, { untidy: again });
+  return runCrawler(compendiumId, { entryIds: again, trigger: "redo", signal: options.signal });
 }
 
 /** The Compendium an applied Archivist change belongs to: its chat's, else the first one holding its lorebook. */

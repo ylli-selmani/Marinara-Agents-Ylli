@@ -44,6 +44,7 @@ import {
   ENTITY_FAMILIES,
   type EntityFamily,
   type LmEntryNode,
+  type LmGraphEdge,
   type LmGraphNode,
   type LmGraphPayload,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
@@ -92,6 +93,31 @@ function relationMarkerId(relation: string): string | null {
 function relationStroke(relation: string): string {
   const base = relation.split(" / ")[0]?.trim() ?? "";
   return RELATION_COLORS[base] ?? "var(--lm-graph-ink)";
+}
+
+export function filterGraphRelations(edges: readonly LmGraphEdge[], selectedRelation: string) {
+  const counts = new Map<string, number>();
+  for (const edge of edges) {
+    if (edge.kind !== "explicit") continue;
+    // Opposite links with different relations share one drawn edge.
+    for (const relation of new Set(edge.relation.split(" / ").map((value) => value.trim()))) {
+      counts.set(relation, (counts.get(relation) ?? 0) + 1);
+    }
+  }
+  const options = [...counts].map(([relation, count]) => ({ relation, count }));
+  options.sort((a, b) => b.count - a.count || a.relation.localeCompare(b.relation));
+  const relation = counts.has(selectedRelation) ? selectedRelation : "all";
+  const refs = relation === "all" ? null : new Set<string>();
+  const visibleEdges = refs
+    ? edges.filter((edge) => {
+        if (edge.kind !== "explicit") return true;
+        if (!edge.relation.split(" / ").some((value) => value.trim() === relation)) return false;
+        refs.add(edge.sourceRef);
+        refs.add(edge.targetRef);
+        return true;
+      })
+    : edges;
+  return { options, relation, edges: visibleEdges, refs };
 }
 
 export const FAMILY_META: Record<EntityFamily, { label: string; icon: LucideIcon }> = {
@@ -592,6 +618,7 @@ export function LorebookGraph({
   const [showMentions, setShowMentions] = useState(true);
   const [hideOrphans, setHideOrphans] = useState(false);
   const [mark, setMark] = useState<GraphMark>("none");
+  const [relation, setRelation] = useState("all");
   const shownBookIds = useMemo(() => [...selectedLorebookIds].sort(), [selectedLorebookIds]);
   const untidiedQuery = useQuery({
     queryKey: lmQueryKeys.crawlerUntidied(shownBookIds.join(",")),
@@ -780,6 +807,11 @@ export function LorebookGraph({
       edges: graph.edges.filter((edge) => ids.has(edge.sourceRef) && ids.has(edge.targetRef)),
     };
   }, [graph, whole, focusRef, focusHops]);
+
+  const relationFilter = useMemo(() => filterGraphRelations(shown.edges, relation), [shown.edges, relation]);
+  useEffect(() => {
+    if (relation !== relationFilter.relation) setRelation(relationFilter.relation);
+  }, [relation, relationFilter.relation]);
 
   const sortedNodeRefsKey = useMemo(
     () =>
@@ -1023,7 +1055,7 @@ export function LorebookGraph({
 
   const edgeLayer = useMemo(
     () =>
-      shown.edges.map((edge, index) => {
+      relationFilter.edges.map((edge, index) => {
         const from = effectivePositions.get(edge.sourceRef);
         const to = effectivePositions.get(edge.targetRef);
         const fromNode = nodesByRef.get(edge.sourceRef);
@@ -1166,7 +1198,7 @@ export function LorebookGraph({
           </line>
         );
       }),
-    [shown.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale, simHighlight],
+    [relationFilter.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale, simHighlight],
   );
 
   const nodeLayer = useMemo(
@@ -1190,7 +1222,8 @@ export function LorebookGraph({
         // The Mark select dims the other entries; books, cards and personas stay as they are.
         const dimmedBySim =
           Boolean(simHighlight && !hoverRef && !simRole) ||
-          Boolean(markedRefs && !simHighlight && !hoverRef && node.nodeType === "lore" && !marked);
+          Boolean(markedRefs && !simHighlight && !hoverRef && node.nodeType === "lore" && !marked) ||
+          Boolean(relationFilter.refs && !relationFilter.refs.has(node.ref));
         return (
           <GraphNodeView
             key={node.ref}
@@ -1223,6 +1256,7 @@ export function LorebookGraph({
       labelEveryNode,
       nodeActions,
       markedRefs,
+      relationFilter.refs,
     ],
   );
 
@@ -1788,6 +1822,18 @@ export function LorebookGraph({
                 : "Mark: not tidied"}
             </option>
             <option value="unlinked">{`Mark: no ID links (${unlinkedRefs.size})`}</option>
+          </select>
+          <select
+            aria-label="Show relation"
+            title="Show ID links with this relation"
+            value={relationFilter.relation}
+            onChange={(event) => setRelation(event.target.value)}
+            className="mari-chrome-field h-7 rounded px-1.5 text-xs text-[var(--foreground)]"
+          >
+            <option value="all">Relation: all</option>
+            {relationFilter.options.map(({ relation, count }) => (
+              <option key={relation} value={relation}>{`Relation: ${relation} (${count})`}</option>
+            ))}
           </select>
 
           <span aria-hidden="true" data-lm-graph-divider />

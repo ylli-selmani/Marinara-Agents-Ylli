@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { RotateCcw } from "lucide-react";
+import { Check, FileText, RotateCcw } from "lucide-react";
 import {
   LM_PROMPT_MAX_CHARS,
   LM_PROMPTS,
@@ -14,21 +14,47 @@ export interface PromptFieldsProps {
   disabled?: boolean;
 }
 
+const TOOLBAR_BUTTON =
+  "flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-45";
+const PROMPT_BOX =
+  "w-full rounded-xl bg-[var(--secondary)] px-4 py-3 font-mono text-xs leading-relaxed ring-1 ring-[var(--border)]";
+
+/** Same rough estimate the package uses for entries (about four characters per token). */
+function estimatedTokens(text: string): string {
+  return `~${Math.max(0, Math.ceil(text.length / 4)).toLocaleString()} tokens`;
+}
+
 /**
- * Settings → Prompts, after Long-Term Memory's extraction prompt editor: one prompt at a time, its instructions in a
- * text box, Reset to built-in, and the fixed answer format shown below so it's clear what can't change. Edits are
- * saved with the page's Save settings.
+ * Settings → Prompts, after the Engine's agent editor Prompt Template (AgentEditor.tsx): one prompt at a time, the
+ * built-in text shown read-only until "Copy default to edit", a Custom override with Reset to default, and the fixed
+ * answer format below so it's clear what can't change. Edits are saved with the page's Save settings.
  */
 export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
   const [selected, setSelected] = useState<LmPromptKey>("tidy");
   const edits = normalizePromptOverrides(value);
   const definition = promptDefinition(selected);
-  const edited = edits[selected] !== undefined;
-  // A cleared box is a draft too: Reset brings the built-in text back, and leaving it empty does the same.
+  // A copied or cleared box is a draft too: it shows as Custom override until it's reset or left empty.
   const drafted = value[selected] !== undefined;
   const text = value[selected] ?? definition.instructions;
-  const missing = definition.variables.filter((variable) => edited && !text.includes(`{{${variable.name}}}`));
+  const missing = definition.variables.filter(
+    (variable) => edits[selected] !== undefined && !text.includes(`{{${variable.name}}}`),
+  );
   const textId = `lm-prompt-${selected}`;
+  const clearDraft = () => {
+    const next = { ...value };
+    delete next[selected];
+    onChange(next);
+  };
+  const footer = (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+        Leave empty to use the built-in default prompt. Edit to override with your own instructions.
+      </p>
+      <p className="ml-auto shrink-0 text-right text-[0.625rem] text-[var(--muted-foreground)]">
+        {estimatedTokens(text)}
+      </p>
+    </div>
+  );
 
   return (
     <div className="space-y-3">
@@ -57,43 +83,66 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
       </div>
 
       <div className="space-y-1" data-lm-prompt={selected}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <label htmlFor={textId} className="font-semibold text-[var(--foreground)]">
-            {definition.label} instructions{" "}
-            <span className="font-normal text-[var(--muted-foreground)]">{edited ? "(edited)" : "(built-in)"}</span>
-          </label>
-          <button
-            type="button"
-            disabled={disabled || !drafted}
-            onClick={() => {
-              const next = { ...value };
-              delete next[selected];
-              onChange(next);
-            }}
-            className="mari-chrome-control mari-chrome-control--small disabled:opacity-45"
-          >
-            <RotateCcw aria-hidden="true" size="0.75rem" />
-            Reset to built-in
-          </button>
+        <label htmlFor={textId} className="block font-semibold text-[var(--foreground)]">
+          {definition.label} instructions
+        </label>
+        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{definition.description}</p>
+        <div className="mb-2 flex items-center gap-2">
+          {drafted ? (
+            <span className="flex items-center gap-1 rounded-lg bg-amber-400/10 px-2.5 py-1 text-[0.625rem] font-medium text-amber-400">
+              <FileText aria-hidden="true" size="0.625rem" /> Custom override
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 rounded-lg bg-emerald-400/10 px-2.5 py-1 text-[0.625rem] font-medium text-emerald-400">
+              <Check aria-hidden="true" size="0.625rem" /> Using built-in default
+            </span>
+          )}
+          <div className="flex-1" />
+          {drafted ? (
+            <button type="button" disabled={disabled} onClick={clearDraft} className={TOOLBAR_BUTTON}>
+              <RotateCcw aria-hidden="true" size="0.625rem" /> Reset to default
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange({ ...value, [selected]: definition.instructions })}
+              className={TOOLBAR_BUTTON}
+            >
+              <FileText aria-hidden="true" size="0.625rem" /> Copy default to edit
+            </button>
+          )}
         </div>
-        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-          {definition.description} An empty box uses the built-in text.
-        </p>
-        <textarea
-          id={textId}
-          rows={16}
-          disabled={disabled}
-          maxLength={LM_PROMPT_MAX_CHARS}
-          value={text}
-          onChange={(event) => onChange({ ...value, [selected]: event.target.value })}
-          onBlur={() => {
-            if (value[selected] === undefined || value[selected]!.trim()) return;
-            const next = { ...value };
-            delete next[selected];
-            onChange(next);
-          }}
-          className="mari-chrome-field min-h-48 w-full rounded px-2.5 py-2 text-sm md:text-xs"
-        />
+        {drafted ? (
+          <div>
+            <textarea
+              id={textId}
+              rows={16}
+              disabled={disabled}
+              maxLength={LM_PROMPT_MAX_CHARS}
+              value={text}
+              onChange={(event) => onChange({ ...value, [selected]: event.target.value })}
+              onBlur={() => {
+                if (!value[selected]?.trim()) clearDraft();
+              }}
+              className={`${PROMPT_BOX} max-h-[60vh] resize-y overflow-y-auto placeholder:text-[var(--muted-foreground)]/50 focus:ring-2 focus:ring-[var(--ring)] focus:outline-none`}
+            />
+            {footer}
+          </div>
+        ) : (
+          <div className="relative">
+            <pre
+              id={textId}
+              className={`${PROMPT_BOX} max-h-[50vh] resize-y overflow-y-auto whitespace-pre-wrap text-[var(--muted-foreground)]`}
+            >
+              {definition.instructions}
+            </pre>
+            {footer}
+            <span className="absolute top-2 right-3 rounded-md bg-[var(--card)] px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+              Default — click &quot;Copy default to edit&quot; to customize
+            </span>
+          </div>
+        )}
         {definition.variables.length > 0 ? (
           <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
             {definition.variables.map((variable) => (

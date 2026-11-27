@@ -1,7 +1,8 @@
 import { representedCardIds } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import { ENTITY_FAMILIES } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
-  LM_STUB_FIELDS,
+  cardStateFields,
+  stubSheetFields,
   createSheetContent,
   sheetFields,
   sheetFieldEdits,
@@ -486,7 +487,7 @@ export function archivistUserPrompt(
       return (
         entryBlock(`c${index + 1}`, entry) +
         (name
-          ? `\nstub of the ${name} card: write only its current state here (the card holds the rest); never create a separate entry for ${name}`
+          ? `\nstub of the ${name} card: ${name}'s lore entry for when they are only mentioned; keep its sheet current, and never create a separate entry for ${name}`
           : "")
       );
     })
@@ -503,7 +504,7 @@ export function archivistUserPrompt(
   );
   const entrySheets = candidates.map(
     (entry, index) =>
-      `c${index + 1} sheet: ${(representedCardIds(entry.relationships).length ? LM_STUB_FIELDS : sheetFields(entry.inferredFamily ?? entry.family, sheets)).join(", ") || "prose"}`,
+      `c${index + 1} sheet: ${(representedCardIds(entry.relationships).length ? stubSheetFields(sheets) : sheetFields(entry.inferredFamily ?? entry.family, sheets)).join(", ") || "prose"}`,
   );
   return [
     `<sheets>\n${[...templates, ...entrySheets].join("\n")}\n</sheets>`,
@@ -647,6 +648,7 @@ export async function runArchivist(
     payload,
     {
       queryText: windowText,
+      cardStateFields: cardStateFields(settings.sheets),
       activeCharacterIds: chat?.characterIds ?? [],
       activePersonaId: personaId,
       tokenBudget: 1_000_000,
@@ -782,14 +784,10 @@ export async function runArchivist(
     const fresh = sheetFieldEdits(
       entry.content,
       representedCardIds(entry.relationships).length
-        ? LM_STUB_FIELDS
+        ? stubSheetFields(settings.sheets)
         : sheetFields(entry.inferredFamily ?? entry.family, settings.sheets),
       item.fields,
       Boolean(open),
-    ).filter(
-      (edit) =>
-        !representedCardIds(entry.relationships).length ||
-        LM_STUB_FIELDS.some((field) => field.toLowerCase() === edit.field.toLowerCase()),
     );
     if (fresh.length === 0) {
       skipped.push({ name: entry.name, why: "already known" });

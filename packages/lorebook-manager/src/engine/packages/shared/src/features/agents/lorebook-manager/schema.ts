@@ -159,6 +159,7 @@ export interface LmRetrievalSuppressedItem {
 export interface LmRetrievalInput {
   queryText: string;
   activeCharacterIds: string[];
+  cardStateFields?: readonly string[];
   activePersonaId?: string | null;
   activeLocationText?: string;
   /**

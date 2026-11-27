@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { representedCardIds } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
-  LM_STUB_FIELDS,
+  LM_CARD_STATE_FIELDS,
+  LM_SHEET_TEMPLATES,
+  cardStateFields,
+  normalizeSheetOverrides,
+  stubSheetFields,
   stubSheetLines,
 } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/sheets.js";
 import {
@@ -20,7 +24,10 @@ import type {
   LmEntryNode,
   LmGraphPayload,
 } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/schema.js";
-import { formatLiveLore } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
+import {
+  contributeLiveLore,
+  formatLiveLore,
+} from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
 import { gateCandidates } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/stage2-gate.js";
 import { crawlerUserPrompt } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/crawler.js";
 import { runArchivist } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/archivist.js";
@@ -54,7 +61,8 @@ const stub: LmEntryNode = {
   lorebookCategory: "character",
   name: "Aster",
   description: "Stub",
-  content: "Repeated card prose.\nNote: stray prose\nStatus: Wounded\nCurrently: Resting\nAge: 30\nRole: ",
+  content:
+    "Repeated card prose.\nNote: stray prose\nStatus: Wounded\nCurrently: Resting\nAge: 30\nAppearance: Tall\nRole: ",
   keys: ["Aster"],
   secondaryKeys: [],
   tag: "character",
@@ -106,8 +114,41 @@ const input = {
 };
 const run = (entry: LmEntryNode, activeCharacterIds = input.activeCharacterIds) =>
   simulateLorebookRetrieval({ ...payload, nodes: [entry, card] }, { ...input, activeCharacterIds });
-assert.deepEqual(stubSheetLines(stub.content), ["Status: Wounded", "Currently: Resting", "Age: 30"]);
+assert.deepEqual(stubSheetLines(stub.content), ["Status: Wounded", "Currently: Resting"]);
 assert.deepEqual(stubSheetLines("status: Fine\nhttps://x: y\nNote: no\nCurrently: "), ["status: Fine"]);
+assert.deepEqual(normalizeSheetOverrides({ cardState: [...LM_CARD_STATE_FIELDS] }), {});
+assert.deepEqual(normalizeSheetOverrides({ cardState: [" Status ", "status", "Mood", "Bad: name"] }), {
+  cardState: ["Status", "Mood"],
+});
+assert.deepEqual(normalizeSheetOverrides({ cardState: [] }), { cardState: [] });
+assert.equal(
+  normalizeSheetOverrides({ cardState: Array.from({ length: 25 }, (_, i) => `Field ${i}`) }).cardState?.length,
+  20,
+);
+assert.deepEqual(cardStateFields({ cardState: [] }), []);
+assert.deepEqual(stubSheetFields({ character: ["status", "Age"], cardState: ["Status", "Mood"] }), [
+  "status",
+  "Age",
+  "Mood",
+]);
+assert.deepEqual(stubSheetLines("Age: 30\nstatus: Fine\nAppearance: Tall\nCurrently: Resting\nRole: "), [
+  "status: Fine",
+  "Currently: Resting",
+]);
+const customState = simulateLorebookRetrieval(payload, { ...input, cardStateFields: ["Status"] });
+assert.equal(
+  customState.activated[0]?.injectedContent,
+  "Aster, current state:\nStatus: Wounded",
+  "custom card-state fields are honored",
+);
+const noState = simulateLorebookRetrieval(payload, { ...input, cardStateFields: [] });
+assert.equal(noState.activated.length, 0);
+assert.equal(noState.suppressed[0]?.reason, "excluded_by_card");
+assert.equal(
+  run({ ...stub, content: "Appearance: Tall\nStatus: Wounded" }).activated[0]?.injectedContent,
+  "Aster, current state:\nStatus: Wounded",
+  "default card-state fields exclude Appearance",
+);
 assert.deepEqual(representedCardIds({ "persona:p": "represents" }), []);
 const result = run(stub);
 const item = result.activated[0]!;
@@ -118,7 +159,7 @@ assert.deepEqual(
   ["card_sheet"],
   "no BM25, keyword or semantic score for a seated card sheet",
 );
-assert.equal(item.injectedContent, "Aster, current state:\nStatus: Wounded\nCurrently: Resting\nAge: 30");
+assert.equal(item.injectedContent, "Aster, current state:\nStatus: Wounded\nCurrently: Resting");
 assert.equal(
   run({ ...stub, characterFilterIds: ["aster", "aster"] }).activated[0]?.injectedContent,
   item.injectedContent,
@@ -145,7 +186,7 @@ assert.equal(
   formatLiveLore(result, payload, { activeCharacterIds: ["aster"] }),
   `<world_info>\n${item.injectedContent}\n</world_info>`,
 );
-for (const content of ["Status: ", "Repeated card prose.", "Note: this is not a sheet"]) {
+for (const content of ["Status: ", "Repeated card prose.", "Note: this is not a sheet", "Age: 30\nAppearance: Tall"]) {
   const suppressed = run({ ...stub, content });
   assert.equal(suppressed.activated.length, 0);
   assert.equal(suppressed.suppressed[0]?.reason, "excluded_by_card");
@@ -321,8 +362,16 @@ assert.ok(
   !crawlerUserPrompt([{ ...stub, relationships: {}, content: "" }], (ref) => ref).includes("missing sheet lines"),
 );
 assert.ok(
-  crawlerUserPrompt([{ ...stub, content: "Aster rests." }], (ref) => ref).includes(
-    `missing sheet lines: ${LM_STUB_FIELDS.join(", ")}`,
+  crawlerUserPrompt([{ ...stub, family: "lore", content: "Status: Resting" }], (ref) => ref).includes(
+    `missing sheet lines: ${LM_SHEET_TEMPLATES.character.filter((field) => field !== "Status").join(", ")}`,
+  ),
+);
+
+assert.ok(
+  crawlerUserPrompt([{ ...stub, content: "Status: Resting" }], (ref) => ref, new Map(), {
+    cardState: ["Mood"],
+  }).includes(
+    `missing sheet lines: ${[...LM_SHEET_TEMPLATES.character.filter((field) => field !== "Status"), "Mood"].join(", ")}`,
   ),
 );
 
@@ -433,6 +482,8 @@ async function main() {
                     fields: [
                       { field: "Status", value: "Healing" },
                       { field: "Age", value: "31" },
+                      { field: "Appearance", value: "Tall" },
+                      { field: "Mood", value: "Hopeful" },
                     ],
                   },
                 ],
@@ -559,7 +610,10 @@ async function main() {
         content: "Constant lore",
       });
     await setChatCompendiumBinding(documents, "chat", compendium.id);
-    await saveSettings(documents, { archivist: { mode: "suggest", readBehind: 0 } });
+    await saveSettings(documents, {
+      archivist: { mode: "suggest", readBehind: 0 },
+      sheets: { cardState: ["Status", "Mood"] },
+    });
     await refreshLiveClaims();
     const outcome = await runArchivist("chat", { force: true });
     assert.equal(outcome.status, "done");
@@ -569,10 +623,10 @@ async function main() {
     assert.ok(!entriesBlock.includes("] Farren "), "sixth active card sheet cannot bypass the stub cap");
     assert.equal((entriesBlock.match(/\] Aster /g) ?? []).length, 1, "Stage 1 stub deduped");
     assert.ok(!entriesBlock.includes("Disabled entry") && !entriesBlock.includes("Disabled book entry"));
-    assert.ok(prompt.includes("c1 sheet: Role, Affiliation, Relationships, Status, Currently"));
+    assert.ok(prompt.includes(`c1 sheet: ${[...LM_SHEET_TEMPLATES.character, "Mood"].join(", ")}`));
     assert.ok(
       entriesBlock.includes(
-        "stub of the Aster card: write only its current state here (the card holds the rest); never create a separate entry for Aster",
+        "stub of the Aster card: Aster's lore entry for when they are only mentioned; keep its sheet current, and never create a separate entry for Aster",
       ),
     );
     assert.equal(outcome.run?.updates, 1);
@@ -586,8 +640,13 @@ async function main() {
     assert.ok(update, "Archivist update targets the active card stub");
     assert.deepEqual(
       update.patch.fieldEdits,
-      [{ field: "Status", from: "Wounded", to: "Healing" }],
-      "card appearance and age cannot be edited in its stub",
+      [
+        { field: "Status", from: "Wounded", to: "Healing" },
+        { field: "Age", from: "30", to: "31" },
+        { field: "Appearance", from: null, to: "Tall" },
+        { field: "Mood", from: null, to: "Hopeful" },
+      ],
+      "the stub's full character sheet and custom card-state fields can be edited",
     );
     const livePayload = await buildLorebookManagerGraphPayload({
       lorebookIds: new Set(["world"]),
@@ -598,6 +657,27 @@ async function main() {
     assert.ok(
       formatLiveLore(liveResult, livePayload, { activeCharacterIds: ["aster"] })?.includes("Aster, current state:"),
     );
+    const originalContent = entry.content;
+    entry.content = "Appearance: Tall\nStatus: Wounded\nCurrently: Resting\nMood: Hopeful";
+    const liveRequest = {
+      chatId: "chat",
+      chatMeta: { enableAgents: true, activeAgentIds: ["lorebook-manager"] },
+      mode: "roleplay",
+      preview: true,
+    };
+    const customLive = await contributeLiveLore(liveRequest);
+    assert.match(customLive!, /Aster, current state:\nStatus: Wounded\nMood: Hopeful/);
+    assert.doesNotMatch(customLive!, /Appearance:|Currently:/);
+    await saveSettings(documents, { sheets: { cardState: [] } });
+    const emptyLive = await contributeLiveLore(liveRequest);
+    assert.ok(emptyLive, "an empty card-state list still sends the other lore");
+    assert.doesNotMatch(
+      emptyLive ?? "",
+      /Aster, current state:/,
+      "changing card-state settings invalidates turn reuse",
+    );
+    entry.content = originalContent;
+    await saveSettings(documents, { sheets: {} });
     // Leave room after the five selected stubs so Stage 1 could otherwise re-add the sixth card sheet.
     books[0]!.entries = books[0]!.entries.filter((entry) => !entry.constant);
     await setChatCompendiumBinding(documents, "stub-cap", compendium.id);

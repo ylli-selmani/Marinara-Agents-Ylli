@@ -511,7 +511,7 @@ export function simulateLorebookRetrieval(
       if (hitIds.length > 0) {
         const names = [...new Set(hitIds.map((id) => cardNamesById.get(id) ?? id))].join(", ");
         const represented = new Set(representedCardIds(entry.relationships));
-        const lines = stubSheetLines(entry.content);
+        const lines = stubSheetLines(entry.content, input.cardStateFields);
         if (lines.length > 0 && hitIds.every((id) => represented.has(id))) {
           const injectedContent = `${names}, current state:\n${lines.join("\n")}`;
           cardSheets.push({

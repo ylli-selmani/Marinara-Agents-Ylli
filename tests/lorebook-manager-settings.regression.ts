@@ -417,9 +417,13 @@ async function storeAndLivePath() {
     assert.ok(!composePrompt("archivist").includes("{{"), "the built-in prompts have no unfilled variables");
 
     const withSheets = await saveSettings(documents, {
-      sheets: { character: [" Rank ", "rank", "", "Role"], location: ["Region"] },
+      sheets: { character: [" Rank ", "rank", "", "Role"], location: ["Region"], cardState: ["Status", "Mood"] },
     });
-    assert.deepEqual(withSheets.sheets, { character: ["Rank", "Role"], location: ["Region"] });
+    assert.deepEqual(withSheets.sheets, {
+      character: ["Rank", "Role"],
+      location: ["Region"],
+      cardState: ["Status", "Mood"],
+    });
     assert.deepEqual((await getSettings(documents)).sheets, withSheets.sheets);
     assert.deepEqual(
       (await saveSettings(documents, { sheets: { item: ["Owner"] } })).sheets,

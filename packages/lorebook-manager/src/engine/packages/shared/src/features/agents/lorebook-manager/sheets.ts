@@ -1,8 +1,8 @@
 import { ENTITY_FAMILIES, type EntityFamily } from "./schema.js";
 
-export const LM_STUB_FIELDS = ["Role", "Affiliation", "Relationships", "Status", "Currently"] as const;
+export const LM_CARD_STATE_FIELDS = ["Role", "Affiliation", "Relationships", "Status", "Currently"] as const;
 
-export type LmSheetOverrides = Partial<Record<EntityFamily, string[]>>;
+export type LmSheetOverrides = Partial<Record<EntityFamily, string[]>> & { cardState?: string[] };
 export interface LmFieldEdit {
   field: string;
   from: string | null;
@@ -42,6 +42,18 @@ export function sheetFields(family: unknown, overrides?: LmSheetOverrides): read
   return key === "lore" ? [] : (overrides?.[key] ?? LM_SHEET_TEMPLATES[key]);
 }
 
+export function cardStateFields(overrides?: LmSheetOverrides): readonly string[] {
+  return overrides?.cardState ?? LM_CARD_STATE_FIELDS;
+}
+
+export function stubSheetFields(overrides?: LmSheetOverrides): readonly string[] {
+  const fields = [...sheetFields("character", overrides)];
+  for (const field of cardStateFields(overrides)) {
+    if (!fields.some((existing) => existing.toLowerCase() === field.toLowerCase())) fields.push(field);
+  }
+  return fields;
+}
+
 export function sheetFieldName(raw: unknown): string {
   if (typeof raw !== "string") return "";
   const field = raw.trim();
@@ -51,7 +63,7 @@ export function sheetFieldName(raw: unknown): string {
 export function normalizeSheetOverrides(raw: unknown): LmSheetOverrides {
   const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const result: LmSheetOverrides = {};
-  for (const family of ENTITY_FAMILIES) {
+  for (const family of [...ENTITY_FAMILIES, "cardState"] as const) {
     if (family === "lore" || !Array.isArray(record[family])) continue;
     const seen = new Set<string>();
     const fields: string[] = [];
@@ -62,7 +74,8 @@ export function normalizeSheetOverrides(raw: unknown): LmSheetOverrides {
       fields.push(field);
       if (fields.length === 20) break;
     }
-    if (JSON.stringify(fields) !== JSON.stringify(LM_SHEET_TEMPLATES[family])) result[family] = fields;
+    const defaults = family === "cardState" ? LM_CARD_STATE_FIELDS : LM_SHEET_TEMPLATES[family];
+    if (JSON.stringify(fields) !== JSON.stringify(defaults)) result[family] = fields;
   }
   return result;
 }
@@ -85,10 +98,10 @@ export function parseSheetLines(content: string): Array<{ field: string; value: 
 }
 
 /** Recognized, populated sheet lines only, in their original content order. */
-export function stubSheetLines(content: string): string[] {
-  const fields = new Set([...LM_STUB_FIELDS, ...LM_SHEET_TEMPLATES.character].map((field) => field.toLowerCase()));
+export function stubSheetLines(content: string, fields: readonly string[] = LM_CARD_STATE_FIELDS): string[] {
+  const allowed = new Set(fields.map((field) => field.toLowerCase()));
   return parseSheetLines(content)
-    .filter((line) => fields.has(line.field.toLowerCase()) && line.value)
+    .filter((line) => allowed.has(line.field.toLowerCase()) && line.value)
     .map(({ field, value }) => `${field}: ${value}`);
 }
 

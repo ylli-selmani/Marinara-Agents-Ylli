@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { cardStateFields } from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
+import { getSettings } from "./settings-store.js";
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
   LmChatRuns,
@@ -435,7 +437,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   if (typeof persistence.listMessages !== "function") throw new Error("persistence.listMessages is unavailable");
 
   const needsWorldState = !request.currentLocation && typeof persistence.listGameStates === "function";
-  const [messages, chat, gameStates] = await Promise.all([
+  const [messages, chat, gameStates, packageSettings] = await Promise.all([
     persistence.listMessages(request.chatId),
     typeof persistence.getChat === "function" ? persistence.getChat(request.chatId) : Promise.resolve(null),
     needsWorldState
@@ -444,6 +446,10 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
           return [] as LorebookManagerGameStateRecord[];
         })
       : Promise.resolve([] as LorebookManagerGameStateRecord[]),
+    getSettings(persistence.documents).catch((error: unknown) => {
+      runtime.logger.warn("[lorebook-manager] Could not read settings for chat %s: %s", request.chatId, error);
+      return null;
+    }),
   ]);
   const location = resolveLiveLocation(request, messages, gameStates);
   // Every card in the chat counts as active, like the Engine's scan; the generation's targets come first so
@@ -452,6 +458,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
   const personaId = request.personaId ?? chat?.personaId ?? null;
   const lorebookIds = new Set(compendium.lorebookIds);
   const settings = compendium.retrievalSettings;
+  const stateFields = cardStateFields(packageSettings?.sheets);
   const vectorSources: EntryVectorSource[] | undefined = settings.semanticEnabled ? [] : undefined;
   const payload = await buildLorebookManagerGraphPayload({
     lorebookIds,
@@ -474,6 +481,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     request.wrapFormat ?? null,
     compendium.id,
     settings,
+    stateFields,
     queryMessages,
     meaningText,
     meaningReplies,
@@ -511,6 +519,7 @@ export async function contributeLiveLore(request: LivePromptContextRequest): Pro
     payload,
     {
       queryText,
+      cardStateFields: stateFields,
       ...(semantic?.info.status === "used"
         ? { semanticScores: semantic.scores, semanticThreshold: settings.semanticThreshold }
         : {}),

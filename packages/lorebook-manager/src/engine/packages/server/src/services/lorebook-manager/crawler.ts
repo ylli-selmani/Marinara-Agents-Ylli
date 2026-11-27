@@ -17,7 +17,7 @@ import type {
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
-  LM_STUB_FIELDS,
+  stubSheetFields,
   parseSheetLines,
   sheetFieldEdits,
   sheetFields,
@@ -103,7 +103,8 @@ const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
  * Bumped when the Crawler's rules change enough to look again: every entry is untidied once (2: round 5's prompt, with
  * key removal, "always on" and no related_to; 3: round 6, summaries required, no part_of, key swaps; 4: tuning round 3,
  * links in their own call with target summaries, names never removed as keys; 5: grounded sheet fills, only for entries
- * with missing sheet lines; prose families and complete sheets stay at 4). Costs nothing until Tidy entries runs.
+ * with missing sheet lines; prose families and complete sheets stay at 4; 6: the same for stubs, now full character
+ * sheets instead of state-only). Costs nothing until Tidy entries runs.
  */
 const CRAWLER_RULES_VERSION = 4;
 
@@ -112,7 +113,7 @@ type CrawlEntry = Pick<LmEntryNode, "name" | "content"> &
 
 function crawlerSheetFields(entry: CrawlEntry, sheets?: LmSheetOverrides): readonly string[] {
   return representedCardIds(entry.relationships ?? {}).length
-    ? LM_STUB_FIELDS
+    ? stubSheetFields(sheets)
     : sheetFields(entry.inferredFamily ?? entry.family, sheets);
 }
 function crawlerMissingFields(entry: CrawlEntry, sheets?: LmSheetOverrides): string[] {
@@ -123,7 +124,9 @@ function crawlerMissingFields(entry: CrawlEntry, sheets?: LmSheetOverrides): str
 
 /** What the model read of an entry: its name and content, under these rules. A change to either untidies it again. */
 export function crawlHash(entry: CrawlEntry, sheets?: LmSheetOverrides): string {
-  const version = crawlerMissingFields(entry, sheets).length > 0 ? 5 : CRAWLER_RULES_VERSION;
+  const missing = crawlerMissingFields(entry, sheets).length > 0;
+  const stub = representedCardIds(entry.relationships ?? {}).length > 0;
+  const version = missing ? (stub ? 6 : 5) : CRAWLER_RULES_VERSION;
   const text = `${version}\n${entry.name}\n${entry.content}`;
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index++) {

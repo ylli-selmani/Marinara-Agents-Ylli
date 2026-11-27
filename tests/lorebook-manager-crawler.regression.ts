@@ -574,6 +574,32 @@ async function main() {
       crawlHash({ ...graphEntry(prose, "lore"), inferredFamily: "character" }, sheets),
       crawlHash(graphEntry(prose, "character"), sheets),
     );
+    const stateOnlyStub = {
+      ...graphEntry(
+        "Role: scout\nAffiliation: camp\nRelationships: friends\nStatus: healing\nCurrently: resting",
+        "lore",
+      ),
+      relationships: { "char:scout": "represents" },
+    };
+    assert.notEqual(
+      crawlHash(stateOnlyStub),
+      legacyHash(stateOnlyStub.name, stateOnlyStub.content),
+      "a stub with all five state lines still has character sheet gaps and advances to version 5",
+    );
+    const versionHash = (version: number, name: string, content: string) => {
+      let hash = 0x811c9dc5;
+      for (const char of `${version}
+${name}
+${content}`)
+        hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193);
+      return (hash >>> 0).toString(36);
+    };
+    const partialStub = { ...graphEntry("Status: healing", "lore"), relationships: { "char:scout": "represents" } };
+    assert.equal(
+      crawlHash(partialStub),
+      versionHash(6, partialStub.name, partialStub.content),
+      "a stub tidied as state-only (version 5) comes back once for its full character sheet",
+    );
     const completeNode = {
       ...sheetEntry("half"),
       family: "character",
@@ -635,15 +661,16 @@ async function main() {
       description: "Already summarized.",
       keys: ["Stub"],
       matchWholeWords: true,
-      content: "A scout is healing.\nRole: scout\nAffiliation: camp\nRelationships: friends\nCurrently: resting",
+      content:
+        "A scout, 30 years old, is healing.\nRole: scout\nAffiliation: camp\nRelationships: friends\nCurrently: resting",
       relationships: { "char:scout": "represents" },
     });
-    fills.Stub = [{ field: "Status", value: "healing" }];
+    fills.Stub = [{ field: "Age", value: "30" }];
     await runCrawler(sheetCompendium.id, { entryIds: ["stub"] });
     const stubFill = (await sheetPending()).find((proposal) => proposal.targetEntryId === "stub")!;
-    assert.deepEqual(stubFill.patch.fieldEdits, [{ field: "Status", from: null, to: "healing" }]);
+    assert.deepEqual(stubFill.patch.fieldEdits, [{ field: "Age", from: null, to: "30" }]);
     await applyProposal(runtime, stubFill.id);
-    assert.match(String(sheetEntry("stub").content), /Status: healing$/);
+    assert.match(String(sheetEntry("stub").content), /Age: 30$/);
     assert.ok(
       !(await untidiedEntryIds(["sheets"])).includes("stub"),
       "a Crawler fill on a stub stays tidied after Apply",

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, FileText, Network, RotateCcw, Sparkles } from "lucide-react";
+import { cardStateFields } from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
 import { simulateLorebookRetrieval } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
 import type {
   LmEntityNode,
@@ -9,7 +10,7 @@ import type {
   LmRetrievalActivatedItem,
   LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import { fetchSemanticScores, lmQueryKeys, type LmEntryPatch } from "./api";
+import { fetchSettings, fetchSemanticScores, lmQueryKeys, type LmEntryPatch } from "./api";
 import { useFillHeight } from "./useFillHeight";
 import { EntryReaderModal } from "./EntryReaderModal";
 
@@ -126,6 +127,7 @@ export function SimulatePanel({
   semanticEnabled = false,
 }: SimulatePanelProps) {
   const fillRef = useFillHeight<HTMLDivElement>();
+  const settingsQuery = useQuery({ queryKey: lmQueryKeys.settings, queryFn: fetchSettings });
   const [showSuppressed, setShowSuppressed] = useState(true);
   const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
 
@@ -177,10 +179,14 @@ export function SimulatePanel({
     () =>
       simulateLorebookRetrieval(
         payload,
-        semanticInfo?.status === "used" ? { ...config, semanticScores: semanticQuery.data!.scores } : config,
+        {
+          ...config,
+          ...(semanticInfo?.status === "used" ? { semanticScores: semanticQuery.data!.scores } : {}),
+          cardStateFields: cardStateFields(settingsQuery.data?.sheets),
+        },
         managedLorebookIds,
       ),
-    [payload, config, managedLorebookIds, semanticInfo, semanticQuery.data],
+    [payload, config, managedLorebookIds, semanticInfo, semanticQuery.data, settingsQuery.data?.sheets],
   );
 
   const activeCardSet = useMemo(() => new Set(config.activeCharacterIds), [config.activeCharacterIds]);
@@ -291,8 +297,8 @@ export function SimulatePanel({
               ))}
             </div>
             <p className="text-[0.65rem] text-[var(--muted-foreground)]">
-              Active cards send only the populated sheet lines of their excluded <code>represents</code> stubs and
-              inherit their 1-hop links. Other excluded entries stay suppressed.
+              Active cards send only the configured, populated state lines of their excluded <code>represents</code>{" "}
+              stubs and inherit their 1-hop links. Other excluded entries stay suppressed.
             </p>
           </div>
         ) : null}

@@ -258,10 +258,16 @@ export interface LmCrawlerSettings {
 }
 
 /** The package's global settings document (the Settings tab). */
+/** The prompts Settings → Prompts can edit. */
+export type LmPromptKey = "tidy" | "links" | "archivist" | "librarian";
+/** Edited instructions per prompt; a missing key uses the built-in text. */
+export type LmPromptOverrides = Partial<Record<LmPromptKey, string>>;
+
 export interface LmSettings {
   recall: LmRecallSettings;
   archivist: LmArchivistSettings;
   crawler: LmCrawlerSettings;
+  prompts: LmPromptOverrides;
   /** 0 until first saved. */
   revision: number;
   updatedAt: string;

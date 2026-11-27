@@ -4,9 +4,11 @@ import {
   normalizeCrawlerSettings,
   normalizeRecallSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
+import { normalizePromptOverrides } from "../../../../shared/src/features/agents/lorebook-manager/prompts.js";
 import type {
   LmArchivistSettings,
   LmCrawlerSettings,
+  LmPromptOverrides,
   LmRecallSettings,
   LmSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
@@ -20,6 +22,8 @@ export interface SaveSettingsInput {
   recall?: Partial<LmRecallSettings>;
   archivist?: Partial<LmArchivistSettings>;
   crawler?: Partial<LmCrawlerSettings>;
+  /** Edited prompts; a key set to "" (or the built-in text) goes back to the built-in one, a missing key stays. */
+  prompts?: Partial<Record<keyof LmPromptOverrides, string | null>>;
   /** The revision the caller saw (0 = never saved). A newer one answers 409. */
   expectedRevision?: number;
 }
@@ -35,6 +39,7 @@ function toSettings(doc: LorebookManagerDocumentRecord | null): LmSettings {
     recall: normalizeRecallSettings(data.recall),
     archivist: normalizeArchivistSettings(data.archivist),
     crawler: normalizeCrawlerSettings(data.crawler),
+    prompts: normalizePromptOverrides(data.prompts),
     revision: doc.revision,
     updatedAt: doc.updatedAt,
   };
@@ -47,7 +52,7 @@ export async function getSettings(documents: LorebookManagerDocumentStore): Prom
 
 async function writeSettings(
   documents: LorebookManagerDocumentStore,
-  next: Pick<LmSettings, "recall" | "archivist" | "crawler">,
+  next: Pick<LmSettings, "recall" | "archivist" | "crawler" | "prompts">,
   expectedRevision: number | undefined,
 ): Promise<LmSettings> {
   const existing = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, SETTINGS_DOC_ID);
@@ -56,7 +61,7 @@ async function writeSettings(
     throw new CompendiumStoreError("Settings were changed elsewhere; reload them and try again", 409);
   }
   const now = new Date().toISOString();
-  const data = { recall: next.recall, archivist: next.archivist, crawler: next.crawler };
+  const data = { recall: next.recall, archivist: next.archivist, crawler: next.crawler, prompts: next.prompts };
   if (!existing) {
     const created = await documents.create({
       id: SETTINGS_DOC_ID,
@@ -101,12 +106,13 @@ export async function saveSettings(
       crawler: input.crawler
         ? normalizeCrawlerSettings({ ...current.crawler, ...input.crawler }, current.crawler)
         : current.crawler,
+      prompts: input.prompts ? normalizePromptOverrides({ ...current.prompts, ...input.prompts }) : current.prompts,
     },
     input.expectedRevision,
   );
 }
 
-/** Back to the factory defaults. Compendium overrides stay; they are each Compendium's own. */
+/** Back to the factory defaults, edited prompts too. Compendium overrides stay; they are each Compendium's own. */
 export async function resetSettings(
   documents: LorebookManagerDocumentStore,
   expectedRevision?: number,

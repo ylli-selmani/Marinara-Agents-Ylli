@@ -2,7 +2,10 @@ import {
   parseEntityRef,
   toRelationshipKey,
 } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
-import { LM_RELATIONS } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
+import {
+  composePrompt,
+  CRAWLER_RELATION_DEFS,
+} from "../../../../shared/src/features/agents/lorebook-manager/prompts.js";
 import type {
   LmCompendium,
   LmCrawlerRunRecord,
@@ -54,15 +57,6 @@ const MAX_RECORDED_RUNS = 20;
 export const CRAWLER_RUN_DOC_KIND = "crawler_run";
 export const CRAWLER_STATE_DOC_KIND = "crawler_state";
 
-/**
- * Relations the Crawler may write: the specific ones. `related_to` says nothing a mention doesn't, and the Crawler
- * spammed it to everything an entry names (Ylli's round 5); a person can still add it. `represents` hides an entry
- * while its card is active: a person's call too. `part_of` pulls hardest, both ways, and is meant for a section split
- * off the same subject; the model used it for "a form of" and "belongs to" (round 6), so only a person writes it.
- */
-const CRAWLER_RELATION_DEFS = LM_RELATIONS.filter(
-  (relation) => !["related_to", "represents", "part_of"].includes(relation.value),
-);
 const CRAWLER_RELATIONS = CRAWLER_RELATION_DEFS.map((relation) => relation.value);
 /** Relations that form a ladder: a link goes to the closest rung, never one the entry already reaches through it. */
 const LADDER_RELATIONS = new Set(["is_a", "member_of", "located_in"]);
@@ -306,76 +300,11 @@ export async function countUntidied(compendiumId: string): Promise<number> {
   return untidied(payload, compendium, state, pending).length;
 }
 
-// ── The prompts ──
-// Each prompt is instructions (what Settings → Prompts will let a person edit) plus a fixed answer format the code reads.
+// ── The prompts (their text is in shared prompts.ts; Settings → Prompts can edit the instructions) ──
 
-export const CRAWLER_TIDY_INSTRUCTIONS = [
-  "You tidy a roleplay's lorebook so the right entries come up during play. Every entry in <entries> gets an answer.",
-  "",
-  "description: REQUIRED for every entry whose description says (none): one plain sentence saying what the entry is",
-  "(who, what or where), from its text. It is the most important field; never skip it for such an entry. Leave it",
-  "out only where the entry has one already.",
-  "tag: one or two lowercase words for its kind (character, location, item, faction, species, ability, event,",
-  "concept, ...). Only if the entry has none.",
-  "",
-  "Everything else: only what is clearly missing or wrong. Most entries need few or no keyword changes.",
-  "",
-  "Keywords bring an entry into the story whenever one appears in the chat, without any further check. So:",
-  "addKeys: at most 2 names or aliases the story really calls it by and the entry lacks. Never descriptions",
-  '("red-haired shinobi"), names of other things, or generic phrases.',
-  "removeKeys: only a common word that is too broad on its own and would bring the entry in for unrelated text",
-  '("Ten" for Ten-Tails, "Team" for Team Guy, "Shadow" for Shadow Clone Technique, "Dark", "water"). A key marked',
-  '"also a key of N other entries" is a sign, if it is such a word. Never remove a proper name, alias or title, even',
-  "a single word and even one another entry shares (Shukaku, Kurama, Kagetsu): that is how the story calls it. Never",
-  "the entry's own name. Copy keys exactly. To replace an entry's only key, put the better one in addKeys.",
-  'constant: false, only for an entry marked "always on: yes" that isn\'t lore every scene needs (a person, place or',
-  "event that matters only when it comes up).",
-  "",
-  'Never invent keys; leave them out when unsure. An entry that has a description and needs nothing else is just {"id": "e2"}.',
-].join("\n");
-
-export const CRAWLER_TIDY_FORMAT = [
-  "Answer with JSON only:",
-  '{"entries": [{"id": "e1", "description": "...", "tag": "...", "addKeys": ["..."], "removeKeys": ["..."],',
-  '"constant": false}]}',
-].join("\n");
-
-/** `{{relations}}` becomes the list of relations the Crawler may write, one per line with its hint. */
-export const CRAWLER_LINKS_INSTRUCTIONS = [
-  "You link a roleplay's lorebook entries, so that when one comes up in the story the entries it depends on come",
-  'along. A link is a lasting fact and reads "<entry> <relation> <target>". Only these relations:',
-  "{{relations}}",
-  "",
-  "For each entry in <entries>, pick from the targets listed under it; each target comes with its summary. Most",
-  "entries have one or two real links: what kind of thing it is (is_a), the group it belongs to (member_of), where it",
-  "is (located_in), what it leads or owns, a lasting ally or rival. An entry with none of these gets no links.",
-  "",
-  "Link only when the relation is plainly true from the entry's text and the target's summary. Naming, mentioning or",
-  "comparing a target is not a link: an encounter prompt that names three teams links to none of them. Link to the",
-  "closest kind, group or place only: an entry that is_a Ninjutsu gets no is_a Jutsu as well. Something that belongs",
-  "to someone (a bloodline, a weapon) gets no link to its owner; the owner's own entry links to it with owns. At most",
-  "3 links per entry. The entry's existing links are listed; don't repeat them. When no relation above fits exactly,",
-  "leave the link out.",
-].join("\n");
-
-export const CRAWLER_LINKS_FORMAT = [
-  "Answer with JSON only, one item per entry (links may be empty):",
-  '{"entries": [{"id": "e1", "links": [{"to": "t3", "relation": "member_of"}]}]}',
-].join("\n");
-
-const relationLines = () => CRAWLER_RELATION_DEFS.map((relation) => `- ${relation.value}: ${relation.hint}`).join("\n");
-
-/** A prompt's instructions with its variables filled in, then its fixed answer format. */
-export function composeSystemPrompt(instructions: string, format: string): string {
-  const relations = relationLines();
-  const filled = instructions.includes("{{relations}}")
-    ? instructions.split("{{relations}}").join(relations)
-    : instructions;
-  return `${filled.trim()}\n\n${format}`;
-}
-
-export const CRAWLER_SYSTEM = composeSystemPrompt(CRAWLER_TIDY_INSTRUCTIONS, CRAWLER_TIDY_FORMAT);
-export const CRAWLER_LINKS_SYSTEM = composeSystemPrompt(CRAWLER_LINKS_INSTRUCTIONS, CRAWLER_LINKS_FORMAT);
+/** The built-in prompts as sent. */
+export const CRAWLER_SYSTEM = composePrompt("tidy");
+export const CRAWLER_LINKS_SYSTEM = composePrompt("links");
 
 function displayName(node: LmEntryNode | LmEntityNode): string {
   return node.nodeType === "lore" ? node.name : `${node.name} (${node.nodeType === "persona" ? "persona" : "card"})`;
@@ -721,7 +650,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     finish({ ...base("failed", detail), entryCount: batch.length, model: modelName, remaining: candidates.length });
 
   // ── Call 1: summary, tag, keys, always on. ──
-  const tidyAnswer = await ask(CRAWLER_SYSTEM, crawlerUserPrompt(batch, nameOf, keyUse));
+  const tidyAnswer = await ask(composePrompt("tidy", settings.prompts), crawlerUserPrompt(batch, nameOf, keyUse));
   if (!tidyAnswer.ok) return tidyAnswer.aborted ? { status: "failed", run: null } : failed(tidyAnswer.detail);
 
   const skipped: LmCrawlerRunRecord["skipped"] = [];
@@ -846,7 +775,10 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   }
 
   if ([...linkTargets.values()].some((targets) => targets.length > 0)) {
-    const linksAnswer = await ask(CRAWLER_LINKS_SYSTEM, crawlerLinksPrompt(batch, linkTargets, nameOf, summaryOf));
+    const linksAnswer = await ask(
+      composePrompt("links", settings.prompts),
+      crawlerLinksPrompt(batch, linkTargets, nameOf, summaryOf),
+    );
     if (linksAnswer.ok) {
       collectLinks(linksAnswer.parsed.entries as unknown[]);
     } else if (linksAnswer.aborted) {

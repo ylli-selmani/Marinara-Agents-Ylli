@@ -8,10 +8,15 @@ import {
   normalizeCrawlerSettings,
   normalizeRecallSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/settings-helpers.js";
+import {
+  LM_PROMPT_KEYS,
+  normalizePromptOverrides,
+} from "../../../../shared/src/features/agents/lorebook-manager/prompts.js";
 import type {
   LmArchivistSettings,
   LmCompendium,
   LmCrawlerSettings,
+  LmPromptOverrides,
   LmRecallSettings,
   LmSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
@@ -25,14 +30,16 @@ import {
   saveSettingsApi,
 } from "./api";
 import { confirmWithHostOrBrowser } from "./host-components";
+import { PromptFields } from "./PromptFields";
 import { RecallFields } from "./RecallFields";
 
-type SettingsTab = "recall" | "archivist" | "crawler" | "troubleshooting";
+type SettingsTab = "recall" | "archivist" | "crawler" | "prompts" | "troubleshooting";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "recall", label: "Recall" },
   { id: "archivist", label: "Archivist" },
   { id: "crawler", label: "Crawler" },
+  { id: "prompts", label: "Prompts" },
   { id: "troubleshooting", label: "Troubleshooting" },
 ];
 
@@ -54,17 +61,22 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
   const [draft, setDraft] = useState<LmRecallSettings | null>(null);
   const [archivistDraft, setArchivistDraft] = useState<LmArchivistSettings | null>(null);
   const [crawlerDraft, setCrawlerDraft] = useState<LmCrawlerSettings | null>(null);
+  const [promptsDraft, setPromptsDraft] = useState<LmPromptOverrides | null>(null);
   const [busy, setBusy] = useState<"save" | "reset" | "index" | "clear" | null>(null);
   const [justSaved, setJustSaved] = useState(false);
 
   const recallDirty = Boolean(saved && draft && Object.keys(diffRecallSettings(saved.recall, draft)).length > 0);
   const archivistDirty = Boolean(saved && archivistDraft && !sameJson(saved.archivist, archivistDraft));
   const crawlerDirty = Boolean(saved && crawlerDraft && !sameJson(saved.crawler, crawlerDraft));
-  const dirty = recallDirty || archivistDirty || crawlerDirty;
+  const promptsDirty = Boolean(
+    saved && promptsDraft && !sameJson(normalizePromptOverrides(saved.prompts), normalizePromptOverrides(promptsDraft)),
+  );
+  const dirty = recallDirty || archivistDirty || crawlerDirty || promptsDirty;
   const tabDirty: Record<SettingsTab, boolean> = {
     recall: recallDirty,
     archivist: archivistDirty,
     crawler: crawlerDirty,
+    prompts: promptsDirty,
     troubleshooting: false,
   };
   // Follow the server while nothing is edited (first load, a save, a reset, a refetch).
@@ -73,6 +85,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       setDraft(saved.recall);
       setArchivistDraft(saved.archivist);
       setCrawlerDraft(saved.crawler);
+      setPromptsDraft(saved.prompts);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved]);
@@ -91,6 +104,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
     setDraft(next.recall);
     setArchivistDraft(next.archivist);
     setCrawlerDraft(next.crawler);
+    setPromptsDraft(next.prompts);
     // Every Compendium that follows a default now resolves to the new value.
     void queryClient.invalidateQueries({ queryKey: lmQueryKeys.compendiums });
   };
@@ -104,6 +118,14 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
           ...(recallDirty ? { recall: normalizeRecallSettings(draft) } : {}),
           ...(archivistDirty && archivistDraft ? { archivist: normalizeArchivistSettings(archivistDraft) } : {}),
           ...(crawlerDirty && crawlerDraft ? { crawler: normalizeCrawlerSettings(crawlerDraft) } : {}),
+          // Every prompt, so one put back to its built-in text is cleared on the server too.
+          ...(promptsDirty && promptsDraft
+            ? {
+                prompts: Object.fromEntries(
+                  LM_PROMPT_KEYS.map((key) => [key, normalizePromptOverrides(promptsDraft)[key] ?? null]),
+                ),
+              }
+            : {}),
           expectedRevision: saved.revision,
         }),
       );
@@ -120,7 +142,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
     const confirmed = await confirmWithHostOrBrowser({
       title: "Reset to defaults?",
       message:
-        "Every setting on this page goes back to how Lorebook Manager ships. Compendiums keep what they set themselves.",
+        "Every setting on this page goes back to how Lorebook Manager ships, edited prompts too. Compendiums keep what they set themselves.",
       confirmLabel: "Reset",
       variant: "destructive",
     });
@@ -186,7 +208,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       </div>
     );
   }
-  if (!saved || !draft || !archivistDraft || !crawlerDraft) {
+  if (!saved || !draft || !archivistDraft || !crawlerDraft || !promptsDraft) {
     return (
       <div className="flex items-center gap-2 p-4 text-xs text-[var(--muted-foreground)]">
         <Loader2 aria-hidden="true" size="0.875rem" className="animate-spin" />
@@ -240,6 +262,7 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
                 setDraft(saved.recall);
                 setArchivistDraft(saved.archivist);
                 setCrawlerDraft(saved.crawler);
+                setPromptsDraft(saved.prompts);
                 setJustSaved(false);
               }}
               className="mari-chrome-control mari-chrome-control--small text-[var(--destructive)]"
@@ -348,6 +371,23 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       </div>
 
       <div
+        id="lm-settings-panel-prompts"
+        role="tabpanel"
+        aria-labelledby="lm-settings-tab-prompts"
+        hidden={tab !== "prompts"}
+        className="rounded-lg border border-[var(--border)] bg-[var(--background)]/30 p-3"
+      >
+        <PromptFields
+          value={promptsDraft}
+          disabled={busy !== null}
+          onChange={(next) => {
+            setPromptsDraft(next);
+            setJustSaved(false);
+          }}
+        />
+      </div>
+
+      <div
         id="lm-settings-panel-troubleshooting"
         role="tabpanel"
         aria-labelledby="lm-settings-tab-troubleshooting"
@@ -402,7 +442,8 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
             Reset to defaults
           </button>
           <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-            Puts every setting here back to how Lorebook Manager ships. Compendiums keep what they set themselves.
+            Puts every setting here back to how Lorebook Manager ships, edited prompts too. Compendiums keep what they
+            set themselves.
           </p>
         </div>
       </div>

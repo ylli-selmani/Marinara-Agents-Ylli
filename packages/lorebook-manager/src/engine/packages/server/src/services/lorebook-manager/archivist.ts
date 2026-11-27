@@ -19,6 +19,10 @@ import {
 import { appendProposalFacts, comparableFact, createProposal, listProposals, novelFacts } from "./proposals-store.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { getSettings } from "./settings-store.js";
+import {
+  ARCHIVIST_CATEGORIES,
+  composePrompt,
+} from "../../../../shared/src/features/agents/lorebook-manager/prompts.js";
 
 // ── The Archivist: Lookup-then-Diff after the turn, in the background (Long-Term Memory's auto-import pattern). ──
 // The contributor arms a job per chat; after a quiet period the job reads the settled messages past its watermark,
@@ -61,19 +65,7 @@ export function backgroundModelSignal(signal?: AbortSignal): AbortSignal {
 export const ARCHIVIST_RUN_DOC_KIND = "archivist_run";
 export const ARCHIVIST_STATE_DOC_KIND = "archivist_state";
 
-const CATEGORIES = [
-  "character",
-  "location",
-  "item",
-  "faction",
-  "species",
-  "creature",
-  "ability",
-  "quest",
-  "event",
-  "concept",
-] as const;
-type Category = (typeof CATEGORIES)[number];
+type Category = (typeof ARCHIVIST_CATEGORIES)[number];
 
 // ── One background model call at a time for the whole package (the Crawler will queue here too). ──
 // The in-turn gate stays outside: it has its own short deadline and must never wait behind a long Archivist call.
@@ -355,25 +347,8 @@ function trimWindow(
   return fromOldest ? window : window.reverse();
 }
 
-export const ARCHIVIST_SYSTEM = [
-  "You keep a roleplay's lorebook up to date. You read recent story messages and the lorebook entries they touch.",
-  "Report only lasting facts these messages establish: who someone is or has become, where things and people are,",
-  "relationships, possessions, places, factions, rules of the world.",
-  'Skip moods, passing actions, dialogue, guesses and anything an entry already says. Skip events: "Naruto returned',
-  'after two years" is a story beat for the chat\'s memory, not lore; "Naruto is back in Konoha" may be one.',
-  "File a fact on the entry it is about: a person's change goes on the person, not on the place it happened.",
-  "Skip passing states too: a current mission, what someone is studying or planning right now.",
-  "updates: new facts for an existing entry, by its id from <entries> or <directory>. Each fact is one short,",
-  "self-contained sentence in narrator voice.",
-  "creates: a new entry for a named person, place, item, faction or idea the story uses that is not in <entries> or",
-  "<directory> under any name. Well-known characters too (from a book, game or show): their entry holds this story's",
-  "version of them. A nameless figure (a guard, a quartermaster) gets none; they belong in their place's entry.",
-  "content: 2-5 sentences of narrator prose. category: one of",
-  `${CATEGORIES.join(", ")}. keys: 1-4 names or aliases it is called by.`,
-  "Never invent. If nothing lasting happened, answer with empty lists.",
-  'Answer with JSON only: {"updates": [{"id": "c1", "facts": ["..."]}], "creates": [{"name": "...", "category": "...",',
-  '"content": "...", "keys": ["..."]}]}',
-].join(" ");
+/** The built-in prompt as sent (its text is in shared prompts.ts; Settings → Prompts can edit the instructions). */
+export const ARCHIVIST_SYSTEM = composePrompt("archivist");
 
 function entryBlock(id: string, entry: LmEntryNode): string {
   const keys = entry.keys.slice(0, 8).join(", ");
@@ -571,7 +546,7 @@ export async function runArchivist(
     modelName = model.model;
     const completion = await model.chatComplete(
       [
-        { role: "system", content: ARCHIVIST_SYSTEM },
+        { role: "system", content: composePrompt("archivist", settings.prompts) },
         { role: "user", content: archivistUserPrompt(candidates, directory, window) },
       ],
       {
@@ -682,7 +657,7 @@ export async function runArchivist(
       continue;
     }
     const rawCategory = cleanText(item.category, 20).toLowerCase();
-    const category: Category = (CATEGORIES as readonly string[]).includes(rawCategory)
+    const category: Category = (ARCHIVIST_CATEGORIES as readonly string[]).includes(rawCategory)
       ? (rawCategory as Category)
       : "concept";
     const keys = [

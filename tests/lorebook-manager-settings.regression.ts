@@ -45,6 +45,11 @@ import {
   type LorebookManagerRuntimeHost,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
 import {
+  composePrompt,
+  LM_PROMPT_MAX_CHARS,
+  promptDefinition,
+} from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/prompts.js";
+import {
   getSettings,
   resetSettings,
   saveSettings,
@@ -372,8 +377,34 @@ async function storeAndLivePath() {
       [2, 3],
     );
 
-    // Reset: factory defaults again; Compendium overrides stay.
+    // Prompts (round 3): an edit is stored; blank or the built-in text clears it; a missing key stays as it is.
+    const tidyBuiltIn = promptDefinition("tidy").instructions;
+    let withPrompts = await saveSettings(documents, {
+      prompts: {
+        tidy: "Tidy gently.",
+        links: `  ${promptDefinition("links").instructions}\n`,
+        archivist: "Facts only.",
+      },
+    });
+    assert.deepEqual(
+      withPrompts.prompts,
+      { tidy: "Tidy gently.", archivist: "Facts only." },
+      "built-in text = no edit",
+    );
+    assert.deepEqual((await getSettings(documents)).prompts, withPrompts.prompts, "read back as saved");
+    withPrompts = await saveSettings(documents, { prompts: { archivist: null, tidy: "" } });
+    assert.deepEqual(withPrompts.prompts, {}, "null and blank go back to the built-in text");
+    withPrompts = await saveSettings(documents, { prompts: { librarian: "x".repeat(LM_PROMPT_MAX_CHARS + 50) } });
+    assert.equal(withPrompts.prompts.librarian!.length, LM_PROMPT_MAX_CHARS, "capped");
+    assert.equal(composePrompt("tidy"), `${tidyBuiltIn}\n\n${promptDefinition("tidy").format}`);
+    assert.ok(composePrompt("tidy", { tidy: "Mine." }).startsWith("Mine.\n\n"), "an edit replaces the instructions");
+    assert.ok(composePrompt("tidy", { tidy: "Mine." }).endsWith(promptDefinition("tidy").format), "the format stays");
+    assert.match(composePrompt("links", { links: "Use:\n{{relations}}" }), /Use:\n- is_a: /, "variables filled");
+    assert.ok(!composePrompt("archivist").includes("{{"), "the built-in prompts have no unfilled variables");
+
+    // Reset: factory defaults again (edited prompts too); Compendium overrides stay.
     const reset = await resetSettings(documents);
+    assert.deepEqual(reset.prompts, {});
     assert.equal(reset.recall.tokenBudget, DEFAULT_RECALL_SETTINGS.tokenBudget);
     assert.equal(reset.recall.queryMessageCount, DEFAULT_RECALL_SETTINGS.queryMessageCount);
     assert.deepEqual((await getCompendium(documents, plain.id))!.overrides, { recall: { queryMessageCount: 2 } });

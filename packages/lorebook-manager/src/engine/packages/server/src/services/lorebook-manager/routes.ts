@@ -540,6 +540,7 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
         recall: body.recall,
         archivist: body.archivist,
         crawler: body.crawler,
+        prompts: body.prompts,
         expectedRevision: parseExpectedRevision(body.expectedRevision),
       });
       await refreshLiveClaimsSafely();

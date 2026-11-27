@@ -6,6 +6,8 @@ import type {
   LmRetrievalResult,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
+import { getSettings } from "./settings-store.js";
+import { composePrompt } from "../../../../shared/src/features/agents/lorebook-manager/prompts.js";
 
 /** What the package asks the Engine for (its cap). The gate keeps well inside it with its own deadline. */
 export const LIVE_CONTRIBUTOR_TIMEOUT_MS = 5_000;
@@ -173,12 +175,17 @@ async function decisionRejects(
   return { rejected, model: result.model };
 }
 
-const LIBRARIAN_SYSTEM = [
-  "You are the Librarian of a roleplay's lorebook. Some entries were found only because they share words or meaning",
-  "with the latest messages, and some of those are noise. Keep an entry only if the story right now involves it, or the",
-  "writer would plainly need it for the next reply. When unsure, keep it.",
-  'Answer with JSON only: {"keep": ["e1", "e3"]}. Use only the ids listed.',
-].join(" ");
+/** The built-in prompt as sent (its text is in shared prompts.ts; Settings → Prompts can edit the instructions). */
+export const LIBRARIAN_SYSTEM = composePrompt("librarian");
+
+/** The edited Librarian prompt, if any; a settings read that fails keeps the built-in one. */
+async function librarianSystem(): Promise<string> {
+  try {
+    return composePrompt("librarian", (await getSettings(getLorebookManagerRuntime().persistence.documents)).prompts);
+  } catch {
+    return LIBRARIAN_SYSTEM;
+  }
+}
 
 async function librarianRejects(
   candidates: readonly LmRetrievalActivatedItem[],
@@ -199,7 +206,7 @@ async function librarianRejects(
   });
   const completion = await model.chatComplete(
     [
-      { role: "system", content: LIBRARIAN_SYSTEM },
+      { role: "system", content: await librarianSystem() },
       {
         role: "user",
         content: `<scene>\n${sceneText(context)}\n</scene>\n\n<candidates>\nid | name | tag | keys | summary\n${rows.join("\n")}\n</candidates>`,

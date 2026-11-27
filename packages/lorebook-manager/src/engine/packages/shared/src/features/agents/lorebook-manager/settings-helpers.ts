@@ -182,6 +182,7 @@ export function defaultSettings(): LmSettings {
     recall: normalizeRecallSettings({}),
     archivist: normalizeArchivistSettings({}),
     crawler: normalizeCrawlerSettings({}),
+    prompts: {},
     revision: 0,
     updatedAt: "",
   };

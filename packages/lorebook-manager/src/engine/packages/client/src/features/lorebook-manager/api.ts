@@ -12,6 +12,7 @@ import type {
   LmCompendium,
   LmGraphPayload,
   LmRecallSettings,
+  LmPromptKey,
   LmSettings,
   LorebookFilterMode,
   LmSemanticIndexStatus,
@@ -229,6 +230,7 @@ export async function saveSettingsApi(input: {
   recall?: Partial<LmRecallSettings>;
   archivist?: Partial<LmArchivistSettings>;
   crawler?: Partial<LmCrawlerSettings>;
+  prompts?: Partial<Record<LmPromptKey, string | null>>;
   expectedRevision?: number;
 }): Promise<LmSettings> {
   const response = await fetch(`${API_ROOT}/settings`, {

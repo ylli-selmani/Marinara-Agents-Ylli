@@ -100,6 +100,7 @@ async function main() {
 
   const documents = makeMemoryDocStore();
   const prompts: string[] = [];
+  const systems: string[] = [];
   let answer: Answer = () => '{"entries": []}';
   const runtime: LorebookManagerRuntimeHost = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
@@ -117,6 +118,7 @@ async function main() {
           async chatComplete(chat) {
             const prompt = chat.find((m) => m.role === "user")?.content ?? "";
             prompts.push(prompt);
+            systems.push(chat.find((m) => m.role === "system")?.content ?? "");
             const reply = answer(prompt);
             if (reply instanceof Error) throw reply;
             return { content: reply, finishReason: "stop" };
@@ -398,7 +400,12 @@ async function main() {
       isLinks(text)
         ? "not json"
         : JSON.stringify({ entries: [{ id: shortId(text, "Unseelie Court"), addKeys: ["Night Court"] }] });
+    // An edited Tidy prompt is what the first call sends (Settings → Prompts); Links keeps its built-in text.
+    await saveSettings(documents, { prompts: { tidy: "Tidy the Fae books gently." } });
     const linksFailed = await runCrawler(compendium.id);
+    assert.ok(systems.at(-2)!.startsWith("Tidy the Fae books gently.\n\nAnswer with JSON only"), systems.at(-2));
+    assert.equal(systems.at(-1), CRAWLER_LINKS_SYSTEM);
+    await saveSettings(documents, { prompts: { tidy: null } });
     assert.equal(linksFailed.status, "done");
     assert.ok(
       linksFailed.run!.skipped.some(

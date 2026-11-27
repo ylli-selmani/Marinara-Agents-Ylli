@@ -453,6 +453,49 @@ export async function semanticScoresFor(
   }
 }
 
+/**
+ * The Crawler's meaning targets: for each asked entry, the other entries closest to it by their stored vectors (entry
+ * against entry; only the calibration texts are ever embedded, once per model). Uses what is indexed already and never
+ * starts indexing. Never throws: empty when nothing is indexed or the host is gone.
+ */
+export async function similarEntries(
+  sources: readonly EntryVectorSource[],
+  entryIds: readonly string[],
+  options: { limit?: number; minSimilarity?: number; timeoutMs?: number } = {},
+): Promise<Map<string, Array<{ entryId: string; similarity: number }>>> {
+  const result = new Map<string, Array<{ entryId: string; similarity: number }>>();
+  if (entryIds.length === 0 || sources.length < 2) return result;
+  try {
+    const host = await resolveHost();
+    if (!host) return result;
+    const { vectors } = await resolveVectors(sources, host.spaceId);
+    if (vectors.size < 2) return result;
+    let baseline = baselineBySpace.get(host.spaceId);
+    if (baseline === undefined) {
+      const warmed = await withDeadline(() => warmBaseline(host), options.timeoutMs ?? 10_000);
+      if (typeof warmed !== "number") return result;
+      baseline = warmed;
+    }
+    const limit = options.limit ?? 4;
+    const min = options.minSimilarity ?? 0.3;
+    for (const entryId of entryIds) {
+      const own = vectors.get(entryId);
+      if (!own) continue;
+      const scored: Array<{ entryId: string; similarity: number }> = [];
+      for (const [otherId, vector] of vectors) {
+        if (otherId === entryId || vector.length !== own.length) continue;
+        const similarity = calibrate(cosine(own, vector), baseline);
+        if (similarity >= min) scored.push({ entryId: otherId, similarity: Math.round(similarity * 1000) / 1000 });
+      }
+      scored.sort((a, b) => b.similarity - a.similarity);
+      if (scored.length > 0) result.set(entryId, scored.slice(0, limit));
+    }
+  } catch {
+    // Meaning targets are extra: the links call still has what the text names.
+  }
+  return result;
+}
+
 /** Index now: embed every missing vector of these books in this call, and report what is indexed. */
 export async function indexLorebooks(lorebookIds: readonly string[]): Promise<LmSemanticIndexStatus> {
   const runtime = getLorebookManagerRuntime();

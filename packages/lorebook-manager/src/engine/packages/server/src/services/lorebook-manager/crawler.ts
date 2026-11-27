@@ -18,11 +18,13 @@ import { compendiumForChat } from "./live-claims.js";
 import { getLorebookManagerRuntime, type LorebookManagerDocumentStore } from "./package-runtime.js";
 import { comparableFact, createProposal, dismissProposal, listProposals } from "./proposals-store.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
+import { similarEntries, type EntryVectorSource } from "./semantic-index.js";
 import { getSettings } from "./settings-store.js";
 
-// ── The Crawler (Tidy entries): one model call per batch fills in what an entry is missing. ──
-// Phase 1 suggests a summary and a tag where an entry has none, keyword fixes (a needed alias, a too-broad key out),
-// "always on" off where it doesn't belong, and specific links to the entries and cards its text mentions. Facets
+// ── The Crawler (Tidy entries): two model calls per batch fill in what an entry is missing. ──
+// Call 1 suggests a summary and a tag where an entry has none, keyword fixes (a needed alias, a too-broad key out) and
+// "always on" off where it doesn't belong. Call 2 suggests specific links to the entries and cards its text mentions
+// or its meaning is close to, each shown with its summary (round 6: links from bare names came out empty). Facets
 // (dynamicState) come later. Everything goes to Review, one suggestion per entry.
 // An entry counts as tidied once the model has seen it with its current name and content; editing either (an
 // applied Archivist fact, a hand edit) queues it again.
@@ -35,6 +37,17 @@ const MAX_KEYS_ADDED = 2;
 const MAX_KEYS_TOTAL = 12;
 const MAX_LINKS_ADDED = 3;
 const DESCRIPTION_CHARS = 240;
+/** The links call reads a shorter text: the summary carries most of it. */
+const LINKS_CONTENT_CHARS = 800;
+const TARGET_SUMMARY_CHARS = 160;
+/** Extra link targets from the meaning index, on top of what the text names. */
+const MAX_SIMILAR_TARGETS = 4;
+/** Calibrated entry-to-entry similarity a meaning target needs (0 = the model's unrelated-text floor). */
+// Naruto, 2026-11-27: true neighbours score 0.45-0.75 (Shadow Clone: Clone Techniques 0.75, Jutsu 0.50), the median
+// entry about 0.18.
+const SIMILAR_MIN = 0.35;
+/** The "also a key of N other entries" note starts at 2 others: one other is often a namesake (two Kagetsu Clans). */
+const KEY_SHARED_NOTE_FROM = 2;
 const TAG_CHARS = 40;
 const MAX_RECORDED_RUNS = 20;
 
@@ -66,10 +79,10 @@ const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
 
 /**
  * Bumped when the Crawler's rules change enough to look again: every entry is untidied once (2: round 5's prompt, with
- * key removal, "always on" and no related_to; 3: round 6, summaries required, no part_of, key swaps). Costs nothing
- * until Tidy entries runs.
+ * key removal, "always on" and no related_to; 3: round 6, summaries required, no part_of, key swaps; 4: tuning round 3,
+ * links in their own call with target summaries, names never removed as keys). Costs nothing until Tidy entries runs.
  */
-const CRAWLER_RULES_VERSION = 3;
+const CRAWLER_RULES_VERSION = 4;
 
 /** What the model read of an entry: its name and content, under these rules. A change to either untidies it again. */
 export function crawlHash(entry: Pick<LmEntryNode, "name" | "content">): string {
@@ -237,13 +250,18 @@ export async function listCrawlerRuns(): Promise<LmCrawlerRunRecord[]> {
 
 // ── Selection ──
 
-async function compendiumGraph(compendium: LmCompendium, withMentions: boolean): Promise<LmGraphPayload> {
+async function compendiumGraph(
+  compendium: LmCompendium,
+  withMentions: boolean,
+  vectorSources?: EntryVectorSource[],
+): Promise<LmGraphPayload> {
   return buildLorebookManagerGraphPayload({
     lorebookIds: new Set(compendium.lorebookIds),
     characterIds: new Set(compendium.characterIds),
     personaIds: new Set(compendium.personaIds),
     onlyRequested: true,
     skipMentions: !withMentions,
+    ...(vectorSources ? { vectorSources } : {}),
   });
 }
 
@@ -288,9 +306,10 @@ export async function countUntidied(compendiumId: string): Promise<number> {
   return untidied(payload, compendium, state, pending).length;
 }
 
-// ── The prompt ──
+// ── The prompts ──
+// Each prompt is instructions (what Settings → Prompts will let a person edit) plus a fixed answer format the code reads.
 
-export const CRAWLER_SYSTEM = [
+export const CRAWLER_TIDY_INSTRUCTIONS = [
   "You tidy a roleplay's lorebook so the right entries come up during play. Every entry in <entries> gets an answer.",
   "",
   "description: REQUIRED for every entry whose description says (none): one plain sentence saying what the entry is",
@@ -299,53 +318,89 @@ export const CRAWLER_SYSTEM = [
   "tag: one or two lowercase words for its kind (character, location, item, faction, species, ability, event,",
   "concept, ...). Only if the entry has none.",
   "",
-  "Everything else: only what is clearly missing or wrong. Most entries need few or no keyword and link changes.",
+  "Everything else: only what is clearly missing or wrong. Most entries need few or no keyword changes.",
   "",
   "Keywords bring an entry into the story whenever one appears in the chat, without any further check. So:",
   "addKeys: at most 2 names or aliases the story really calls it by and the entry lacks. Never descriptions",
-  '("red-haired shinobi"), titles of other things, or generic phrases.',
-  "removeKeys: keys the entry already has that are too broad on their own: a common word that would bring it in for",
-  'unrelated text ("Ten" for Ten-Tails, "Team" for Team Guy, "Dark", "water"), or one word of a longer name ("Shadow"',
-  'for Shadow Clone Technique). A key marked "also a key of N other entries" is a strong sign. Copy them exactly.',
-  "Never the entry's own name. To replace an entry's only key, put the better one in addKeys.",
+  '("red-haired shinobi"), names of other things, or generic phrases.',
+  "removeKeys: only a common word that is too broad on its own and would bring the entry in for unrelated text",
+  '("Ten" for Ten-Tails, "Team" for Team Guy, "Shadow" for Shadow Clone Technique, "Dark", "water"). A key marked',
+  '"also a key of N other entries" is a sign, if it is such a word. Never remove a proper name, alias or title, even',
+  "a single word and even one another entry shares (Shukaku, Kurama, Kagetsu): that is how the story calls it. Never",
+  "the entry's own name. Copy keys exactly. To replace an entry's only key, put the better one in addKeys.",
   'constant: false, only for an entry marked "always on: yes" that isn\'t lore every scene needs (a person, place or',
   "event that matters only when it comes up).",
   "",
-  "links: a link is a lasting fact about how the entry relates to a target; when the entry comes up, the link brings",
-  'the target along. It reads "<entry> <relation> <target>". Only these relations:',
-  ...CRAWLER_RELATION_DEFS.map((relation) => `- ${relation.value}: ${relation.hint}`),
-  "Link only when the relation is plainly true from the entry's text. Naming, mentioning or comparing a target is",
-  "not a link: an encounter prompt that names three teams links to none of them. Link to the closest kind, group or",
-  "place only: an entry that is_a Ninjutsu gets no is_a Jutsu as well. Something that belongs to someone (a",
-  "bloodline, a weapon) gets no link to its owner; the owner's own entry links to it with owns. At most 3 links per",
-  "entry, only to targets listed under that entry. When no relation above fits exactly, leave the link out.",
-  "",
-  "Never invent keys or links; leave them out when unsure. An entry that has a description and needs nothing else is",
-  'just {"id": "e2"}. Answer with JSON only:',
-  '{"entries": [{"id": "e1", "description": "...", "tag": "...", "addKeys": ["..."], "removeKeys": ["..."],',
-  '"constant": false, "links": [{"to": "t3", "relation": "member_of"}]}]}',
+  'Never invent keys; leave them out when unsure. An entry that has a description and needs nothing else is just {"id": "e2"}.',
 ].join("\n");
+
+export const CRAWLER_TIDY_FORMAT = [
+  "Answer with JSON only:",
+  '{"entries": [{"id": "e1", "description": "...", "tag": "...", "addKeys": ["..."], "removeKeys": ["..."],',
+  '"constant": false}]}',
+].join("\n");
+
+/** `{{relations}}` becomes the list of relations the Crawler may write, one per line with its hint. */
+export const CRAWLER_LINKS_INSTRUCTIONS = [
+  "You link a roleplay's lorebook entries, so that when one comes up in the story the entries it depends on come",
+  'along. A link is a lasting fact and reads "<entry> <relation> <target>". Only these relations:',
+  "{{relations}}",
+  "",
+  "For each entry in <entries>, pick from the targets listed under it; each target comes with its summary. Most",
+  "entries have one or two real links: what kind of thing it is (is_a), the group it belongs to (member_of), where it",
+  "is (located_in), what it leads or owns, a lasting ally or rival. An entry with none of these gets no links.",
+  "",
+  "Link only when the relation is plainly true from the entry's text and the target's summary. Naming, mentioning or",
+  "comparing a target is not a link: an encounter prompt that names three teams links to none of them. Link to the",
+  "closest kind, group or place only: an entry that is_a Ninjutsu gets no is_a Jutsu as well. Something that belongs",
+  "to someone (a bloodline, a weapon) gets no link to its owner; the owner's own entry links to it with owns. At most",
+  "3 links per entry. The entry's existing links are listed; don't repeat them. When no relation above fits exactly,",
+  "leave the link out.",
+].join("\n");
+
+export const CRAWLER_LINKS_FORMAT = [
+  "Answer with JSON only, one item per entry (links may be empty):",
+  '{"entries": [{"id": "e1", "links": [{"to": "t3", "relation": "member_of"}]}]}',
+].join("\n");
+
+const relationLines = () => CRAWLER_RELATION_DEFS.map((relation) => `- ${relation.value}: ${relation.hint}`).join("\n");
+
+/** A prompt's instructions with its variables filled in, then its fixed answer format. */
+export function composeSystemPrompt(instructions: string, format: string): string {
+  const relations = relationLines();
+  const filled = instructions.includes("{{relations}}")
+    ? instructions.split("{{relations}}").join(relations)
+    : instructions;
+  return `${filled.trim()}\n\n${format}`;
+}
+
+export const CRAWLER_SYSTEM = composeSystemPrompt(CRAWLER_TIDY_INSTRUCTIONS, CRAWLER_TIDY_FORMAT);
+export const CRAWLER_LINKS_SYSTEM = composeSystemPrompt(CRAWLER_LINKS_INSTRUCTIONS, CRAWLER_LINKS_FORMAT);
 
 function displayName(node: LmEntryNode | LmEntityNode): string {
   return node.nodeType === "lore" ? node.name : `${node.name} (${node.nodeType === "persona" ? "persona" : "card"})`;
 }
 
+/** The entry's links as the prompt shows them; related_to stays out, so the model doesn't copy round 5's. */
+function shownLinks(entry: LmEntryNode, nameOf: (ref: string) => string): string {
+  return Object.entries(entry.relationships)
+    .filter(([, relation]) => String(relation).trim().toLowerCase() !== "related_to")
+    .map(([target, relation]) => `${relation} ${nameOf(target)}`)
+    .join(", ");
+}
+
 export function crawlerUserPrompt(
   batch: readonly LmEntryNode[],
-  linkTargets: ReadonlyMap<string, ReadonlyArray<{ shortId: string; node: LmEntryNode | LmEntityNode }>>,
   nameOf: (ref: string) => string,
-  /** How many entries in the Compendium have each key (compared loosely): a shared key is a broad one. */
+  /** How many entries in the Compendium have each key (compared loosely): a shared common word is a broad one. */
   keyUse: ReadonlyMap<string, number> = new Map(),
 ): string {
   const blocks = batch.map((entry, index) => {
     const content = entry.content.length > CONTENT_CHARS ? `${entry.content.slice(0, CONTENT_CHARS)}…` : entry.content;
-    const links = Object.entries(entry.relationships)
-      .map(([target, relation]) => `${relation} ${nameOf(target)}`)
-      .join(", ");
-    const targets = (linkTargets.get(entry.ref) ?? []).map((item) => `${item.shortId} ${displayName(item.node)}`);
     const keys = entry.keys.map((key) => {
       const others = (keyUse.get(comparableFact(key)) ?? 1) - 1;
-      return others > 0 ? `${key} (also a key of ${others} other ${others === 1 ? "entry" : "entries"})` : key;
+      // One other entry sharing a name is common (two clans of one name); from two on it points at a broad word.
+      return others >= KEY_SHARED_NOTE_FROM ? `${key} (also a key of ${others} other entries)` : key;
     });
     return [
       `[e${index + 1}] ${entry.name}`,
@@ -353,10 +408,49 @@ export function crawlerUserPrompt(
       `tag: ${entry.tag.trim() || "(none)"}`,
       `keys: ${keys.join(", ") || "(none)"}`,
       ...(entry.constant ? ["always on: yes"] : []),
-      `links: ${links || "(none)"}`,
-      `targets: ${targets.join("; ") || "(none)"}`,
+      `links: ${shownLinks(entry, nameOf) || "(none)"}`,
       content.trim(),
     ].join("\n");
+  });
+  return `<entries>\n${blocks.join("\n\n")}\n</entries>`;
+}
+
+export interface CrawlerLinkTarget {
+  shortId: string;
+  node: LmEntryNode | LmEntityNode;
+}
+
+/**
+ * The links call: each entry with targets, its summary (the one just suggested where it had none) and a shorter text;
+ * each target with its own summary, so the model knows what it would link to.
+ */
+export function crawlerLinksPrompt(
+  batch: readonly LmEntryNode[],
+  linkTargets: ReadonlyMap<string, readonly CrawlerLinkTarget[]>,
+  nameOf: (ref: string) => string,
+  summaryOf: (node: LmEntryNode | LmEntityNode) => string,
+): string {
+  const blocks = batch.flatMap((entry, index) => {
+    const targets = linkTargets.get(entry.ref) ?? [];
+    if (targets.length === 0) return [];
+    const content =
+      entry.content.length > LINKS_CONTENT_CHARS ? `${entry.content.slice(0, LINKS_CONTENT_CHARS)}…` : entry.content;
+    const targetLines = targets.map(({ shortId, node }) => {
+      const tag = node.nodeType === "lore" ? node.tag.trim() : "";
+      const summary = summaryOf(node);
+      return `- ${shortId} ${displayName(node)}${tag ? ` (${tag})` : ""}${summary ? `: ${summary}` : ""}`;
+    });
+    return [
+      [
+        `[e${index + 1}] ${entry.name}`,
+        `description: ${summaryOf(entry) || "(none)"}`,
+        `tag: ${entry.tag.trim() || "(none)"}`,
+        `links: ${shownLinks(entry, nameOf) || "(none)"}`,
+        "targets:",
+        ...targetLines,
+        content.trim(),
+      ].join("\n"),
+    ];
   });
   return `<entries>\n${blocks.join("\n\n")}\n</entries>`;
 }
@@ -454,6 +548,51 @@ export interface CrawlerRunOptions {
   replacing?: readonly string[];
 }
 
+/**
+ * A manual batch: the next entry in gap order, then untidied entries connected to the batch (a mention or a link,
+ * either way), so related entries see each other and their fresh summaries in one links call; the next entry in order
+ * when nothing connects. Entries tried more often than the first one aren't pulled forward.
+ */
+export function neighbourhoodBatch(
+  ordered: readonly LmEntryNode[],
+  payload: LmGraphPayload,
+  size: number,
+  triesOf: (entry: LmEntryNode) => number,
+): LmEntryNode[] {
+  if (ordered.length <= size) return [...ordered];
+  const neighbours = new Map<string, Set<string>>();
+  const connect = (a: string, b: string) => {
+    if (a === b) return;
+    for (const [from, to] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      let set = neighbours.get(from);
+      if (!set) neighbours.set(from, (set = new Set()));
+      set.add(to);
+    }
+  };
+  for (const edge of [...payload.mentionEdges, ...payload.explicitEdges]) connect(edge.sourceRef, edge.targetRef);
+  const seedTries = triesOf(ordered[0]!);
+  const batch: LmEntryNode[] = [];
+  const inBatch = new Set<string>();
+  while (batch.length < size) {
+    const connected = ordered.find(
+      (entry) =>
+        !inBatch.has(entry.ref) &&
+        triesOf(entry) <= seedTries &&
+        [...(neighbours.get(entry.ref) ?? [])].some((ref) => inBatch.has(ref)),
+    );
+    const next = connected ?? ordered.find((entry) => !inBatch.has(entry.ref));
+    if (!next) break;
+    batch.push(next);
+    inBatch.add(next.ref);
+  }
+  return batch;
+}
+
+type ModelAnswer = { ok: true; parsed: Record<string, unknown> } | { ok: false; detail: string; aborted?: boolean };
+
 export async function runCrawler(compendiumId: string, options: CrawlerRunOptions = {}): Promise<CrawlerOutcome> {
   const startedAt = Date.now();
   const runtime = getLorebookManagerRuntime();
@@ -484,8 +623,9 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
 
   const settings = await getSettings(documents);
   const crawler = settings.crawler;
+  const vectorSources: EntryVectorSource[] = [];
   const [payload, { state: stored }, everyPending] = await Promise.all([
-    compendiumGraph(compendium, true),
+    compendiumGraph(compendium, true, vectorSources),
     readState(documents, compendiumId),
     listProposals(documents, "pending"),
   ]);
@@ -500,7 +640,9 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     const wanted = new Set(options.entryIds);
     candidates = candidates.filter((entry) => wanted.has(entry.id));
   }
-  const batch = candidates.slice(0, crawler.batchSize);
+  const batch = options.entryIds
+    ? candidates.slice(0, crawler.batchSize)
+    : neighbourhoodBatch(candidates, payload, crawler.batchSize, (entry) => triesOf(state, entry));
   let remainingAfter = trigger === "after_archivist" ? 0 : Math.max(0, everyUntidied.length - batch.length);
   const wholeWords = trigger === "manual" ? await suggestWholeWords(documents, payload, compendium) : 0;
   const wholeWordsNote =
@@ -521,107 +663,74 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   const languageModels = runtime.languageModels;
   if (!languageModels) return finish(base("unavailable", "This Engine has no language model host"));
 
-  // Link targets: what each entry's text mentions (the Graph's mention lines), that it doesn't link to yet.
   const nodesByRef = new Map(payload.nodes.map((node) => [node.ref, node] as const));
   const nameOf = (raw: string) => {
     const node = nodesByRef.get(parseEntityRef(raw)?.ref ?? raw);
     return node && node.nodeType !== "lorebook" ? node.name : raw;
   };
-  const shortIds = new Map<string, string>();
-  const byShortId = new Map<string, LmEntryNode | LmEntityNode>();
-  const linkTargets = new Map<string, Array<{ shortId: string; node: LmEntryNode | LmEntityNode }>>();
-  for (const entry of batch) {
-    const linked = new Set(Object.keys(entry.relationships).map((key) => parseEntityRef(key)?.ref ?? key));
-    const targets: Array<{ shortId: string; node: LmEntryNode | LmEntityNode }> = [];
-    for (const edge of payload.mentionEdges) {
-      if (edge.sourceRef !== entry.ref || linked.has(edge.targetRef) || targets.length >= MAX_LINK_TARGETS) continue;
-      const node = nodesByRef.get(edge.targetRef);
-      if (!node || node.nodeType === "lorebook") continue;
-      let shortId = shortIds.get(node.ref);
-      if (!shortId) {
-        if (shortIds.size >= MAX_TARGETS) continue;
-        shortId = `t${shortIds.size + 1}`;
-        shortIds.set(node.ref, shortId);
-        byShortId.set(shortId, node);
-      }
-      targets.push({ shortId, node });
-    }
-    linkTargets.set(entry.ref, targets);
-  }
-  // A key several entries share is a broad one; the prompt says so next to it.
+  // A key several entries share may be a broad one; the prompt says so next to it.
   const ownBooks = new Set(compendium.lorebookIds);
   const keyUse = new Map<string, number>();
   for (const node of payload.nodes) {
     if (node.nodeType !== "lore" || !ownBooks.has(node.lorebookId)) continue;
     for (const key of new Set(node.keys.map(comparableFact))) if (key) keyUse.set(key, (keyUse.get(key) ?? 0) + 1);
   }
-  // Ladders (is_a, member_of, located_in): a target the entry already reaches through a lower rung is dropped.
-  const linksOf = (ref: string) => {
-    const node = nodesByRef.get(ref);
-    if (!node || node.nodeType !== "lore") return [];
-    return Object.entries(node.relationships).map(([key, relation]) => ({
-      ref: parseEntityRef(key)?.ref ?? key,
-      relation: String(relation).trim().toLowerCase(),
-    }));
-  };
-  const reaches = (fromRef: string, relation: string, targetRef: string): boolean => {
-    const seen = new Set([fromRef]);
-    const queue = [fromRef];
-    while (queue.length > 0) {
-      for (const link of linksOf(queue.shift()!)) {
-        if (link.relation !== relation || seen.has(link.ref)) continue;
-        if (link.ref === targetRef) return true;
-        seen.add(link.ref);
-        queue.push(link.ref);
-      }
-    }
-    return false;
-  };
 
   let modelName: string | null = null;
-  let answer: unknown;
+  let model: Awaited<ReturnType<typeof languageModels.resolveForRequest>> | null = null;
+  const ask = async (system: string, user: string): Promise<ModelAnswer> => {
+    try {
+      if (!model) {
+        let chatConnectionId: string | null = null;
+        if (options.chatId && typeof runtime.persistence.getChat === "function") {
+          chatConnectionId = (await runtime.persistence.getChat(options.chatId))?.connectionId ?? null;
+        }
+        model = await languageModels.resolveForRequest({
+          connectionId: crawler.connectionId ?? settings.archivist.connectionId,
+          chatConnectionId,
+        });
+        modelName = model.model;
+      }
+      const completion = await model.chatComplete(
+        [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        {
+          ...(crawler.temperature === null ? {} : { temperature: crawler.temperature }),
+          maxTokens: crawler.maxTokens,
+          signal: backgroundModelSignal(options.signal),
+        },
+      );
+      if (options.signal?.aborted) return { ok: false, detail: "aborted", aborted: true };
+      if (completion.finishReason === "length") {
+        return {
+          ok: false,
+          detail: "The model's answer was cut off: raise Max tokens or lower Entries per run in Settings → Crawler",
+        };
+      }
+      const parsed = asRecord(completion.content ? safeParse(completion.content) : null);
+      if (!Array.isArray(parsed.entries)) return { ok: false, detail: "The model's answer wasn't readable" };
+      return { ok: true, parsed };
+    } catch (error) {
+      if (options.signal?.aborted) return { ok: false, detail: "aborted", aborted: true };
+      return { ok: false, detail: error instanceof Error ? error.message.slice(0, 200) : String(error) };
+    }
+  };
   const failed = (detail: string) =>
     finish({ ...base("failed", detail), entryCount: batch.length, model: modelName, remaining: candidates.length });
-  try {
-    let chatConnectionId: string | null = null;
-    if (options.chatId && typeof runtime.persistence.getChat === "function") {
-      chatConnectionId = (await runtime.persistence.getChat(options.chatId))?.connectionId ?? null;
-    }
-    const model = await languageModels.resolveForRequest({
-      connectionId: crawler.connectionId ?? settings.archivist.connectionId,
-      chatConnectionId,
-    });
-    modelName = model.model;
-    const completion = await model.chatComplete(
-      [
-        { role: "system", content: CRAWLER_SYSTEM },
-        { role: "user", content: crawlerUserPrompt(batch, linkTargets, nameOf, keyUse) },
-      ],
-      {
-        ...(crawler.temperature === null ? {} : { temperature: crawler.temperature }),
-        maxTokens: crawler.maxTokens,
-        signal: backgroundModelSignal(options.signal),
-      },
-    );
-    if (options.signal?.aborted) return { status: "failed", run: null };
-    if (completion.finishReason === "length") {
-      return failed("The model's answer was cut off: raise Max tokens or lower Entries per run in Settings → Crawler");
-    }
-    answer = completion.content ? safeParse(completion.content) : null;
-  } catch (error) {
-    if (options.signal?.aborted) return { status: "failed", run: null };
-    return failed(error instanceof Error ? error.message.slice(0, 200) : String(error));
-  }
-  const parsed = asRecord(answer);
-  if (!Array.isArray(parsed.entries)) return failed("The model's answer wasn't readable");
+
+  // ── Call 1: summary, tag, keys, always on. ──
+  const tidyAnswer = await ask(CRAWLER_SYSTEM, crawlerUserPrompt(batch, nameOf, keyUse));
+  if (!tidyAnswer.ok) return tidyAnswer.aborted ? { status: "failed", run: null } : failed(tidyAnswer.detail);
 
   const skipped: LmCrawlerRunRecord["skipped"] = [];
-  const proposalIds: string[] = [];
   const byEntryId = new Map<string, LmEntryNode>(batch.map((entry, index) => [`e${index + 1}`, entry]));
   const answered = new Set<string>();
   const tidied: LmEntryNode[] = [];
   const tried: LmEntryNode[] = [];
-  for (const raw of parsed.entries) {
+  const patches = new Map<string, Record<string, unknown>>();
+  for (const raw of tidyAnswer.parsed.entries as unknown[]) {
     const item = asRecord(raw);
     const shortId = cleanText(item.id, 12);
     const entry = byEntryId.get(shortId);
@@ -664,38 +773,6 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     // Without a better key in addKeys, the last one stays.
     while (removeKeys.length > 0 && entry.keys.length - removeKeys.length + addKeys.length < 1) removeKeys.pop();
     if (removeKeys.length > 0) patch.removeKeys = removeKeys;
-    const allowed = new Map((linkTargets.get(entry.ref) ?? []).map((target) => [target.shortId, target.node]));
-    const addLinks: Array<CrawlerLink & { ref: string }> = [];
-    for (const rawLink of Array.isArray(item.links) ? item.links : []) {
-      const link = asRecord(rawLink);
-      const to = cleanText(link.to, 12);
-      const relation = cleanText(link.relation, 30).toLowerCase();
-      const node = allowed.get(to);
-      if (!node || !byShortId.has(to)) {
-        if (to) skipped.push({ name: `${entry.name} → ${to}`, why: "not a mentioned target" });
-        continue;
-      }
-      if (!CRAWLER_RELATIONS.includes(relation)) {
-        skipped.push({ name: `${entry.name} → ${node.name}`, why: `unknown relation "${relation}"` });
-        continue;
-      }
-      const key = toRelationshipKey(node.ref);
-      if (addLinks.some((existing) => existing.key === key) || addLinks.length >= MAX_LINKS_ADDED) continue;
-      addLinks.push({ key, relation, name: displayName(node), ref: node.ref });
-    }
-    const links = addLinks.filter((link) => {
-      if (!LADDER_RELATIONS.has(link.relation)) return true;
-      const rungs = [
-        ...linksOf(entry.ref)
-          .filter((other) => other.relation === link.relation)
-          .map((other) => other.ref),
-        ...addLinks.filter((other) => other.relation === link.relation).map((other) => other.ref),
-      ];
-      const lower = rungs.find((ref) => ref !== link.ref && reaches(ref, link.relation, link.ref));
-      if (lower) skipped.push({ name: `${entry.name} → ${link.name}`, why: `already under ${nameOf(lower)}` });
-      return !lower;
-    });
-    if (links.length > 0) patch.addLinks = links.map(({ key, relation, name }) => ({ key, relation, name }));
     // A summary is required where the entry has none: without one the entry isn't tidied, up to MAX_SUMMARY_TRIES.
     if (!entry.description.trim() && !patch.description) {
       const tries = triesOf(state, entry) + 1;
@@ -709,7 +786,147 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     } else {
       tidied.push(entry);
     }
-    if (Object.keys(patch).length === 0) continue;
+    patches.set(entry.id, patch);
+  }
+
+  // ── Call 2: links, with every target's summary (the fresh ones from call 1 too). ──
+  const freshSummary = new Map<string, string>();
+  for (const [entryId, patch] of patches) {
+    if (typeof patch.description === "string") freshSummary.set(entryId, patch.description);
+  }
+  const summaryOf = (node: LmEntryNode | LmEntityNode) => {
+    const text =
+      node.nodeType === "lore" ? node.description.trim() || freshSummary.get(node.id) || "" : node.description;
+    const clean = text.replace(/\s+/gu, " ").trim();
+    return clean.length > TARGET_SUMMARY_CHARS ? `${clean.slice(0, TARGET_SUMMARY_CHARS)}…` : clean;
+  };
+  // Only entries the model answered: one left out gets its links on its next run.
+  const linkBatch = batch.filter((entry) => answered.has(entry.id));
+  const similar = await similarEntries(
+    vectorSources.filter((source) => ownBooks.has(source.lorebookId)),
+    linkBatch.map((entry) => entry.id),
+    { limit: MAX_SIMILAR_TARGETS, minSimilarity: SIMILAR_MIN },
+  );
+  const shortIds = new Map<string, string>();
+  const byShortId = new Map<string, LmEntryNode | LmEntityNode>();
+  const linkTargets = new Map<string, CrawlerLinkTarget[]>();
+  const targetFor = (node: LmEntryNode | LmEntityNode): CrawlerLinkTarget | null => {
+    let shortId = shortIds.get(node.ref);
+    if (!shortId) {
+      if (shortIds.size >= MAX_TARGETS) return null;
+      shortId = `t${shortIds.size + 1}`;
+      shortIds.set(node.ref, shortId);
+      byShortId.set(shortId, node);
+    }
+    return { shortId, node };
+  };
+  for (const entry of linkBatch) {
+    const linked = new Set(Object.keys(entry.relationships).map((key) => parseEntityRef(key)?.ref ?? key));
+    const seen = new Set<string>();
+    const targets: CrawlerLinkTarget[] = [];
+    const offer = (ref: string) => {
+      if (ref === entry.ref || linked.has(ref) || seen.has(ref)) return;
+      const node = nodesByRef.get(ref);
+      if (!node || node.nodeType === "lorebook") return;
+      const target = targetFor(node);
+      if (!target) return;
+      seen.add(ref);
+      targets.push(target);
+    };
+    // What the entry's text names (the Graph's mention lines), then what it is closest to in meaning.
+    for (const edge of payload.mentionEdges) {
+      if (edge.sourceRef === entry.ref && seen.size < MAX_LINK_TARGETS) offer(edge.targetRef);
+    }
+    const mentioned = seen.size;
+    for (const item of similar.get(entry.id) ?? []) {
+      if (seen.size >= mentioned + MAX_SIMILAR_TARGETS) break;
+      offer(`lore:${item.entryId}`);
+    }
+    linkTargets.set(entry.ref, targets);
+  }
+
+  if ([...linkTargets.values()].some((targets) => targets.length > 0)) {
+    const linksAnswer = await ask(CRAWLER_LINKS_SYSTEM, crawlerLinksPrompt(batch, linkTargets, nameOf, summaryOf));
+    if (linksAnswer.ok) {
+      collectLinks(linksAnswer.parsed.entries as unknown[]);
+    } else if (linksAnswer.aborted) {
+      return { status: "failed", run: null };
+    } else {
+      // The summaries and keys stand on their own; Redo last batch asks for the links again.
+      skipped.push({ name: "Links", why: `not checked: ${linksAnswer.detail}` });
+    }
+  }
+
+  function collectLinks(items: unknown[]) {
+    // Ladders (is_a, member_of, located_in): a target the entry already reaches through a lower rung is dropped.
+    const linksOf = (ref: string) => {
+      const node = nodesByRef.get(ref);
+      if (!node || node.nodeType !== "lore") return [];
+      return Object.entries(node.relationships).map(([key, relation]) => ({
+        ref: parseEntityRef(key)?.ref ?? key,
+        relation: String(relation).trim().toLowerCase(),
+      }));
+    };
+    const reaches = (fromRef: string, relation: string, targetRef: string): boolean => {
+      const seen = new Set([fromRef]);
+      const queue = [fromRef];
+      while (queue.length > 0) {
+        for (const link of linksOf(queue.shift()!)) {
+          if (link.relation !== relation || seen.has(link.ref)) continue;
+          if (link.ref === targetRef) return true;
+          seen.add(link.ref);
+          queue.push(link.ref);
+        }
+      }
+      return false;
+    };
+    const done = new Set<string>();
+    for (const raw of items) {
+      const item = asRecord(raw);
+      const entry = byEntryId.get(cleanText(item.id, 12));
+      if (!entry || done.has(entry.id) || !patches.has(entry.id)) continue;
+      done.add(entry.id);
+      const allowed = new Map((linkTargets.get(entry.ref) ?? []).map((target) => [target.shortId, target.node]));
+      const addLinks: Array<CrawlerLink & { ref: string }> = [];
+      for (const rawLink of Array.isArray(item.links) ? item.links : []) {
+        const link = asRecord(rawLink);
+        const to = cleanText(link.to, 12);
+        const relation = cleanText(link.relation, 30).toLowerCase();
+        const node = allowed.get(to);
+        if (!node || !byShortId.has(to)) {
+          if (to) skipped.push({ name: `${entry.name} → ${to}`, why: "not a listed target" });
+          continue;
+        }
+        if (!CRAWLER_RELATIONS.includes(relation)) {
+          skipped.push({ name: `${entry.name} → ${node.name}`, why: `unknown relation "${relation}"` });
+          continue;
+        }
+        const key = toRelationshipKey(node.ref);
+        if (addLinks.some((existing) => existing.key === key) || addLinks.length >= MAX_LINKS_ADDED) continue;
+        addLinks.push({ key, relation, name: displayName(node), ref: node.ref });
+      }
+      const links = addLinks.filter((link) => {
+        if (!LADDER_RELATIONS.has(link.relation)) return true;
+        const rungs = [
+          ...linksOf(entry.ref)
+            .filter((other) => other.relation === link.relation)
+            .map((other) => other.ref),
+          ...addLinks.filter((other) => other.relation === link.relation).map((other) => other.ref),
+        ];
+        const lower = rungs.find((ref) => ref !== link.ref && reaches(ref, link.relation, link.ref));
+        if (lower) skipped.push({ name: `${entry.name} → ${link.name}`, why: `already under ${nameOf(lower)}` });
+        return !lower;
+      });
+      if (links.length > 0) {
+        patches.get(entry.id)!.addLinks = links.map(({ key, relation, name }) => ({ key, relation, name }));
+      }
+    }
+  }
+
+  const proposalIds: string[] = [];
+  for (const entry of batch) {
+    const patch = patches.get(entry.id);
+    if (!patch || Object.keys(patch).length === 0) continue;
     const proposal = await createProposal(documents, {
       kind: "update_entry",
       lorebookId: entry.lorebookId,

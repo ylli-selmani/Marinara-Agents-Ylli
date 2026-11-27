@@ -8,8 +8,11 @@
 import assert from "node:assert/strict";
 import { createCompendium } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/compendiums-store.js";
 import {
+  CRAWLER_LINKS_SYSTEM,
   CRAWLER_SYSTEM,
   countUntidied,
+  crawlerUserPrompt,
+  neighbourhoodBatch,
   redoLastCrawl,
   runCrawler,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/crawler.js";
@@ -25,6 +28,10 @@ import {
   type LorebookManagerDocumentStore,
   type LorebookManagerRuntimeHost,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
+import type {
+  LmEntryNode,
+  LmGraphPayload,
+} from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/schema.js";
 import {
   DEFAULT_ARCHIVIST_SETTINGS,
   DEFAULT_CRAWLER_SETTINGS,
@@ -138,9 +145,52 @@ const entry = (id: string) => books[0]!.entries.find((item) => item.id === id)!;
 type Answer = (prompt: string) => string;
 
 async function main() {
-  assert.ok(!/part_of/.test(CRAWLER_SYSTEM), "part_of is a person's call (round 6)");
+  assert.ok(!/part_of/.test(CRAWLER_SYSTEM + CRAWLER_LINKS_SYSTEM), "part_of is a person's call (round 6)");
   assert.match(CRAWLER_SYSTEM, /description: REQUIRED/, "a missing summary is required, not optional");
-  assert.match(CRAWLER_SYSTEM, /is_a: A kind, form or instance of/, "a form goes to is_a");
+  assert.match(CRAWLER_LINKS_SYSTEM, /is_a: A kind, form or instance of/, "a form goes to is_a");
+  assert.match(CRAWLER_SYSTEM, /Never remove a proper name, alias or title/, "names stay keys (round 3: Kagetsu)");
+  assert.ok(!CRAWLER_LINKS_SYSTEM.includes("{{relations}}"), "the relations are filled in");
+
+  // The shared-key note starts at two other entries: one namesake (two Kagetsu Clans) is no sign of a broad word.
+  const node = (id: string, keys: string[]) =>
+    ({
+      nodeType: "lore",
+      ref: `lore:${id}`,
+      id,
+      name: id,
+      description: "",
+      tag: "",
+      keys,
+      content: "",
+      constant: false,
+      relationships: {},
+    }) as unknown as LmEntryNode;
+  const shared = crawlerUserPrompt(
+    [node("Kagetsu Clan", ["Kagetsu"]), node("Team Guy", ["Team"])],
+    (ref) => ref,
+    new Map([
+      ["kagetsu", 2],
+      ["team", 4],
+    ]),
+  );
+  assert.match(shared, /keys: Kagetsu\n/, "one namesake: no note");
+  assert.match(shared, /keys: Team \(also a key of 3 other entries\)/);
+
+  // Neighbourhood batches: the first entry in order, then what connects to the batch, then the order again.
+  const [a, b, c, d, e] = ["a", "b", "c", "d", "e"].map((id) => node(id, [id]));
+  const graph = {
+    mentionEdges: [{ kind: "mention", sourceRef: "lore:c", targetRef: "lore:a", relation: "" }],
+    explicitEdges: [{ kind: "explicit", sourceRef: "lore:a", targetRef: "lore:e", relation: "is_a" }],
+  } as unknown as LmGraphPayload;
+  const ids = (list: LmEntryNode[]) => list.map((item) => item.id).join("");
+  assert.equal(ids(neighbourhoodBatch([a!, b!, c!, d!, e!], graph, 3, () => 0)), "ace", "connected either way");
+  assert.equal(ids(neighbourhoodBatch([a!, b!, c!, d!, e!], graph, 4, () => 0)), "aceb", "then the order");
+  assert.equal(
+    ids(neighbourhoodBatch([a!, b!, c!, d!, e!], graph, 3, (item) => (item.id === "e" ? 1 : 0))),
+    "acb",
+    "a tried entry isn't pulled forward",
+  );
+  assert.equal(ids(neighbourhoodBatch([a!, b!], graph, 3, () => 0)), "ab");
   assert.equal(DEFAULT_CRAWLER_SETTINGS.temperature, 0.7, "the Engine agents' default temperature");
   assert.equal(DEFAULT_ARCHIVIST_SETTINGS.temperature, 0.7);
 
@@ -188,7 +238,9 @@ async function main() {
   };
   const release = configureLorebookManagerRuntime(runtime);
   const shortId = (prompt: string, name: string) => new RegExp(`\\[(e\\d+)\\] ${name}\\n`).exec(prompt)?.[1] ?? "e?";
-  const target = (prompt: string, name: string) => new RegExp(`(t\\d+) ${name}(?:;|\\n)`).exec(prompt)?.[1] ?? "t?";
+  const target = (prompt: string, name: string) =>
+    new RegExp(`- (t\\d+) ${name}(?: \\(|:|\\n)`).exec(prompt)?.[1] ?? "t?";
+  const isLinks = (prompt: string) => prompt.includes("\ntargets:\n");
   // Every other entry has its summary and needs nothing: answered with its id alone.
   const rest = (prompt: string, ...skip: string[]) =>
     [...prompt.matchAll(/\[(e\d+)\] ([^\n]+)\n/g)].filter((m) => !skip.includes(m[2]!)).map((m) => ({ id: m[1] }));
@@ -215,9 +267,9 @@ async function main() {
       });
     const first = await runCrawler(compendium.id);
     assert.equal(first.status, "done");
-    const prompt = prompts.at(-1)!;
-    assert.match(prompt, /keys: Shadow \(also a key of 1 other entry\)/, "a shared key says so");
-    assert.match(prompt, /keys: Shadow \(also a key of 1 other entry\), Shadow Step/);
+    const prompt = prompts.filter((p) => !isLinks(p)).at(-1)!;
+    assert.match(prompt, /keys: Shadow\n/, "one other entry sharing a key: no note");
+    assert.ok(prompts.filter(isLinks).length === 1, "the clone's links have their own call");
     assert.deepEqual(first.run!.entryIds?.length, 7, "the run keeps its entries for Redo");
     const skipped = first.run!.skipped.map((item) => `${item.name}: ${item.why}`);
     assert.ok(skipped.includes("Shadow Clone Technique → Jutsu: already under Ninjutsu"), skipped.join(" | "));
@@ -282,6 +334,11 @@ async function main() {
       });
     const redo = await redoLastCrawl(compendium.id);
     assert.equal(redo.status, "done");
+    assert.match(
+      prompts.filter(isLinks).at(-1)!,
+      /\[e1\] Shadow Clone Technique\ndescription: A Ninjutsu that makes solid copies of the user\.\n[\s\S]*- t\d+ Jutsu \(concept\): Ninja techniques\./,
+      "the links call reads the new summary and each target's own",
+    );
     assert.equal(redo.run!.trigger, "redo");
     assert.deepEqual(redo.run!.entryIds, ["clone"]);
     const answered = (await listProposals(documents, "pending")).find(
@@ -343,6 +400,38 @@ async function main() {
       1,
       "an entry on an earlier card isn't listed again",
     );
+
+    // ── Meaning targets: an entry close in meaning is offered though the text never names it. ──
+    const space = "test-space";
+    Object.assign(entry("clone"), { embedding: [1, 0, 0], embeddingSpaceId: space, content: "Copies of the user." });
+    Object.assign(entry("step"), { embedding: [0.95, 0.2, 0], embeddingSpaceId: space });
+    Object.assign(entry("rasengan"), { embedding: [0, 1, 0], embeddingSpaceId: space });
+    const calibration = [
+      [0, 0, 1],
+      [0, 1, 0],
+      [1, 0, 0],
+    ];
+    let embeds = 0;
+    runtime.embeddings = {
+      spaceId: space,
+      label: "fake",
+      async embed(texts) {
+        embeds += 1;
+        return texts.map((_, index) => calibration[index % 3]!);
+      },
+    };
+    for (const waiting of (await listProposals(documents, "pending")).filter((p) => p.kind === "update_entry")) {
+      await dismissProposal(documents, waiting.id);
+    }
+    answer = (p) => JSON.stringify({ entries: [{ id: shortId(p, "Shadow Clone Technique"), description: "Copies." }] });
+    const callsBefore = prompts.length;
+    await runCrawler(compendium.id);
+    const meaning = prompts.slice(callsBefore).find(isLinks) ?? "";
+    assert.match(meaning, /\[e\d+\] Shadow Clone Technique\n/, "this run asked for the clone's links");
+    assert.match(meaning, /- t\d+ Shadow Step \(ability\): A quick step\./, "close in meaning: a target");
+    assert.ok(!/- t\d+ Rasengan/.test(meaning), "far in meaning: not a target");
+    assert.equal(embeds, 1, "only the calibration texts are embedded, once");
+    delete runtime.embeddings;
   } finally {
     resetLiveClaims();
     release();

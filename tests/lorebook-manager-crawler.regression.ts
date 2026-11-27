@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { createCompendium } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/compendiums-store.js";
 import {
+  CRAWLER_LINKS_SYSTEM,
   CRAWLER_SYSTEM,
   countUntidied,
   crawlAfterArchivist,
@@ -90,9 +91,12 @@ type Answer = (prompt: string) => string | Error;
 async function main() {
   assert.equal(crawlHash({ name: "A", content: "x" }), crawlHash({ name: "A", content: "x" }));
   assert.notEqual(crawlHash({ name: "A", content: "x" }), crawlHash({ name: "A", content: "y" }));
-  assert.ok(!CRAWLER_SYSTEM.includes("represents"), "the Crawler never writes represents links");
-  assert.ok(!CRAWLER_SYSTEM.includes("related_to"), "the Crawler never writes related_to links (round 5)");
-  assert.match(CRAWLER_SYSTEM, /member_of: Belongs to a group/, "each relation comes with the UI's hint");
+  for (const system of [CRAWLER_SYSTEM, CRAWLER_LINKS_SYSTEM]) {
+    assert.ok(!system.includes("represents"), "the Crawler never writes represents links");
+    assert.ok(!system.includes("related_to"), "the Crawler never writes related_to links (round 5)");
+  }
+  assert.match(CRAWLER_LINKS_SYSTEM, /member_of: Belongs to a group/, "each relation comes with the UI's hint");
+  assert.ok(!/member_of|links/.test(CRAWLER_SYSTEM), "links have their own call (round 3)");
 
   const documents = makeMemoryDocStore();
   const prompts: string[] = [];
@@ -146,6 +150,9 @@ async function main() {
   };
   const release = configureLorebookManagerRuntime(runtime);
   const shortId = (prompt: string, name: string) => new RegExp(`\\[(e\\d+)\\] ${name}\\n`).exec(prompt)?.[1] ?? "e?";
+  const isLinks = (prompt: string) => prompt.includes("\ntargets:\n");
+  const tidyPrompt = () => prompts.filter((p) => !isLinks(p)).at(-1)!;
+  const linksPrompt = () => prompts.filter(isLinks).at(-1)!;
   try {
     const compendium = await createCompendium(documents, { name: "Fae", lorebookIds: ["court"] });
 
@@ -156,7 +163,7 @@ async function main() {
     answer = (prompt) => {
       const syl = shortId(prompt, "Syliveera");
       const court = shortId(prompt, "Unseelie Court");
-      const target = /targets: (t\d+) Unseelie Court/.exec(prompt)?.[1] ?? "t?";
+      const target = /- (t\d+) Unseelie Court/.exec(prompt)?.[1] ?? "t?";
       return JSON.stringify({
         entries: [
           {
@@ -180,21 +187,27 @@ async function main() {
     };
     const first = await runCrawler(compendium.id);
     assert.equal(first.status, "done");
-    const prompt = prompts.at(-1)!;
+    const prompt = tidyPrompt();
+    const links = linksPrompt();
+    assert.equal(prompts.length, 2, "one call for summaries and keys, one for links");
     assert.ok(!prompt.includes("Thorn Gate never opens"), "a locked entry isn't sent");
+    assert.ok(!links.includes("Thorn Gate never opens"), "a locked entry isn't sent");
     assert.ok(prompt.indexOf("Syliveera") < prompt.indexOf("Unseelie Court rules"), "missing summary and tag first");
-    assert.match(prompt, /targets: t\d+ Unseelie Court/, "the entry's mentions are its link targets");
-    assert.ok(!/targets: [^\n]*Thorn Gate/.test(prompt), "an existing link isn't offered again");
+    assert.ok(!prompt.includes("targets:"), "the first call has no link targets");
+    assert.match(prompt, /\[e1\] Syliveera\n[^[]*links: \(none\)/, "a related_to link isn't shown (round 3)");
+    assert.match(
+      links,
+      /targets:\n- t\d+ Unseelie Court \(faction\): The night court of the fae\./,
+      "the entry's mentions are its link targets, each with its summary (a fresh one from the first call too)",
+    );
+    assert.match(links, /\[e1\] Syliveera\ndescription: A fae knight of the Unseelie Court\./, "the new summary");
+    assert.ok(!/- t\d+ Thorn Gate/.test(links), "an existing link isn't offered again");
+    assert.ok(!links.includes("[e2] Unseelie Court"), "an entry without targets isn't in the links call");
     assert.equal(first.run!.entryCount, 2);
     assert.equal(first.run!.proposals, 2);
     assert.deepEqual(
       first.run!.skipped.map((item) => item.why).sort(),
-      [
-        "not a mentioned target",
-        "unknown entry",
-        'unknown relation "represents"',
-        'unknown relation "related_to"',
-      ].sort(),
+      ["not a listed target", "unknown entry", 'unknown relation "represents"', 'unknown relation "related_to"'].sort(),
     );
 
     const pending = (await listProposals(documents, "pending")).filter((p) => p.source === "crawler");
@@ -375,6 +388,28 @@ async function main() {
     });
     await applyProposal(runtime, strip.id);
     assert.deepEqual(entry("syliveera").keys, ["Syliveera"], "the entry's own name stays a key");
+
+    // ── A failed links call keeps the first call's suggestions and says so. ──
+    for (const waiting of (await listProposals(documents, "pending")).filter((p) => p.source === "crawler")) {
+      await dismissProposal(documents, waiting.id);
+    }
+    entry("unseelie").content = "The Unseelie Court rules the night beyond the Thorn Gate.";
+    answer = (text) =>
+      isLinks(text)
+        ? "not json"
+        : JSON.stringify({ entries: [{ id: shortId(text, "Unseelie Court"), addKeys: ["Night Court"] }] });
+    const linksFailed = await runCrawler(compendium.id);
+    assert.equal(linksFailed.status, "done");
+    assert.ok(
+      linksFailed.run!.skipped.some(
+        (item) => item.name === "Links" && item.why === "not checked: The model's answer wasn't readable",
+      ),
+      "the failed links call is named",
+    );
+    const keysKept = (await listProposals(documents, "pending")).find(
+      (p) => p.source === "crawler" && p.targetEntryId === "unseelie",
+    )!;
+    assert.deepEqual(keysKept.patch, { addKeys: ["Night Court"] }, "the keys stand without the links");
 
     const runs = await listCrawlerRuns();
     assert.ok(runs.length >= 6 && runs.some((run) => run.trigger === "after_archivist"), "runs recorded");

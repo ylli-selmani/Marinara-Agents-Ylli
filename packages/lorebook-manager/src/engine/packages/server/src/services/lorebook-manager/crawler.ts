@@ -300,6 +300,39 @@ export async function countUntidied(compendiumId: string): Promise<number> {
   return untidied(payload, compendium, state, pending).length;
 }
 
+/**
+ * The Graph's "Not tidied" marker: entries of these books that no Compendium's Crawler has seen as they are now.
+ * Locked entries and entries with a Crawler suggestion waiting in Review aren't listed (nothing for Tidy to do).
+ */
+export async function untidiedEntryIds(lorebookIds: readonly string[]): Promise<string[]> {
+  if (lorebookIds.length === 0) return [];
+  const documents = getLorebookManagerRuntime().persistence.documents;
+  const [payload, stateDocs, pending] = await Promise.all([
+    buildLorebookManagerGraphPayload({ lorebookIds: new Set(lorebookIds), onlyRequested: true, skipMentions: true }),
+    documents.list(LOREBOOK_MANAGER_PACKAGE_ID, CRAWLER_STATE_DOC_KIND),
+    listProposals(documents, "pending"),
+  ]);
+  const waiting = new Set(
+    pending.filter((proposal) => proposal.source === "crawler").map((proposal) => proposal.targetEntryId),
+  );
+  const tidiedAs = new Map<string, Set<string>>();
+  for (const doc of stateDocs) {
+    const crawled = (doc.data as { crawled?: unknown } | undefined)?.crawled;
+    if (!crawled || typeof crawled !== "object" || Array.isArray(crawled)) continue;
+    for (const [id, hash] of Object.entries(crawled as Record<string, unknown>)) {
+      if (typeof hash !== "string") continue;
+      let hashes = tidiedAs.get(id);
+      if (!hashes) tidiedAs.set(id, (hashes = new Set()));
+      hashes.add(hash);
+    }
+  }
+  const books = new Set(lorebookIds);
+  return payload.nodes
+    .filter((node): node is LmEntryNode => node.nodeType === "lore" && books.has(node.lorebookId))
+    .filter((entry) => !entry.locked && !waiting.has(entry.id) && !tidiedAs.get(entry.id)?.has(crawlHash(entry)))
+    .map((entry) => entry.id);
+}
+
 // ── The prompts (their text is in shared prompts.ts; Settings → Prompts can edit the instructions) ──
 
 /** The built-in prompts as sent. */

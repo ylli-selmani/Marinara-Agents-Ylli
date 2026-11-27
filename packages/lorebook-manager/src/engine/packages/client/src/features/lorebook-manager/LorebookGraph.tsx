@@ -47,7 +47,8 @@ import {
   type LmGraphNode,
   type LmGraphPayload,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
-import type { LmEntryPatch } from "./api";
+import { useQuery } from "@tanstack/react-query";
+import { fetchUntidiedEntryIds, lmQueryKeys, type LmEntryPatch } from "./api";
 import { EntryReaderModal } from "./EntryReaderModal";
 import { GraphInspector } from "./GraphInspector";
 import type { SimGraphHighlight } from "./SimulatePanel";
@@ -333,6 +334,8 @@ type GraphNodeViewProps = {
   pinned: boolean;
   simRole?: "direct" | "1hop" | "suppressed" | "seed";
   dimmedBySim?: boolean;
+  /** Picked by the toolbar's Mark select (Not tidied, No ID links). */
+  marked?: boolean;
   showLabel: boolean;
   actions: NodeActions;
 };
@@ -346,6 +349,7 @@ const GraphNodeView = memo(function GraphNodeView({
   pinned,
   simRole,
   dimmedBySim,
+  marked,
   showLabel,
   actions,
 }: GraphNodeViewProps) {
@@ -423,6 +427,18 @@ const GraphNodeView = memo(function GraphNodeView({
           strokeWidth={2}
           strokeDasharray={simRole === "suppressed" || simRole === "seed" ? "3 2" : undefined}
           vectorEffect="non-scaling-stroke"
+        />
+      ) : null}
+
+      {marked ? (
+        <circle
+          r={radius + 6}
+          fill="none"
+          stroke="var(--primary)"
+          strokeWidth={2}
+          strokeDasharray="2 2"
+          vectorEffect="non-scaling-stroke"
+          data-lm-graph-marked
         />
       ) : null}
 
@@ -522,6 +538,8 @@ const GraphNodeView = memo(function GraphNodeView({
   );
 });
 
+type GraphMark = "none" | "untidied" | "unlinked";
+
 export interface LorebookGraphProps {
   payload: LmGraphPayload;
   selectedLorebookIds: ReadonlySet<string>;
@@ -573,6 +591,31 @@ export function LorebookGraph({
   const [showExplicit, setShowExplicit] = useState(true);
   const [showMentions, setShowMentions] = useState(true);
   const [hideOrphans, setHideOrphans] = useState(false);
+  const [mark, setMark] = useState<GraphMark>("none");
+  const shownBookIds = useMemo(() => [...selectedLorebookIds].sort(), [selectedLorebookIds]);
+  const untidiedQuery = useQuery({
+    queryKey: lmQueryKeys.crawlerUntidied(shownBookIds.join(",")),
+    queryFn: () => fetchUntidiedEntryIds(shownBookIds),
+    enabled: mark === "untidied" && shownBookIds.length > 0,
+  });
+  /** Entries with no ID link either way (a mention isn't one). */
+  const unlinkedRefs = useMemo(() => {
+    const linked = new Set<string>();
+    for (const edge of payload.explicitEdges) {
+      linked.add(edge.sourceRef);
+      linked.add(edge.targetRef);
+    }
+    return new Set(
+      payload.nodes
+        .filter((node) => node.nodeType === "lore" && selectedLorebookIds.has(node.lorebookId) && !linked.has(node.ref))
+        .map((node) => node.ref),
+    );
+  }, [payload.explicitEdges, payload.nodes, selectedLorebookIds]);
+  const markedRefs = useMemo<ReadonlySet<string> | null>(() => {
+    if (mark === "unlinked") return unlinkedRefs;
+    if (mark === "untidied") return untidiedQuery.data ? new Set(untidiedQuery.data.map((id) => `lore:${id}`)) : null;
+    return null;
+  }, [mark, unlinkedRefs, untidiedQuery.data]);
   const [layoutSpread, setLayoutSpread] = useState(1);
   const [pinnedPositions, setPinnedPositions] = useState<Record<string, GraphPoint>>({});
   const [focusPick, setFocusPick] = useState<string | null>(null);
@@ -1130,7 +1173,11 @@ export function LorebookGraph({
                   ? "seed"
                   : undefined
           : undefined;
-        const dimmedBySim = Boolean(simHighlight && !hoverRef && !simRole);
+        const marked = markedRefs?.has(node.ref) ?? false;
+        // The Mark select dims the other entries; books, cards and personas stay as they are.
+        const dimmedBySim =
+          Boolean(simHighlight && !hoverRef && !simRole) ||
+          Boolean(markedRefs && !simHighlight && !hoverRef && node.nodeType === "lore" && !marked);
         return (
           <GraphNodeView
             key={node.ref}
@@ -1142,6 +1189,7 @@ export function LorebookGraph({
             pinned={node.ref in pinnedPositions}
             simRole={simRole}
             dimmedBySim={dimmedBySim}
+            marked={marked}
             showLabel={
               labelEveryNode || Boolean(simRole) || node.ref === focusRef || selected || lit || node.nodeType !== "lore"
             }
@@ -1161,6 +1209,7 @@ export function LorebookGraph({
       focusRef,
       labelEveryNode,
       nodeActions,
+      markedRefs,
     ],
   );
 
@@ -1712,6 +1761,21 @@ export function LorebookGraph({
             <EyeOff aria-hidden="true" size="0.875rem" />
             Hide unlinked
           </button>
+          <select
+            aria-label="Mark entries"
+            title="Ring the entries that still need the Crawler or a link"
+            value={mark}
+            onChange={(event) => setMark(event.target.value as GraphMark)}
+            className="mari-chrome-field h-7 rounded px-1.5 text-xs text-[var(--foreground)]"
+          >
+            <option value="none">Mark: nothing</option>
+            <option value="untidied">
+              {mark === "untidied" && untidiedQuery.data
+                ? `Mark: not tidied (${untidiedQuery.data.length})`
+                : "Mark: not tidied"}
+            </option>
+            <option value="unlinked">{`Mark: no ID links (${unlinkedRefs.size})`}</option>
+          </select>
 
           <span aria-hidden="true" data-lm-graph-divider />
 

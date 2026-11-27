@@ -29,7 +29,14 @@ import {
   type UpdateCompendiumInput,
 } from "./compendiums-store.js";
 import { listArchivistRuns, runArchivist, runInBackgroundQueue } from "./archivist.js";
-import { countUntidied, crawlAfterArchivist, listCrawlerRuns, redoLastCrawl, runCrawler } from "./crawler.js";
+import {
+  countUntidied,
+  crawlAfterArchivist,
+  listCrawlerRuns,
+  redoLastCrawl,
+  runCrawler,
+  untidiedEntryIds,
+} from "./crawler.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { clearLiveRuns, listLiveRuns } from "./live-retrieval.js";
 import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
@@ -500,6 +507,23 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.get("/crawler/runs", async (_request, reply) => {
     try {
       return { runs: await listCrawlerRuns() };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  // The Graph's "Not tidied" marker, for the books it shows.
+  app.get("/crawler/untidied", async (request, reply) => {
+    try {
+      const raw = (request.query as { lorebookIds?: unknown } | undefined)?.lorebookIds;
+      const lorebookIds =
+        typeof raw === "string"
+          ? raw
+              .split(",")
+              .map((id) => id.trim())
+              .filter(Boolean)
+          : [];
+      return { entryIds: await untidiedEntryIds(lorebookIds) };
     } catch (error) {
       return sendRouteError(reply, error);
     }

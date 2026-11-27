@@ -38,6 +38,7 @@ export const lmQueryKeys = {
   archivistRuns: ["lorebook-manager", "archivist-runs"] as const,
   crawlerRuns: ["lorebook-manager", "crawler-runs"] as const,
   crawlerPending: (compendiumId: string) => ["lorebook-manager", "crawler-pending", compendiumId] as const,
+  crawlerUntidied: (scopeKey: string) => ["lorebook-manager", "crawler-untidied", scopeKey] as const,
   proposalsRoot: ["lorebook-manager", "proposals"] as const,
   proposals: (status: LmProposalStatus) => ["lorebook-manager", "proposals", status] as const,
   semanticScores: (scopeKey: string, queryText: string) =>
@@ -311,6 +312,14 @@ export async function redoCrawlerApi(
   });
   if (!response.ok) throw new Error(await readErrorMessage(response));
   return (await response.json()) as { status: string; run: LmCrawlerRunRecord | null; detail: string | null };
+}
+
+/** Entry ids of these books that no Compendium has tidied yet (the Graph's "Not tidied" marker). */
+export async function fetchUntidiedEntryIds(lorebookIds: readonly string[]): Promise<string[]> {
+  const payload = await readJson<{ entryIds?: unknown }>(
+    `/crawler/untidied?lorebookIds=${encodeURIComponent(lorebookIds.join(","))}`,
+  );
+  return Array.isArray(payload.entryIds) ? payload.entryIds.filter((id): id is string => typeof id === "string") : [];
 }
 
 export async function fetchCrawlerPending(compendiumId: string): Promise<number> {

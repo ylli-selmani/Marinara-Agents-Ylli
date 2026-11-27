@@ -15,6 +15,7 @@ import {
   neighbourhoodBatch,
   redoLastCrawl,
   runCrawler,
+  untidiedEntryIds,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/crawler.js";
 import { resetLiveClaims } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-claims.js";
 import {
@@ -432,6 +433,16 @@ async function main() {
     assert.ok(!/- t\d+ Rasengan/.test(meaning), "far in meaning: not a target");
     assert.equal(embeds, 1, "only the calibration texts are embedded, once");
     delete runtime.embeddings;
+
+    // ── The Graph's "Not tidied" marker: tidied and waiting entries aren't listed; an edit lists one again. ──
+    let notTidied = await untidiedEntryIds(["ninja"]);
+    assert.ok(!notTidied.includes("sharingan"), "tidied in run 1");
+    assert.ok(!notTidied.includes("clone"), "its suggestion waits in Review");
+    assert.ok(notTidied.includes("jutsu"), "left out of the last answers");
+    entry("sharingan").content = "The Sharingan copies techniques and sees through illusions.";
+    notTidied = await untidiedEntryIds(["ninja"]);
+    assert.ok(notTidied.includes("sharingan"), "an edit untidies it");
+    assert.deepEqual(await untidiedEntryIds([]), []);
   } finally {
     resetLiveClaims();
     release();

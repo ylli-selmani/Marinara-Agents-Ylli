@@ -82,6 +82,11 @@ export function parseSheetLines(content: string): Array<{ field: string; value: 
   });
 }
 
+export function missingSheetFields(content: string, family: unknown, overrides?: LmSheetOverrides): string[] {
+  const present = new Set(parseSheetLines(content).map((line) => line.field.toLowerCase()));
+  return sheetFields(family, overrides).filter((field) => !present.has(field.toLowerCase()));
+}
+
 export function sheetFieldEdits(
   content: string,
   template: readonly string[],

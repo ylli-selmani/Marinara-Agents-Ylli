@@ -12,8 +12,12 @@ import {
   countUntidied,
   crawlAfterArchivist,
   crawlHash,
+  crawlerUserPrompt,
+  groundedSheetValue,
   listCrawlerRuns,
+  redoLastCrawl,
   runCrawler,
+  untidiedEntryIds,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/crawler.js";
 import { resetLiveClaims } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-claims.js";
 import {
@@ -29,6 +33,8 @@ import {
   type LorebookManagerRuntimeHost,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/package-runtime.js";
 import { saveSettings } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/settings-store.js";
+import { missingSheetFields } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/sheets.js";
+import type { LmEntryNode } from "../packages/lorebook-manager/src/engine/packages/shared/src/features/agents/lorebook-manager/schema.js";
 
 function makeMemoryDocStore(): LorebookManagerDocumentStore {
   const docs = new Map<string, LorebookManagerDocumentRecord>();
@@ -429,6 +435,197 @@ async function main() {
     assert.ok(
       runs.every((run) => run.trigger === "manual" || run.status === "done"),
       "an after-Archivist run with nothing to do isn't recorded",
+    );
+
+    // Sheet fills use only the entry's text and remain tidied after Apply.
+    const prose = "Kakashi is the leader of Team 7 and a jōnin of the Leaf.";
+    assert.ok(groundedSheetValue("jonin", prose.normalize("NFD")), "NFD and accent-free values match");
+    assert.ok(groundedSheetValue("leader of Team 7", prose));
+    assert.ok(!groundedSheetValue("leader of Team 9", prose), "numbers must match whole tokens");
+    assert.ok(!groundedSheetValue("7", "Team 70"));
+    assert.ok(!groundedSheetValue("leaf", "Leaflet"), "words must match whole tokens");
+    assert.ok(groundedSheetValue("leader skilled jonin", prose), "two thirds of the words suffice");
+    assert.ok(!groundedSheetValue("leader skilled veteran", prose));
+    assert.ok(!groundedSheetValue("the and of", prose));
+    for (const placeholder of ["Unknown", "none", "n/a", "unspecified", "unstated", "-", "—"]) {
+      assert.ok(!groundedSheetValue(placeholder, placeholder), `placeholder ${placeholder} is refused`);
+    }
+    assert.ok(groundedSheetValue("木ノ葉の忍", "彼は木ノ葉の忍です。"));
+    assert.ok(!groundedSheetValue("砂の忍", "彼は木ノ葉の忍です。"));
+    assert.ok(!missingSheetFields("rOlE: \nAge: 30", "character").includes("Role"));
+    assert.deepEqual(missingSheetFields(prose, "lore", { lore: ["Role"] }), []);
+    assert.deepEqual(missingSheetFields("role: leader", "character", { character: ["Role", "Rank"] }), ["Rank"]);
+
+    const sheetEntries: Array<Record<string, unknown>> = [
+      { id: "kakashi", name: "Kakashi", tag: "character", content: prose },
+      { id: "cjk", name: "忍者", tag: "character", content: "彼は木ノ葉の忍です。" },
+      { id: "half", name: "Veteran", tag: "character", content: "A jōnin.\nrOlE: teacher" },
+      { id: "lore", name: "History", tag: "lore", content: "A history of the village." },
+    ].map((item) => ({ ...item, description: "Already summarized.", keys: [item.name], matchWholeWords: true }));
+    books.push({ id: "sheets", data: { name: "Sheets", category: "world" }, entries: sheetEntries });
+    const sheetEntry = (id: string) => sheetEntries.find((item) => item.id === id)!;
+    const sheets = { character: ["Role", "Rank", "Affiliation", "Age", "Status"] };
+    await saveSettings(documents, { sheets });
+    await createCompendium(documents, { name: "Other sheet owner", lorebookIds: ["sheets"] });
+    const sheetCompendium = await createCompendium(documents, { name: "Sheets", lorebookIds: ["sheets"] });
+    const fills: Record<string, Array<{ field: string; value: string }>> = {
+      Kakashi: [
+        { field: "Role", value: "leader of Team 7" },
+        { field: "Rank", value: "jonin" },
+        { field: "Affiliation", value: "Team 9" },
+        { field: "Age", value: "30" },
+        { field: "Status", value: "Unknown" },
+      ],
+      忍者: [
+        { field: "Role", value: "木ノ葉の忍" },
+        { field: "Rank", value: "木ノ葉" },
+        { field: "Affiliation", value: "砂の忍" },
+      ],
+      Veteran: [
+        { field: "Role", value: "jonin" },
+        { field: "Rank", value: "jonin" },
+      ],
+      History: [{ field: "Role", value: "history" }],
+    };
+    answer = (text) =>
+      JSON.stringify({
+        entries: [...text.matchAll(/^\[(e\d+)\] (.+)$/gm)].map((match) => ({
+          id: match[1],
+          ...(isLinks(text) ? {} : { fields: fills[match[2]!] ?? [] }),
+        })),
+      });
+    const filled = await runCrawler(sheetCompendium.id);
+    assert.equal(filled.status, "done");
+    const blocks = tidyPrompt().split(/\n\n/u);
+    assert.match(
+      blocks.find((block) => block.includes("] Kakashi\n"))!,
+      /tag: character\nmissing sheet lines: Role, Rank, Affiliation, Age, Status\n/,
+    );
+    assert.match(
+      blocks.find((block) => block.includes("] Veteran\n"))!,
+      /missing sheet lines: Rank, Affiliation, Age, Status\n/,
+    );
+    assert.ok(!blocks.find((block) => block.includes("] History\n"))!.includes("missing sheet lines:"));
+    assert.deepEqual(
+      filled.run!.skipped,
+      [
+        { name: "Kakashi · Affiliation", why: "not in the entry's text" },
+        { name: "Kakashi · Age", why: "not in the entry's text" },
+        { name: "Kakashi · Status", why: "not in the entry's text" },
+        { name: "忍者 · Affiliation", why: "not in the entry's text" },
+      ],
+      "invented values and placeholders are reported",
+    );
+    const sheetPending = async () =>
+      (await listProposals(documents, "pending")).filter((p) => p.lorebookId === "sheets");
+    const kakashiProposal = (await sheetPending()).find((p) => p.targetEntryId === "kakashi")!;
+    assert.deepEqual(
+      kakashiProposal.patch,
+      {
+        fieldEdits: [
+          { field: "Role", from: null, to: "leader of Team 7" },
+          { field: "Rank", from: null, to: "jonin" },
+        ],
+      },
+      "a proposal containing only field edits is kept",
+    );
+    const redone = await redoLastCrawl(sheetCompendium.id);
+    assert.equal(redone.status, "done");
+    assert.equal((await listProposals(documents)).find((p) => p.id === kakashiProposal.id)!.status, "dismissed");
+    const replacement = (await sheetPending()).find((p) => p.targetEntryId === "kakashi")!;
+    assert.notEqual(replacement.id, kakashiProposal.id);
+    assert.deepEqual(replacement.patch, kakashiProposal.patch, "Redo replaces a pending fieldEdits proposal");
+    await applyProposal(runtime, replacement.id);
+    assert.equal(sheetEntry("kakashi").content, `${prose}\nRole: leader of Team 7\nRank: jonin`);
+    assert.equal(await countUntidied(sheetCompendium.id), 0, "Crawler fills stay tidied after Apply");
+    assert.deepEqual(await untidiedEntryIds(["sheets"]), []);
+
+    // A hand-filled line stays; another missing line can still be applied, but the edit needs another tidy pass.
+    const halfProposal = (await sheetPending()).find((p) => p.targetEntryId === "half")!;
+    sheetEntry("half").content += "\nRANK: written by hand";
+    await assert.rejects(applyProposal(runtime, halfProposal.id), /Nothing is left to apply/);
+    assert.match(String(sheetEntry("half").content), /RANK: written by hand$/);
+    await dismissProposal(documents, halfProposal.id);
+    const cjkProposal = (await sheetPending()).find((p) => p.targetEntryId === "cjk")!;
+    sheetEntry("cjk").content += "\nRole: written by hand";
+    const cjkApplied = await applyProposal(runtime, cjkProposal.id);
+    assert.match(String(sheetEntry("cjk").content), /Role: written by hand\nRank: 木ノ葉$/);
+    assert.deepEqual(cjkApplied.patch.fieldEdits, [{ field: "Rank", from: null, to: "木ノ葉" }]);
+    assert.equal(await countUntidied(sheetCompendium.id), 2, "a concurrent content edit still untidies the entry");
+    assert.deepEqual((await untidiedEntryIds(["sheets"])).sort(), ["cjk", "half"]);
+
+    const graphEntry = (content: string, family: LmEntryNode["family"]) => ({ name: "Hash", content, family });
+    const legacyHash = (name: string, content: string) => {
+      let hash = 0x811c9dc5;
+      for (const char of `4\n${name}\n${content}`) hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193);
+      return (hash >>> 0).toString(36);
+    };
+    assert.equal(crawlHash(graphEntry(prose, "lore"), sheets), legacyHash("Hash", prose), "lore stays on version 4");
+    assert.equal(
+      crawlHash(graphEntry("Role: leader", "character"), { character: ["Role"] }),
+      legacyHash("Hash", "Role: leader"),
+    );
+    assert.notEqual(
+      crawlHash(graphEntry(prose, "character"), sheets),
+      legacyHash("Hash", prose),
+      "tagging a prose entry exposes sheet gaps",
+    );
+    assert.equal(
+      crawlHash({ ...graphEntry(prose, "lore"), inferredFamily: "character" }, sheets),
+      crawlHash(graphEntry(prose, "character"), sheets),
+    );
+    const completeNode = {
+      ...sheetEntry("half"),
+      family: "character",
+      inferredFamily: null,
+      keys: [],
+      relationships: {},
+    } as unknown as LmEntryNode;
+    assert.ok(
+      !crawlerUserPrompt([completeNode], (ref) => ref, new Map(), { character: ["Role", "Rank"] }).includes(
+        "missing sheet lines:",
+      ),
+    );
+
+    // The six-fill cap runs after grounding, so rejected values do not consume places.
+    await saveSettings(documents, { sheets: { character: [] } });
+    fills.Veteran = [{ field: "Status", value: "teacher" }];
+    const noTemplate = await runCrawler(sheetCompendium.id, { entryIds: ["half"] });
+    assert.equal(noTemplate.run!.proposals, 0, "fields are ignored when the entry misses nothing");
+    await saveSettings(documents, {
+      sheets: { character: ["Bad", "One", "Two", "Three", "Four", "Five", "Six", "Seven"] },
+    });
+    fills.Veteran = ["Bad", "One", "Two", "Three", "Four", "Five", "Six", "Seven"].map((field) => ({
+      field,
+      value: field === "Bad" ? "invented" : "teacher",
+    }));
+    const capped = await runCrawler(sheetCompendium.id, { entryIds: ["half"] });
+    assert.deepEqual(capped.run!.skipped, [{ name: "Veteran · Bad", why: "not in the entry's text" }]);
+    const cappedProposal = (await sheetPending()).find((p) => p.targetEntryId === "half")!;
+    assert.equal((cappedProposal.patch.fieldEdits as unknown[]).length, 6);
+    await applyProposal(runtime, cappedProposal.id);
+    assert.equal(
+      await countUntidied(sheetCompendium.id),
+      1,
+      "fills use settings overrides in both pre- and post-apply hashes",
+    );
+    await saveSettings(documents, { sheets: { character: ["Role"] } });
+    sheetEntries.push({
+      id: "complete",
+      name: "Teacher",
+      tag: "character",
+      description: "Already summarized.",
+      keys: ["Teacher"],
+      matchWholeWords: true,
+      content: "An instructor.",
+    });
+    fills.Teacher = [{ field: "Role", value: "instructor" }];
+    await runCrawler(sheetCompendium.id, { entryIds: ["complete"] });
+    const completeProposal = (await sheetPending()).find((p) => p.targetEntryId === "complete")!;
+    await applyProposal(runtime, completeProposal.id);
+    assert.ok(
+      !(await untidiedEntryIds(["sheets"])).includes("complete"),
+      "finishing a sheet advances its hash from version 5 to 4",
     );
   } finally {
     resetLiveClaims();

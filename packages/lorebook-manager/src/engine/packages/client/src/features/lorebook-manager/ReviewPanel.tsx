@@ -496,6 +496,10 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
       draftCache.delete(draftKey(proposal));
       toast.success(decision === "apply" ? "Change applied" : "Suggestion dismissed");
       await queryClient.invalidateQueries({ queryKey: lmQueryKeys.proposalsRoot });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["lorebook-manager", "crawler-pending"] }),
+        queryClient.invalidateQueries({ queryKey: ["lorebook-manager", "crawler-untidied"] }),
+      ]);
       if (decision === "apply") await queryClient.invalidateQueries({ queryKey: lmQueryKeys.graphRoot });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update the suggestion");

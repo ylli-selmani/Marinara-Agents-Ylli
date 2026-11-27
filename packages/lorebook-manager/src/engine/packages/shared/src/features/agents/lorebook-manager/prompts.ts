@@ -58,6 +58,9 @@ const TIDY_INSTRUCTIONS = [
   "out only where the entry has one already.",
   "tag: one or two lowercase words for its kind (character, location, item, faction, species, ability, event,",
   "concept, ...). Only if the entry has none.",
+  'fields: for an entry with "missing sheet lines", the ones its own text clearly states, as {"field", "value"};',
+  "value is a short single line copied or condensed from the text. Never guess, never use outside knowledge of the",
+  'story, never "Unknown"; leave a field out when the text doesn\'t say it.',
   "",
   "Everything else: only what is clearly missing or wrong. Most entries need few or no keyword changes.",
   "",
@@ -78,7 +81,7 @@ const TIDY_INSTRUCTIONS = [
 const TIDY_FORMAT = [
   "Answer with JSON only:",
   '{"entries": [{"id": "e1", "description": "...", "tag": "...", "addKeys": ["..."], "removeKeys": ["..."],',
-  '"constant": false}]}',
+  '"constant": false, "fields": [{"field": "...", "value": "..."}]}]}',
 ].join("\n");
 
 const LINKS_INSTRUCTIONS = [

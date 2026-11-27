@@ -15,6 +15,12 @@ import type {
   LmGraphPayload,
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
+import {
+  missingSheetFields,
+  sheetFieldEdits,
+  sheetFields,
+  type LmSheetOverrides,
+} from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
 import { backgroundModelSignal, runInBackgroundQueue } from "./archivist.js";
 import { getCompendium, listCompendiums, LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import { compendiumForChat } from "./live-claims.js";
@@ -65,6 +71,25 @@ const LADDER_RELATIONS = new Set(["is_a", "member_of", "located_in"]);
 const MAX_SUMMARY_TRIES = 2;
 /** Scripts with no spaces between words: whole words would stop such a key from matching inside a sentence. */
 const NO_WORD_GAPS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u;
+const FIELD_STOPWORDS = new Set("a an the of and or in on at to for with by from is was".split(" "));
+
+/** A sheet fill must use the entry's own words, with every number accounted for. */
+export function groundedSheetValue(value: string, content: string): boolean {
+  const normalize = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  const normalized = normalize(value).trim();
+  if (/^(?:unknown|none|n\/a|unspecified|unstated|-|—)$/u.test(normalized)) return false;
+  const source = normalize(content);
+  if (NO_WORD_GAPS.test(value)) {
+    return Boolean(normalized) && source.replace(/\s/gu, "").includes(normalized.replace(/\s/gu, ""));
+  }
+  const tokens = (normalized.match(/[\p{L}\p{N}]+/gu) ?? []).filter((token) => !FIELD_STOPWORDS.has(token));
+  const known = new Set(source.match(/[\p{L}\p{N}]+/gu) ?? []);
+  return (
+    tokens.length > 0 &&
+    tokens.every((token) => !/\p{N}/u.test(token) || known.has(token)) &&
+    tokens.filter((token) => known.has(token)).length * 3 >= tokens.length * 2
+  );
+}
 const AFTER_ARCHIVIST_WAIT_MS = 20_000;
 /** A steady stream of Applies can't hold the run back longer than this after the first one. */
 const AFTER_ARCHIVIST_MAX_WAITS = 3;
@@ -75,13 +100,20 @@ const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
 /**
  * Bumped when the Crawler's rules change enough to look again: every entry is untidied once (2: round 5's prompt, with
  * key removal, "always on" and no related_to; 3: round 6, summaries required, no part_of, key swaps; 4: tuning round 3,
- * links in their own call with target summaries, names never removed as keys). Costs nothing until Tidy entries runs.
+ * links in their own call with target summaries, names never removed as keys; 5: grounded sheet fills, only for entries
+ * with missing sheet lines; prose families and complete sheets stay at 4). Costs nothing until Tidy entries runs.
  */
 const CRAWLER_RULES_VERSION = 4;
 
+type CrawlEntry = Pick<LmEntryNode, "name" | "content"> & Partial<Pick<LmEntryNode, "family" | "inferredFamily">>;
+
 /** What the model read of an entry: its name and content, under these rules. A change to either untidies it again. */
-export function crawlHash(entry: Pick<LmEntryNode, "name" | "content">): string {
-  const text = `${CRAWLER_RULES_VERSION}\n${entry.name}\n${entry.content}`;
+export function crawlHash(entry: CrawlEntry, sheets?: LmSheetOverrides): string {
+  const version =
+    missingSheetFields(entry.content, entry.inferredFamily ?? entry.family, sheets).length > 0
+      ? 5
+      : CRAWLER_RULES_VERSION;
+  const text = `${version}\n${entry.name}\n${entry.content}`;
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index++) {
     hash ^= text.charCodeAt(index);
@@ -100,9 +132,9 @@ interface CrawlerState {
 }
 
 /** Tries for the entry as it is now. */
-function triesOf(state: CrawlerState, entry: LmEntryNode): number {
+function triesOf(state: CrawlerState, entry: LmEntryNode, sheets?: LmSheetOverrides): number {
   const attempt = state.attempts[entry.id];
-  return attempt && attempt.hash === crawlHash(entry) ? attempt.count : 0;
+  return attempt && attempt.hash === crawlHash(entry, sheets) ? attempt.count : 0;
 }
 
 /** The state with these entries untidied and their tries cleared (Redo, before its run is recorded). */
@@ -147,17 +179,28 @@ async function readState(
 async function saveCrawlState(
   documents: LorebookManagerDocumentStore,
   compendiumId: string,
-  change: { tidied?: readonly LmEntryNode[]; tried?: readonly LmEntryNode[]; untidy?: readonly string[] },
+  change: {
+    tidied?: readonly LmEntryNode[];
+    tried?: readonly LmEntryNode[];
+    untidy?: readonly string[];
+    advance?: { entryId: string; from: string; to: string };
+  },
+  sheets?: LmSheetOverrides,
 ): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const { state: stored, revision } = await readState(documents, compendiumId);
     const state = withoutEntries(stored, change.untidy ?? []);
+    if (change.advance) {
+      const { entryId, from, to } = change.advance;
+      if (state.crawled[entryId] !== from) return;
+      state.crawled[entryId] = to;
+    }
     for (const entry of change.tidied ?? []) {
-      state.crawled[entry.id] = crawlHash(entry);
+      state.crawled[entry.id] = crawlHash(entry, sheets);
       delete state.attempts[entry.id];
     }
     for (const entry of change.tried ?? []) {
-      state.attempts[entry.id] = { hash: crawlHash(entry), count: triesOf(state, entry) + 1 };
+      state.attempts[entry.id] = { hash: crawlHash(entry, sheets), count: triesOf(state, entry, sheets) + 1 };
     }
     const now = new Date().toISOString();
     const data = { compendiumId, crawled: state.crawled, attempts: state.attempts };
@@ -274,15 +317,16 @@ function untidied(
   compendium: LmCompendium,
   state: CrawlerState,
   pending: readonly LmProposal[],
+  sheets?: LmSheetOverrides,
 ): LmEntryNode[] {
   const books = new Set(compendium.lorebookIds);
   const waiting = new Set(
     pending.filter((proposal) => proposal.source === "crawler").map((proposal) => proposal.targetEntryId),
   );
-  const tries = (entry: LmEntryNode) => triesOf(state, entry);
+  const tries = (entry: LmEntryNode) => triesOf(state, entry, sheets);
   return payload.nodes
     .filter((node): node is LmEntryNode => node.nodeType === "lore" && books.has(node.lorebookId))
-    .filter((entry) => !entry.locked && !waiting.has(entry.id) && state.crawled[entry.id] !== crawlHash(entry))
+    .filter((entry) => !entry.locked && !waiting.has(entry.id) && state.crawled[entry.id] !== crawlHash(entry, sheets))
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => tries(a.entry) - tries(b.entry) || gapScore(b.entry) - gapScore(a.entry) || a.index - b.index)
     .map((item) => item.entry);
@@ -293,12 +337,13 @@ export async function countUntidied(compendiumId: string): Promise<number> {
   const documents = getLorebookManagerRuntime().persistence.documents;
   const compendium = await getCompendium(documents, compendiumId);
   if (!compendium || compendium.lorebookIds.length === 0) return 0;
-  const [payload, { state }, pending] = await Promise.all([
+  const [payload, { state }, pending, settings] = await Promise.all([
     compendiumGraph(compendium, false),
     readState(documents, compendiumId),
     listProposals(documents, "pending"),
+    getSettings(documents),
   ]);
-  return untidied(payload, compendium, state, pending).length;
+  return untidied(payload, compendium, state, pending, settings.sheets).length;
 }
 
 /**
@@ -308,10 +353,11 @@ export async function countUntidied(compendiumId: string): Promise<number> {
 export async function untidiedEntryIds(lorebookIds: readonly string[]): Promise<string[]> {
   if (lorebookIds.length === 0) return [];
   const documents = getLorebookManagerRuntime().persistence.documents;
-  const [payload, stateDocs, pending] = await Promise.all([
+  const [payload, stateDocs, pending, settings] = await Promise.all([
     buildLorebookManagerGraphPayload({ lorebookIds: new Set(lorebookIds), onlyRequested: true, skipMentions: true }),
     documents.list(LOREBOOK_MANAGER_PACKAGE_ID, CRAWLER_STATE_DOC_KIND),
     listProposals(documents, "pending"),
+    getSettings(documents),
   ]);
   const waiting = new Set(
     pending.filter((proposal) => proposal.source === "crawler").map((proposal) => proposal.targetEntryId),
@@ -330,7 +376,10 @@ export async function untidiedEntryIds(lorebookIds: readonly string[]): Promise<
   const books = new Set(lorebookIds);
   return payload.nodes
     .filter((node): node is LmEntryNode => node.nodeType === "lore" && books.has(node.lorebookId))
-    .filter((entry) => !entry.locked && !waiting.has(entry.id) && !tidiedAs.get(entry.id)?.has(crawlHash(entry)))
+    .filter(
+      (entry) =>
+        !entry.locked && !waiting.has(entry.id) && !tidiedAs.get(entry.id)?.has(crawlHash(entry, settings.sheets)),
+    )
     .map((entry) => entry.id);
 }
 
@@ -357,8 +406,10 @@ export function crawlerUserPrompt(
   nameOf: (ref: string) => string,
   /** How many entries in the Compendium have each key (compared loosely): a shared common word is a broad one. */
   keyUse: ReadonlyMap<string, number> = new Map(),
+  sheets?: LmSheetOverrides,
 ): string {
   const blocks = batch.map((entry, index) => {
+    const missing = missingSheetFields(entry.content, entry.inferredFamily ?? entry.family, sheets);
     const content = entry.content.length > CONTENT_CHARS ? `${entry.content.slice(0, CONTENT_CHARS)}…` : entry.content;
     const keys = entry.keys.map((key) => {
       const others = (keyUse.get(comparableFact(key)) ?? 1) - 1;
@@ -369,6 +420,7 @@ export function crawlerUserPrompt(
       `[e${index + 1}] ${entry.name}`,
       `description: ${entry.description.trim() || "(none)"}`,
       `tag: ${entry.tag.trim() || "(none)"}`,
+      ...(missing.length > 0 ? [`missing sheet lines: ${missing.join(", ")}`] : []),
       `keys: ${keys.join(", ") || "(none)"}`,
       ...(entry.constant ? ["always on: yes"] : []),
       `links: ${shownLinks(entry, nameOf) || "(none)"}`,
@@ -597,7 +649,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   // Redo asks again from scratch: its entries are untidied and their tries cleared (saved with the run).
   const redoIds = trigger === "redo" ? (options.entryIds ?? []) : [];
   const state = withoutEntries(stored, redoIds);
-  const everyUntidied = untidied(payload, compendium, state, pending);
+  const everyUntidied = untidied(payload, compendium, state, pending, settings.sheets);
   let candidates = everyUntidied;
   if (options.entryIds) {
     const wanted = new Set(options.entryIds);
@@ -605,7 +657,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   }
   const batch = options.entryIds
     ? candidates.slice(0, crawler.batchSize)
-    : neighbourhoodBatch(candidates, payload, crawler.batchSize, (entry) => triesOf(state, entry));
+    : neighbourhoodBatch(candidates, payload, crawler.batchSize, (entry) => triesOf(state, entry, settings.sheets));
   let remainingAfter = trigger === "after_archivist" ? 0 : Math.max(0, everyUntidied.length - batch.length);
   const wholeWords = trigger === "manual" ? await suggestWholeWords(documents, payload, compendium) : 0;
   const wholeWordsNote =
@@ -684,7 +736,10 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     finish({ ...base("failed", detail), entryCount: batch.length, model: modelName, remaining: candidates.length });
 
   // ── Call 1: summary, tag, keys, always on. ──
-  const tidyAnswer = await ask(composePrompt("tidy", settings.prompts), crawlerUserPrompt(batch, nameOf, keyUse));
+  const tidyAnswer = await ask(
+    composePrompt("tidy", settings.prompts),
+    crawlerUserPrompt(batch, nameOf, keyUse, settings.sheets),
+  );
   if (!tidyAnswer.ok) return tidyAnswer.aborted ? { status: "failed", run: null } : failed(tidyAnswer.detail);
 
   const skipped: LmCrawlerRunRecord["skipped"] = [];
@@ -707,6 +762,18 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     if (description && !entry.description.trim()) patch.description = description;
     const tag = cleanText(item.tag, TAG_CHARS).toLowerCase();
     if (tag && !entry.tag.trim()) patch.tag = tag;
+    const family = entry.inferredFamily ?? entry.family;
+    if (missingSheetFields(entry.content, family, settings.sheets).length > 0) {
+      const fieldEdits = sheetFieldEdits(entry.content, sheetFields(family, settings.sheets), item.fields)
+        .filter((edit) => edit.from === null)
+        .filter((edit) => {
+          if (groundedSheetValue(edit.to, entry.content)) return true;
+          skipped.push({ name: `${entry.name} · ${edit.field}`, why: "not in the entry's text" });
+          return false;
+        })
+        .slice(0, 6);
+      if (fieldEdits.length > 0) patch.fieldEdits = fieldEdits;
+    }
     // A too-broad key out: only one the entry has, never its own name, and at least one key stays (checked below).
     const ownName = comparableFact(entry.name);
     const removeKeys: string[] = [];
@@ -738,7 +805,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     if (removeKeys.length > 0) patch.removeKeys = removeKeys;
     // A summary is required where the entry has none: without one the entry isn't tidied, up to MAX_SUMMARY_TRIES.
     if (!entry.description.trim() && !patch.description) {
-      const tries = triesOf(state, entry) + 1;
+      const tries = triesOf(state, entry, settings.sheets) + 1;
       if (tries >= MAX_SUMMARY_TRIES) {
         tidied.push(entry);
         skipped.push({ name: entry.name, why: `no summary after ${tries} tries` });
@@ -922,7 +989,7 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   // it left out stays untidied and counts a try, so it moves behind the entries not tried yet.
   const leftOut = batch.filter((entry) => !answered.has(entry.id));
   tried.push(...leftOut);
-  await saveCrawlState(documents, compendiumId, { untidy: redoIds, tidied, tried });
+  await saveCrawlState(documents, compendiumId, { untidy: redoIds, tidied, tried }, settings.sheets);
   // The suggestions Redo replaced go only now; one decided meanwhile (another tab) stays as it is.
   for (const id of replacing) {
     try {
@@ -994,6 +1061,17 @@ async function compendiumOf(proposal: LmProposal): Promise<LmCompendium | null> 
   if (fromChat && fromChat.lorebookIds.includes(proposal.lorebookId)) return fromChat;
   const all = await listCompendiums(getLorebookManagerRuntime().persistence.documents);
   return all.find((compendium) => compendium.lorebookIds.includes(proposal.lorebookId)) ?? null;
+}
+
+/** Keep the Crawler's own fills tidied, unless a separate edit already changed what it read. */
+export async function advanceCrawlerFill(proposal: LmProposal, from: string, to: string): Promise<void> {
+  const documents = getLorebookManagerRuntime().persistence.documents;
+  const run = (await listCrawlerRuns()).find((run) => run.proposalIds.includes(proposal.id));
+  const compendium = run ? await getCompendium(documents, run.compendiumId) : await compendiumOf(proposal);
+  if (!compendium || !proposal.targetEntryId) return;
+  await saveCrawlState(documents, compendium.id, {
+    advance: { entryId: proposal.targetEntryId, from, to },
+  });
 }
 
 /** Applied Archivist changes waiting to be tidied together, per Compendium. */

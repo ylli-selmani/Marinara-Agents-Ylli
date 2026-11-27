@@ -2,9 +2,11 @@ import {
   applyFieldEdits,
   foldFieldEdits,
   normalizeFieldEdits,
+  parseSheetLines,
   type LmFieldEdit,
 } from "../../../../shared/src/features/agents/lorebook-manager/sheets.js";
 import { isDeepStrictEqual } from "node:util";
+import { classifyEntryWithFallback } from "../../../../shared/src/features/agents/lorebook-manager/graph-model.js";
 import { LM_RELATION_VALUES } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
   LmProposal,
@@ -13,6 +15,8 @@ import type {
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { CompendiumStoreError, LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
 import type { LorebookManagerDocumentStore, LorebookManagerRuntimeHost } from "./package-runtime.js";
+import { advanceCrawlerFill, crawlHash } from "./crawler.js";
+import { getSettings } from "./settings-store.js";
 
 /**
  * Suggested lorebook changes waiting in the Review tab. The Archivist (3d) and Auto-tag & Link (3e) write them when
@@ -466,8 +470,11 @@ export async function applyProposal(
     ...fields
   } = resolveCrawlerAdditions(proposal.patch, current, proposal.source);
   const facts = factsOf(proposal.patch);
-  const fieldEdits = normalizeFieldEdits(proposal.patch.fieldEdits);
   const content = typeof current.content === "string" ? current.content : "";
+  const present = new Set(parseSheetLines(content).map((line) => line.field.toLowerCase()));
+  const fieldEdits = normalizeFieldEdits(proposal.patch.fieldEdits).filter(
+    (edit) => proposal.source !== "crawler" || !present.has(edit.field.toLowerCase()),
+  );
   const patch =
     facts.length > 0 || fieldEdits.length > 0
       ? { ...fields, content: applyFieldEdits(mergeNewFacts(content, facts), fieldEdits) }
@@ -475,24 +482,46 @@ export async function applyProposal(
   if ("fieldEdits" in proposal.patch && Object.keys(patch).length === 0)
     throw new CompendiumStoreError("Nothing is left to apply; dismiss the suggestion instead", 400);
   const before = structuredClone(Object.fromEntries(Object.keys(patch).map((key) => [key, current[key] ?? null])));
+  const crawlerFill = proposal.source === "crawler" && fieldEdits.length > 0;
+  const sheets = crawlerFill ? (await getSettings(documents)).sheets : undefined;
+  const hashOf = (data: Record<string, unknown>) =>
+    crawlHash(
+      {
+        name: typeof data.name === "string" ? data.name : "",
+        content: typeof data.content === "string" ? data.content : "",
+        ...classifyEntryWithFallback(
+          typeof data.tag === "string" ? data.tag : "",
+          typeof book?.data.category === "string" ? book.data.category : "",
+        ),
+      },
+      sheets,
+    );
+  const preApplyHash = crawlerFill ? hashOf(current) : "";
+  let postApplyHash = "";
   let after: Record<string, unknown>;
   try {
     const updated = await updateLorebookEntry(proposal.targetEntryId!, patch);
     if (!updated) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
     after = structuredClone(Object.fromEntries(Object.keys(patch).map((key) => [key, updated.data[key] ?? null])));
+    if (crawlerFill) postApplyHash = hashOf(updated.data);
   } catch (error) {
     if (error instanceof CompendiumStoreError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     throw new CompendiumStoreError(message || "The Engine refused this change", 409);
   }
-  return appliedDecision({
+  const applied = await appliedDecision({
     ...proposal,
+    ...(proposal.source === "crawler" && "fieldEdits" in proposal.patch
+      ? { patch: { ...proposal.patch, fieldEdits } }
+      : {}),
     status: "applied",
     before,
     after,
     appliedEntryId: proposal.targetEntryId,
     decidedAt,
   });
+  if (crawlerFill && content !== after.content) await advanceCrawlerFill(applied, preApplyHash, postApplyHash);
+  return applied;
 }
 
 // Refuse overlapping Undo requests for the same suggestion while its entry write is in flight.

@@ -21,6 +21,7 @@ import type {
   LmSettings,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { ArchivistFields, CrawlerFields } from "./AgentFields";
+import { useFillHeight } from "./useFillHeight";
 import {
   clearLiveRunsApi,
   fetchSettings,
@@ -54,6 +55,7 @@ export interface SettingsPanelProps {
  * own, one Save for the whole page (Recall, Archivist and Crawler together), and the maintenance actions.
  */
 export function SettingsPanel({ compendiums }: SettingsPanelProps) {
+  const fillRef = useFillHeight<HTMLElement>();
   const queryClient = useQueryClient();
   const settingsQuery = useQuery({ queryKey: lmQueryKeys.settings, queryFn: fetchSettings });
   const saved = settingsQuery.data ?? null;
@@ -224,7 +226,8 @@ export function SettingsPanel({ compendiums }: SettingsPanelProps) {
       aria-labelledby="lm-settings-title"
       data-lm-surface="settings"
       className="space-y-3 pr-1 text-xs"
-      style={{ maxHeight: "clamp(20rem, calc(100vh - 15rem), 46rem)", overflowY: "auto" }}
+      ref={fillRef}
+      style={{ overflowY: "auto" }}
     >
       <div
         className={`flex flex-wrap items-center justify-between gap-2 py-1 ${dirty ? "sticky top-0 z-10 bg-[var(--background)]" : ""}`}

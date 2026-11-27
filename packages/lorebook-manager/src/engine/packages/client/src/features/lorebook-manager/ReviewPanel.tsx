@@ -20,6 +20,7 @@ import {
   redoCrawlerApi,
   runCrawlerApi,
 } from "./api";
+import { useFillHeight } from "./useFillHeight";
 
 export interface ReviewPanelProps {
   payload: LmGraphPayload | null;
@@ -445,6 +446,7 @@ function TidyEntries({ compendium }: { compendium: LmCompendium }) {
 }
 
 export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelProps) {
+  const fillRef = useFillHeight<HTMLDivElement>();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<LmProposalStatus>("pending");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -482,10 +484,7 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
   const proposals = proposalsQuery.data ?? [];
 
   return (
-    <div
-      className="space-y-3 pr-1"
-      style={{ maxHeight: "clamp(20rem, calc(100vh - 15rem), 46rem)", overflowY: "auto" }}
-    >
+    <div className="space-y-3 pr-1" ref={fillRef} style={{ overflowY: "auto" }}>
       {compendium ? <TidyEntries compendium={compendium} /> : null}
 
       <div className="flex w-fit items-center gap-1 rounded-lg border border-[var(--border)] p-0.5">

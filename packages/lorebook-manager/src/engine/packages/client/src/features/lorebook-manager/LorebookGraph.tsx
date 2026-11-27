@@ -49,6 +49,7 @@ import {
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { useQuery } from "@tanstack/react-query";
 import { fetchUntidiedEntryIds, lmQueryKeys, type LmEntryPatch } from "./api";
+import { useFillHeight } from "./useFillHeight";
 import { EntryReaderModal } from "./EntryReaderModal";
 import { GraphInspector } from "./GraphInspector";
 import type { SimGraphHighlight } from "./SimulatePanel";
@@ -149,6 +150,7 @@ function nodeColour(node: LmGraphNode): string {
 
 export const GRAPH_STYLE = `
 [data-lm-graph] {
+  grid-template-rows: auto minmax(0, 1fr) auto;
   --lm-graph-character: #3b82f6;
   --lm-graph-card: #0891b2;
   --lm-graph-persona: #db2777;
@@ -188,7 +190,8 @@ export const GRAPH_STYLE = `
   --lm-graph-overlay-shadow: 0 12px 32px -10px rgb(0 0 0 / 0.7), 0 2px 8px -2px rgb(0 0 0 / 0.5);
 }
 [data-lm-graph-canvas] {
-  height: clamp(20rem, calc(100vh - 18.5rem), 42rem);
+  height: 100%;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 0.5rem;
   background-color: var(--lm-graph-canvas);
@@ -248,7 +251,7 @@ export const GRAPH_STYLE = `
 }
 [data-lm-graph-card][data-lm-graph-docked] {
   width: 100%;
-  max-height: clamp(20rem, calc(100vh - 18.5rem), 42rem);
+  max-height: 100%;
 }
 @media (min-width: 64rem) {
   [data-lm-graph-card][data-lm-graph-docked] {
@@ -300,9 +303,6 @@ export const GRAPH_STYLE = `
     left: 0.5rem;
     width: auto;
     max-height: min(48%, 22rem);
-  }
-  [data-lm-graph-canvas] {
-    height: min(60svh, 34rem);
   }
   [data-lm-graph-divider] {
     display: none;
@@ -643,7 +643,7 @@ export function LorebookGraph({
 
   const [wrap, setWrap] = useState<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const rootRef = useFillHeight<HTMLDivElement>({ enabled: !expanded });
   const legendRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
   const pointers = useRef(new Map<number, GraphPoint>());
@@ -1388,7 +1388,7 @@ export function LorebookGraph({
           ) : null}
         </div>
       ) : (
-        <div data-lm-graph-workspace className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start">
+        <div data-lm-graph-workspace className="flex min-h-0 min-w-0 flex-col gap-3 lg:flex-row lg:items-start">
           <div
             ref={setWrap}
             className="relative min-w-0 flex-1 overflow-hidden select-none"

@@ -10,6 +10,7 @@ import type {
   LmRetrievalInput,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { fetchSemanticScores, lmQueryKeys, type LmEntryPatch } from "./api";
+import { useFillHeight } from "./useFillHeight";
 import { EntryReaderModal } from "./EntryReaderModal";
 
 export type SimGraphHighlight = {
@@ -40,7 +41,6 @@ const SIM_STYLE = `
   gap: 0.875rem;
 }
 [data-lm-sim-results] {
-  max-height: clamp(20rem, calc(100vh - 15rem), 46rem);
   overflow-y: auto;
 }
 @media (min-width: 64rem) {
@@ -123,6 +123,7 @@ export function SimulatePanel({
   onInspectNode,
   semanticEnabled = false,
 }: SimulatePanelProps) {
+  const fillRef = useFillHeight<HTMLDivElement>();
   const [showSuppressed, setShowSuppressed] = useState(true);
   const [readerState, setReaderState] = useState<{ ref: string; mode: "read" | "edit" } | null>(null);
 
@@ -375,7 +376,11 @@ export function SimulatePanel({
       </div>
 
       {/* Right column: activation results & provenance */}
-      <div data-lm-sim-results className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--card)]/70 p-3.5">
+      <div
+        ref={fillRef}
+        data-lm-sim-results
+        className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--card)]/70 p-3.5"
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="space-y-0.5">
             <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">

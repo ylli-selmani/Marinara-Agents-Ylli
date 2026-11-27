@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Network } from "lucide-react";
 import type { LmLiveRunRecord } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { fetchLiveRuns, lmQueryKeys } from "./api";
+import { useFillHeight } from "./useFillHeight";
 import { ArchivistActivity } from "./ArchivistActivity";
 import { REASON_BADGE_STYLE, TIER_LABEL } from "./SimulatePanel";
 
@@ -188,6 +189,7 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
 
 /** What live retrieval put into each chat's recent turns. Precedent: the Simulate results list in this package. */
 export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: ActivityPanelProps) {
+  const fillRef = useFillHeight<HTMLDivElement>();
   const runsQuery = useQuery({ queryKey: lmQueryKeys.runs, queryFn: fetchLiveRuns, refetchInterval: 15_000 });
   const chats = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
@@ -203,10 +205,7 @@ export function ActivityPanel({ currentChatId, liveRetrieval, onInspectNode }: A
   const selected = chats.find((chat) => chat.chatId === selectedChatId) ?? null;
 
   return (
-    <div
-      className="space-y-3 pr-1"
-      style={{ maxHeight: "clamp(20rem, calc(100vh - 15rem), 46rem)", overflowY: "auto" }}
-    >
+    <div className="space-y-3 pr-1" ref={fillRef} style={{ overflowY: "auto" }}>
       {liveRetrieval === false ? (
         <div className="rounded border border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)]">
           Live retrieval needs a newer Marinara Engine (Capability API 1.839). Until then the Engine injects your

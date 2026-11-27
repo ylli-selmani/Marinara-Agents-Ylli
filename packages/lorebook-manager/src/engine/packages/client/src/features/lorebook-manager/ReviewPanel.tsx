@@ -1,3 +1,4 @@
+import { LmSelect } from "./LmSelect";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -181,22 +182,19 @@ function FieldValue({
             label={`${link.relation} → ${link.name}`}
             onRemove={() => onChange(links.filter((other) => other.key !== link.key))}
           >
-            <select
-              aria-label={`Relation to ${link.name}`}
+            <LmSelect
+              label={`Relation to ${link.name}`}
               value={link.relation}
-              onChange={(event) =>
-                onChange(
-                  links.map((other) => (other.key === link.key ? { ...other, relation: event.target.value } : other)),
-                )
+              onChange={(nextValue) =>
+                onChange(links.map((other) => (other.key === link.key ? { ...other, relation: nextValue } : other)))
               }
               className="mari-chrome-field h-6 rounded px-1 text-[0.6875rem]"
-            >
-              {EDIT_RELATIONS.map((relation) => (
-                <option key={relation.value} value={relation.value} title={relation.hint}>
-                  {relation.value}
-                </option>
-              ))}
-            </select>{" "}
+              options={EDIT_RELATIONS.map((relation) => ({
+                value: relation.value,
+                label: relation.value,
+                description: relation.hint,
+              }))}
+            />{" "}
             → {link.name}
           </Chip>
         ))}

@@ -1,3 +1,4 @@
+import { LmSelect } from "./LmSelect";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ExternalLink, Pencil, Save, X } from "lucide-react";
@@ -216,22 +217,19 @@ export function EntryReaderModal({
           <div className="space-y-1">
             <span className="block font-medium text-[var(--muted-foreground)]">Category / Tag</span>
             <div className="flex gap-1.5">
-              <select
-                aria-label="Tag preset"
+              <LmSelect
+                label="Tag preset"
                 disabled={saving}
                 value={TAG_PRESETS.some((p) => p.value === tag) ? tag : "__custom__"}
-                onChange={(event) => {
-                  if (event.target.value !== "__custom__") setTag(event.target.value);
+                onChange={(nextValue) => {
+                  if (nextValue !== "__custom__") setTag(nextValue);
                 }}
                 className="mari-chrome-field h-8 w-36 rounded px-1.5 text-xs disabled:opacity-60"
-              >
-                {TAG_PRESETS.map((preset) => (
-                  <option key={preset.value || "_none"} value={preset.value}>
-                    {preset.label}
-                  </option>
-                ))}
-                {!TAG_PRESETS.some((p) => p.value === tag) ? <option value="__custom__">custom</option> : null}
-              </select>
+                options={[
+                  ...TAG_PRESETS,
+                  ...(!TAG_PRESETS.some((p) => p.value === tag) ? [{ value: "__custom__", label: "custom" }] : []),
+                ]}
+              />
               <label htmlFor="lm-entry-custom-tag" className="sr-only">
                 Custom tags
               </label>

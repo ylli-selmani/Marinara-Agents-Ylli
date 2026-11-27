@@ -1,3 +1,4 @@
+import { LmSelect } from "./LmSelect";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
@@ -793,53 +794,45 @@ export function GraphInspector({
           <div className="flex flex-wrap items-center gap-1.5 text-[0.6875rem]">
             <label className="flex items-center gap-1 text-[var(--muted-foreground)]">
               <span>Tag:</span>
-              <select
-                aria-label="Entry primary tag override"
+              <LmSelect
+                label="Entry primary tag override"
                 disabled={savingRef === activeNode.ref}
                 value={TAG_OVERRIDES.includes(primaryTag as (typeof TAG_OVERRIDES)[number]) ? primaryTag : "__custom__"}
-                onChange={(event) => {
-                  const nextFirst = event.target.value;
+                onChange={(nextValue) => {
+                  const nextFirst = nextValue;
                   if (nextFirst === "__custom__") return;
                   const nextTags = nextFirst ? [nextFirst, ...activeTags.slice(1).filter((t) => t !== nextFirst)] : [];
                   void onUpdateEntry(activeNode, { tag: nextTags.join(", ") });
                 }}
                 className="mari-chrome-field h-6 rounded px-1.5 text-[0.6875rem] text-[var(--foreground)]"
-              >
-                <option value="">Untagged (auto)</option>
-                <option value="lore">lore (explicit)</option>
-                <option value="character">character</option>
-                <option value="location">location</option>
-                <option value="faction">faction</option>
-                <option value="item">item</option>
-                <option value="creature">creature</option>
-                <option value="species">species</option>
-                <option value="ability">ability</option>
-                <option value="quest">quest</option>
-                {primaryTag && !TAG_OVERRIDES.includes(primaryTag as (typeof TAG_OVERRIDES)[number]) ? (
-                  <option value="__custom__">{primaryTag}</option>
-                ) : null}
-              </select>
+                options={[
+                  ...TAG_OVERRIDES.map((tag) => ({
+                    value: tag,
+                    label: tag === "" ? "Untagged (auto)" : tag === "lore" ? "lore (explicit)" : tag,
+                  })),
+                  ...(primaryTag && !TAG_OVERRIDES.includes(primaryTag as (typeof TAG_OVERRIDES)[number])
+                    ? [{ value: "__custom__", label: primaryTag }]
+                    : []),
+                ]}
+              />
             </label>
             {extraTagChoices.length > 0 ? (
-              <select
-                aria-label="Add secondary tag"
+              <LmSelect
+                label="Add secondary tag"
                 disabled={savingRef === activeNode.ref}
                 value=""
-                onChange={(event) => {
-                  const extra = event.target.value;
+                onChange={(nextValue) => {
+                  const extra = nextValue;
                   if (!extra) return;
                   const nextTags = [...activeTags, extra];
                   void onUpdateEntry(activeNode, { tag: nextTags.join(", ") });
                 }}
                 className="mari-chrome-field h-6 rounded px-1 text-[0.6875rem] text-[var(--muted-foreground)]"
-              >
-                <option value="">+ tag…</option>
-                {extraTagChoices.map((choice) => (
-                  <option key={choice} value={choice}>
-                    {choice}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: "", label: "+ tag…" },
+                  ...extraTagChoices.map((choice) => ({ value: choice, label: choice })),
+                ]}
+              />
             ) : null}
             {!activeNode.enabled ? (
               <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">

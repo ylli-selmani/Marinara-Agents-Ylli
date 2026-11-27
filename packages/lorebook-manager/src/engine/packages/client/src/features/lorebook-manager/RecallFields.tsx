@@ -1,3 +1,4 @@
+import { LmSelect } from "./LmSelect";
 import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { normalizeStopwordList } from "../../../../shared/src/features/agents/lorebook-manager/retrieval.js";
@@ -263,18 +264,17 @@ export function RecallFields(props: RecallFieldsProps) {
           >
             <label className="flex items-center gap-1.5">
               <span className="text-[var(--muted-foreground)]">Check loose matches</span>
-              <select
+              <LmSelect
+                label="Check loose matches"
                 disabled={disabled}
                 value={value.stage2Gate}
-                onChange={(event) => onChange("stage2Gate", event.target.value as LmStage2Gate)}
+                onChange={(nextValue) => onChange("stage2Gate", nextValue as LmStage2Gate)}
                 className="mari-chrome-field h-8 rounded px-2 text-xs"
-              >
-                {(Object.keys(GATE_LABELS) as LmStage2Gate[]).map((gate) => (
-                  <option key={gate} value={gate}>
-                    {GATE_LABELS[gate]}
-                  </option>
-                ))}
-              </select>
+                options={(Object.keys(GATE_LABELS) as LmStage2Gate[]).map((gate) => ({
+                  value: gate,
+                  label: GATE_LABELS[gate],
+                }))}
+              />
             </label>
             <InheritMark field="stage2Gate" inherit={inherit} disabled={disabled} />
           </div>
@@ -282,25 +282,23 @@ export function RecallFields(props: RecallFieldsProps) {
             <div className="flex flex-col gap-1">
               <label className="flex items-center gap-1.5">
                 <span className="text-[var(--muted-foreground)]">Connection</span>
-                <select
+                <LmSelect
+                  label="Connection"
                   disabled={disabled}
                   value={value.librarianConnectionId ?? ""}
-                  onChange={(event) => onChange("librarianConnectionId", event.target.value || null)}
+                  onChange={(nextValue) => onChange("librarianConnectionId", nextValue || null)}
                   className="mari-chrome-field h-8 max-w-[14rem] rounded px-2 text-xs"
-                >
-                  <option value="">Agents&apos; default, then the chat&apos;s</option>
-                  {connections.map((connection) => (
-                    <option key={connection.id} value={connection.id}>
-                      {connection.name}
-                    </option>
-                  ))}
-                  {/* A saved connection that has since been deleted stays visible, as in Saucelings' picker. */}
-                  {value.librarianConnectionId &&
-                  connectionsQuery.data &&
-                  !connections.some((connection) => connection.id === value.librarianConnectionId) ? (
-                    <option value={value.librarianConnectionId}>Missing connection</option>
-                  ) : null}
-                </select>
+                  options={[
+                    { value: "", label: "Agents' default, then the chat's" },
+                    ...connections.map((connection) => ({ value: connection.id, label: connection.name })),
+                    // A saved connection that has since been deleted stays visible, as in Saucelings' picker.
+                    ...(value.librarianConnectionId &&
+                    connectionsQuery.data &&
+                    !connections.some((connection) => connection.id === value.librarianConnectionId)
+                      ? [{ value: value.librarianConnectionId, label: "Missing connection" }]
+                      : []),
+                  ]}
+                />
               </label>
               <InheritMark field="librarianConnectionId" inherit={inherit} disabled={disabled} />
             </div>
@@ -324,18 +322,17 @@ export function RecallFields(props: RecallFieldsProps) {
           <div className="flex flex-col gap-1">
             <label className="flex flex-wrap items-center gap-1.5">
               <span className="text-[var(--muted-foreground)]">Shared-word strictness</span>
-              <select
+              <LmSelect
+                label="Shared-word strictness"
                 disabled={disabled}
                 value={value.bm25Strictness}
-                onChange={(event) => onChange("bm25Strictness", event.target.value as LmBm25Strictness)}
+                onChange={(nextValue) => onChange("bm25Strictness", nextValue as LmBm25Strictness)}
                 className="mari-chrome-field h-8 rounded px-2 text-xs"
-              >
-                {(Object.keys(STRICTNESS_LABELS) as LmBm25Strictness[]).map((level) => (
-                  <option key={level} value={level}>
-                    {STRICTNESS_LABELS[level]}
-                  </option>
-                ))}
-              </select>
+                options={(Object.keys(STRICTNESS_LABELS) as LmBm25Strictness[]).map((level) => ({
+                  value: level,
+                  label: STRICTNESS_LABELS[level],
+                }))}
+              />
             </label>
             <InheritMark field="bm25Strictness" inherit={inherit} disabled={disabled} />
             <span className="text-[0.6875rem] text-[var(--muted-foreground)]">

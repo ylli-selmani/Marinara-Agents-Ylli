@@ -1,3 +1,4 @@
+import { LmSelect } from "./LmSelect";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type {
@@ -43,22 +44,20 @@ function ConnectionSelect({
   return (
     <label className="flex items-center gap-1.5">
       <span className="text-[var(--muted-foreground)]">Connection</span>
-      <select
+      <LmSelect
+        label="Connection"
         disabled={disabled}
         value={value ?? ""}
-        onChange={(event) => onChange(event.target.value || null)}
+        onChange={(nextValue) => onChange(nextValue || null)}
         className="mari-chrome-field h-8 max-w-[14rem] rounded px-2 text-xs"
-      >
-        <option value="">{emptyLabel}</option>
-        {connections.map((connection) => (
-          <option key={connection.id} value={connection.id}>
-            {connection.name}
-          </option>
-        ))}
-        {value && connectionsQuery.data && !connections.some((connection) => connection.id === value) ? (
-          <option value={value}>Missing connection</option>
-        ) : null}
-      </select>
+        options={[
+          { value: "", label: emptyLabel },
+          ...connections.map((connection) => ({ value: connection.id, label: connection.name })),
+          ...(value && connectionsQuery.data && !connections.some((connection) => connection.id === value)
+            ? [{ value, label: "Missing connection" }]
+            : []),
+        ]}
+      />
     </label>
   );
 }
@@ -155,18 +154,17 @@ function ModeSelect({
   return (
     <label className="flex items-center gap-1.5">
       <span className="text-[var(--muted-foreground)]">Archivist</span>
-      <select
+      <LmSelect
+        label="Archivist"
         disabled={disabled}
         value={value}
-        onChange={(event) => onChange(event.target.value as LmArchivistMode)}
+        onChange={(nextValue) => onChange(nextValue as LmArchivistMode)}
         className="mari-chrome-field h-8 rounded px-2 text-xs"
-      >
-        {(Object.keys(ARCHIVIST_MODE_LABELS) as LmArchivistMode[]).map((mode) => (
-          <option key={mode} value={mode}>
-            {ARCHIVIST_MODE_LABELS[mode]}
-          </option>
-        ))}
-      </select>
+        options={(Object.keys(ARCHIVIST_MODE_LABELS) as LmArchivistMode[]).map((mode) => ({
+          value: mode,
+          label: ARCHIVIST_MODE_LABELS[mode],
+        }))}
+      />
     </label>
   );
 }
@@ -253,18 +251,17 @@ export function CrawlerFields({
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-1.5">
           <span className="text-[var(--muted-foreground)]">Runs</span>
-          <select
+          <LmSelect
+            label="Runs"
             disabled={disabled}
             value={value.trigger}
-            onChange={(event) => onChange("trigger", event.target.value as LmCrawlerTrigger)}
+            onChange={(nextValue) => onChange("trigger", nextValue as LmCrawlerTrigger)}
             className="mari-chrome-field h-8 rounded px-2 text-xs"
-          >
-            {(Object.keys(CRAWLER_TRIGGER_LABELS) as LmCrawlerTrigger[]).map((trigger) => (
-              <option key={trigger} value={trigger}>
-                {CRAWLER_TRIGGER_LABELS[trigger]}
-              </option>
-            ))}
-          </select>
+            options={(Object.keys(CRAWLER_TRIGGER_LABELS) as LmCrawlerTrigger[]).map((trigger) => ({
+              value: trigger,
+              label: CRAWLER_TRIGGER_LABELS[trigger],
+            }))}
+          />
         </label>
         <NumberInput
           label="Entries per run"

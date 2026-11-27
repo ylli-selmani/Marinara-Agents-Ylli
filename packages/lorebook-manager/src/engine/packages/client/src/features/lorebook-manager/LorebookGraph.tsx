@@ -1,3 +1,4 @@
+import { LmSelect } from "./LmSelect";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -1762,21 +1763,17 @@ export function LorebookGraph({
               <Focus aria-hidden="true" size="0.875rem" />
               {whole ? "Whole graph" : `Focus (${focusHops}-hop)`}
             </button>
-            <select
-              aria-label="Focus hop depth"
+            <LmSelect
+              label="Focus hop depth"
               title="Neighbourhood hop depth when focused"
-              value={focusHops}
-              onChange={(event) => {
-                setFocusHops(Number(event.target.value));
+              value={String(focusHops)}
+              onChange={(nextValue) => {
+                setFocusHops(Number(nextValue));
                 setWhole(false);
               }}
               className="mari-chrome-field h-7 rounded px-1.5 text-xs text-[var(--foreground)]"
-            >
-              <option value={1}>1-hop</option>
-              <option value={2}>2-hop</option>
-              <option value={3}>3-hop</option>
-              <option value={4}>4-hop</option>
-            </select>
+              options={[1, 2, 3, 4].map((hops) => ({ value: String(hops), label: `${hops}-hop` }))}
+            />
           </div>
 
           <span aria-hidden="true" data-lm-graph-divider />
@@ -1808,33 +1805,38 @@ export function LorebookGraph({
             <EyeOff aria-hidden="true" size="0.875rem" />
             Hide unlinked
           </button>
-          <select
-            aria-label="Mark entries"
+          <LmSelect
+            label="Mark entries"
             title="Ring the entries that still need the Crawler or a link"
             value={mark}
-            onChange={(event) => setMark(event.target.value as GraphMark)}
+            onChange={(nextValue) => setMark(nextValue as GraphMark)}
             className="mari-chrome-field h-7 rounded px-1.5 text-xs text-[var(--foreground)]"
-          >
-            <option value="none">Mark: nothing</option>
-            <option value="untidied">
-              {mark === "untidied" && untidiedQuery.data
-                ? `Mark: not tidied (${untidiedQuery.data.length})`
-                : "Mark: not tidied"}
-            </option>
-            <option value="unlinked">{`Mark: no ID links (${unlinkedRefs.size})`}</option>
-          </select>
-          <select
-            aria-label="Show relation"
+            options={[
+              { value: "none", label: "Mark: nothing" },
+              {
+                value: "untidied",
+                label:
+                  mark === "untidied" && untidiedQuery.data
+                    ? `Mark: not tidied (${untidiedQuery.data.length})`
+                    : "Mark: not tidied",
+              },
+              { value: "unlinked", label: `Mark: no ID links (${unlinkedRefs.size})` },
+            ]}
+          />
+          <LmSelect
+            label="Show relation"
             title="Show ID links with this relation"
             value={relationFilter.relation}
-            onChange={(event) => setRelation(event.target.value)}
+            onChange={(nextValue) => setRelation(nextValue)}
             className="mari-chrome-field h-7 rounded px-1.5 text-xs text-[var(--foreground)]"
-          >
-            <option value="all">Relation: all</option>
-            {relationFilter.options.map(({ relation, count }) => (
-              <option key={relation} value={relation}>{`Relation: ${relation} (${count})`}</option>
-            ))}
-          </select>
+            options={[
+              { value: "all", label: "Relation: all" },
+              ...relationFilter.options.map(({ relation, count }) => ({
+                value: relation,
+                label: `Relation: ${relation} (${count})`,
+              })),
+            ]}
+          />
 
           <span aria-hidden="true" data-lm-graph-divider />
 

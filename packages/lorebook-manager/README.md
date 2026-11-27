@@ -25,22 +25,22 @@ To open the workbench, go to **Agents → Lorebook Manager**. It renders inside 
 
 Lorebook Manager reads comma-separated values from each entry's `tag` field (`lore`, `character`, `location`, `faction`, `item`, `creature`, `ability`, `quest`, singular or plural). Multi-tags such as `location, faction` match every listed filter pill and draw a dashed secondary ring around the node.
 
-Character Cards render as cyan hexagons and Personas as pink diamonds so they stay visually distinct from blue `character` lorebook entries, and linked books connect to their cards and personas through book hub nodes. Untagged entries inside `character`, `npc`, or `spellbook` lorebooks stay counted under **Lore** with a diagonal-hatched fill until you pick **lore (explicit)** or another tag in the inspector.
+Character Cards render as cyan hexagons, with their stub entries seated as small circles on the top edge when the card is shown; Personas render as pink diamonds. Cards and Personas stay visually distinct from blue `character` lorebook entries, and linked books connect to their cards and personas through book hub nodes. Untagged entries inside `character`, `npc`, or `spellbook` lorebooks stay counted under **Lore** with a diagonal-hatched fill until you pick **lore (explicit)** or another tag in the inspector.
 
-Each explicit ID link stores one of these relation labels in `entry.relationships`. Character Cards and Personas can't store links themselves, so a link with them always lives on the entry; with `related_to`, `ally_of` or `rival_of` it counts as both ways. Picking `represents` also adds the card to the entry's Exclude character filter:
+Each explicit ID link stores one of these relation labels in `entry.relationships`. Character Cards and Personas can't store links themselves, so a link with them always lives on the entry; with `related_to`, `ally_of` or `rival_of` it counts as both ways. In a Compendium, select a card and choose **Create stub entry**, then pick its lorebook. A stub carries the card's relations and current state; the Archivist writes the stub, while the card keeps the rest. Its state uses `Role:`, `Affiliation:`, `Relationships:`, `Status:` and `Currently:` lines. Picking `represents` also adds the card to the entry's Exclude character filter:
 
-| Relation     | Symmetry                | Intended direction                                 | Planned 1-hop retrieval role                                       |
-| ------------ | ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------ |
-| `part_of`    | Directed                | Sub-entry to parent (`Personality` → `Character`)  | Strongest structural pull so sub-entries surface with their parent |
-| `located_in` | Directed                | Thing or sub-place to containing place             | Boosted when the active scene or World Maps location matches       |
-| `is_a`       | Directed                | Kind or instance to its type (`Dark Elf` → `High Elf`) | Pulls the type when an instance appears; the reverse needs evidence |
-| `member_of`  | Directed                | Person or squad to group (`Student` → `Class 1-A`) | Pulls group context when an active member appears                  |
-| `leads`      | Directed                | Leader to group (`Syliveera` → `Unseelie Court`)   | Leader and group surface together in both directions               |
-| `owns`       | Directed                | Owner to item or property                          | Surfaces signature gear or possessions when relevant               |
-| `ally_of`    | Symmetric (`Both ways`) | Mutual link between allies                         | Soft social candidate for Stage 2 filtering                        |
-| `rival_of`   | Symmetric (`Both ways`) | Mutual link between rivals                         | Soft social candidate for Stage 2 filtering                        |
-| `related_to` | Symmetric (`Both ways`) | General two-way link                               | Lightest fallback connection and graph navigation                  |
-| `represents` | Directed                | Entry to Character Card (`Izuku entry` → `Izuku`)  | Excludes the entry while the card is active; the card inherits the entry's links |
+| Relation     | Symmetry                | Intended direction                                     | Planned 1-hop retrieval role                                                                  |
+| ------------ | ----------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `part_of`    | Directed                | Sub-entry to parent (`Personality` → `Character`)      | Strongest structural pull so sub-entries surface with their parent                            |
+| `located_in` | Directed                | Thing or sub-place to containing place                 | Boosted when the active scene or World Maps location matches                                  |
+| `is_a`       | Directed                | Kind or instance to its type (`Dark Elf` → `High Elf`) | Pulls the type when an instance appears; the reverse needs evidence                           |
+| `member_of`  | Directed                | Person or squad to group (`Student` → `Class 1-A`)     | Pulls group context when an active member appears                                             |
+| `leads`      | Directed                | Leader to group (`Syliveera` → `Unseelie Court`)       | Leader and group surface together in both directions                                          |
+| `owns`       | Directed                | Owner to item or property                              | Surfaces signature gear or possessions when relevant                                          |
+| `ally_of`    | Symmetric (`Both ways`) | Mutual link between allies                             | Soft social candidate for Stage 2 filtering                                                   |
+| `rival_of`   | Symmetric (`Both ways`) | Mutual link between rivals                             | Soft social candidate for Stage 2 filtering                                                   |
+| `related_to` | Symmetric (`Both ways`) | General two-way link                                   | Lightest fallback connection and graph navigation                                             |
+| `represents` | Directed                | Entry to Character Card (`Izuku entry` → `Izuku`)      | Sends only populated sheet lines while the card is active; the card inherits the stub's links |
 
 ## When something goes wrong
 

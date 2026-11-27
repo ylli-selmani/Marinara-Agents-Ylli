@@ -1,5 +1,7 @@
 import { ENTITY_FAMILIES, type EntityFamily } from "./schema.js";
 
+export const LM_STUB_FIELDS = ["Role", "Affiliation", "Relationships", "Status", "Currently"] as const;
+
 export type LmSheetOverrides = Partial<Record<EntityFamily, string[]>>;
 export interface LmFieldEdit {
   field: string;
@@ -80,6 +82,14 @@ export function parseSheetLines(content: string): Array<{ field: string; value: 
     const field = sheetFieldName(match?.[1]);
     return field ? [{ field, value: match![2]!.trim() }] : [];
   });
+}
+
+/** Recognized, populated sheet lines only, in their original content order. */
+export function stubSheetLines(content: string): string[] {
+  const fields = new Set([...LM_STUB_FIELDS, ...LM_SHEET_TEMPLATES.character].map((field) => field.toLowerCase()));
+  return parseSheetLines(content)
+    .filter((line) => fields.has(line.field.toLowerCase()) && line.value)
+    .map(({ field, value }) => `${field}: ${value}`);
 }
 
 export function missingSheetFields(content: string, family: unknown, overrides?: LmSheetOverrides): string[] {

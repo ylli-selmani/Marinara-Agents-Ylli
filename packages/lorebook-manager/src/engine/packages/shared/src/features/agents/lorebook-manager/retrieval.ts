@@ -1,4 +1,5 @@
-import { parseEntityRef } from "./entity-ref.js";
+import { stubSheetLines } from "./sheets.js";
+import { parseEntityRef, representedCardIds } from "./entity-ref.js";
 import type {
   LmBm25Strictness,
   LmEntryNode,
@@ -493,6 +494,7 @@ export function simulateLorebookRetrieval(
   const eligibleEntries: LmEntryNode[] = [];
   const eligibleSet = new Set<string>();
   const suppressed: LmRetrievalSuppressedItem[] = [];
+  const cardSheets: LmRetrievalActivatedItem[] = [];
 
   for (const entry of scopedEntries) {
     const tokens = estimateEntryTokens(entry);
@@ -505,9 +507,24 @@ export function simulateLorebookRetrieval(
       continue;
     }
     if (entry.characterFilterMode === "exclude") {
-      const hitIds = entry.characterFilterIds.filter((id) => activeCharSet.has(id));
+      const hitIds = [...new Set(entry.characterFilterIds.filter((id) => activeCharSet.has(id)))];
       if (hitIds.length > 0) {
-        const names = hitIds.map((id) => cardNamesById.get(id) ?? id).join(", ");
+        const names = [...new Set(hitIds.map((id) => cardNamesById.get(id) ?? id))].join(", ");
+        const represented = new Set(representedCardIds(entry.relationships));
+        const lines = stubSheetLines(entry.content);
+        if (lines.length > 0 && hitIds.every((id) => represented.has(id))) {
+          const injectedContent = `${names}, current state:\n${lines.join("\n")}`;
+          cardSheets.push({
+            entry,
+            injectedContent,
+            tokens: estimateEntryTokens({ name: entry.name, content: injectedContent }),
+            tier: "card",
+            score: 1,
+            reasons: [{ kind: "card_sheet", detail: `Current state of ${names}'s stub`, score: 1 }],
+            viaRefs: [],
+          });
+          continue;
+        }
         suppressed.push({
           entry,
           tokens,
@@ -870,6 +887,7 @@ export function simulateLorebookRetrieval(
       reasons: item.reasons,
       viaRefs: [],
     })),
+    ...cardSheets,
     ...rankedDirect.map((item) => ({
       entry: item.entry,
       tokens: estimateEntryTokens(item.entry),

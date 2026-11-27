@@ -1,3 +1,4 @@
+import { StubEntryModal } from "./StubEntryModal";
 import { LmSelect } from "./LmSelect";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -24,11 +25,14 @@ import {
   isCardOrPersonaRef,
   isImpliedMutualLink,
   parseEntityRef,
+  representedCardIds,
   SYMMETRIC_RELATIONS,
   toRelationshipKey,
 } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import type {
   LmEntryNode,
+  LmCompendium,
+  LmEntityNode,
   LmGraphEdge,
   LmGraphNode,
   LmGraphPayload,
@@ -124,6 +128,8 @@ type EditingLinkState = {
 };
 
 export interface GraphInspectorProps {
+  compendium?: LmCompendium | null;
+  onLorebooksChanged?: () => Promise<void>;
   activeNode: LmGraphNode;
   nodeColour: string;
   familyLabel: string;
@@ -154,6 +160,8 @@ export interface GraphInspectorProps {
 }
 
 export function GraphInspector({
+  compendium,
+  onLorebooksChanged,
   activeNode,
   nodeColour,
   familyLabel,
@@ -178,6 +186,17 @@ export function GraphInspector({
   onBatchSaveRelationships,
   onUpdateEntry,
 }: GraphInspectorProps) {
+  const [stubCard, setStubCard] = useState<LmEntityNode | null>(null);
+  const canCreateStub =
+    compendium &&
+    payload.lorebooks.some((book) => compendium.lorebookIds.includes(book.id)) &&
+    activeNode.nodeType === "character" &&
+    !payload.nodes.some(
+      (node) =>
+        node.nodeType === "lore" &&
+        compendium.lorebookIds.includes(node.lorebookId) &&
+        representedCardIds(node.relationships).includes(activeNode.id),
+    );
   const cardRef = useRef<HTMLElement>(null);
   const dragCard = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   const [floatPos, setFloatPos] = useState<{ x: number; y: number } | null>(null);
@@ -885,6 +904,17 @@ export function GraphInspector({
         </p>
       ) : null}
 
+      {stubCard && compendium ? (
+        <StubEntryModal
+          key={`${compendium.id}:${stubCard.id}`}
+          compendium={compendium}
+          card={stubCard}
+          payload={payload}
+          onClose={() => setStubCard(null)}
+          onCreated={onNavigate}
+          onLorebooksChanged={onLorebooksChanged}
+        />
+      ) : null}
       <div className="flex flex-wrap gap-1.5">
         {activeNode.nodeType === "lore" || activeNode.description ? (
           <button
@@ -918,6 +948,16 @@ export function GraphInspector({
           >
             <ExternalLink size="0.75rem" />
             {activeNode.nodeType === "lore" ? "Open in editor" : "Open lorebook"}
+          </button>
+        ) : null}
+        {canCreateStub && activeNode.nodeType === "character" ? (
+          <button
+            type="button"
+            className="mari-chrome-control mari-chrome-control--small"
+            onClick={() => setStubCard(activeNode)}
+          >
+            <FileText size="0.75rem" />
+            Create stub entry
           </button>
         ) : null}
         {onOpenCharacter && activeNode.nodeType === "character" ? (

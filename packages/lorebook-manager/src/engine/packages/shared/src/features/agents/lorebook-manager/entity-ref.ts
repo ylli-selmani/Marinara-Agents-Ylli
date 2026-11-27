@@ -62,3 +62,15 @@ export function isCardOrPersonaRef(ref: string): boolean {
 export function isImpliedMutualLink(targetRef: string, relation: string): boolean {
   return isCardOrPersonaRef(targetRef) && SYMMETRIC_RELATIONS.has(relation.trim());
 }
+
+/** Character Cards represented by an entry; Personas are not card stubs. */
+export function representedCardIds(relationships: Readonly<Record<string, string>>): string[] {
+  return [
+    ...new Set(
+      Object.entries(relationships).flatMap(([ref, relation]) => {
+        const parsed = parseEntityRef(ref);
+        return relation.trim().toLowerCase() === "represents" && parsed?.kind === "char" ? [parsed.id] : [];
+      }),
+    ),
+  ];
+}

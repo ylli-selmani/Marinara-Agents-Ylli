@@ -160,6 +160,9 @@ function RunCard({ run, onInspectNode }: { run: LmLiveRunRecord; onInspectNode: 
                   </button>
                 </div>
               </div>
+              {item.injectedContent !== undefined ? (
+                <p className="whitespace-pre-wrap">{item.injectedContent}</p>
+              ) : null}
               {item.reasons.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {item.reasons.map((reason, index) => {

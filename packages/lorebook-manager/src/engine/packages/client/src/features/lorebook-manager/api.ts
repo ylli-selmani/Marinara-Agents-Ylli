@@ -443,3 +443,19 @@ export async function patchEntryRelationships(
 ): Promise<void> {
   await patchLorebookEntry(lorebookId, entryId, { relationships });
 }
+
+export async function createStubApi(input: {
+  compendiumId: string;
+  characterId: string;
+  lorebookId: string;
+}): Promise<string> {
+  const response = await fetch(`${API_ROOT}/stubs`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders(),
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  const payload = (await response.json()) as { entry: { id: string } };
+  return payload.entry.id;
+}

@@ -1168,6 +1168,8 @@ export function LorebookManagerDetail({ props }: { props: CapabilityProps }) {
           ) : payload ? (
             view === "graph" ? (
               <LorebookGraph
+                compendium={activeCompendium}
+                onLorebooksChanged={notifyLorebooksChanged}
                 payload={payload}
                 selectedLorebookIds={managedSet}
                 collapsedLorebookIds={collapsedLorebookIds}

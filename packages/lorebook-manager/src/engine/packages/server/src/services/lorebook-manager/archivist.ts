@@ -1,5 +1,7 @@
+import { representedCardIds } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import { ENTITY_FAMILIES } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
+  LM_STUB_FIELDS,
   createSheetContent,
   sheetFields,
   sheetFieldEdits,
@@ -476,8 +478,19 @@ export function archivistUserPrompt(
   directory: readonly LmEntryNode[],
   window: readonly LorebookManagerMessageRecord[],
   sheets?: LmSheetOverrides,
+  stubCardNames: ReadonlyMap<string, string> = new Map(),
 ): string {
-  const entries = candidates.map((entry, index) => entryBlock(`c${index + 1}`, entry)).join("\n\n");
+  const entries = candidates
+    .map((entry, index) => {
+      const name = stubCardNames.get(entry.ref);
+      return (
+        entryBlock(`c${index + 1}`, entry) +
+        (name
+          ? `\nstub of the ${name} card: write only its current state here (the card holds the rest); never create a separate entry for ${name}`
+          : "")
+      );
+    })
+    .join("\n\n");
   const rows = directory.map(
     (entry, index) =>
       `d${index + 1} | ${entry.name} | ${entry.tag || entry.family || "-"} | ${entry.keys.slice(0, 4).join(", ") || "-"}`,
@@ -490,7 +503,7 @@ export function archivistUserPrompt(
   );
   const entrySheets = candidates.map(
     (entry, index) =>
-      `c${index + 1} sheet: ${sheetFields(entry.inferredFamily ?? entry.family, sheets).join(", ") || "prose"}`,
+      `c${index + 1} sheet: ${(representedCardIds(entry.relationships).length ? LM_STUB_FIELDS : sheetFields(entry.inferredFamily ?? entry.family, sheets)).join(", ") || "prose"}`,
   );
   return [
     `<sheets>\n${[...templates, ...entrySheets].join("\n")}\n</sheets>`,
@@ -645,10 +658,26 @@ export async function runArchivist(
     },
     lorebookIds,
   );
-  const candidates = stage1.activated
-    .map((item) => item.entry)
-    .filter((entry) => entry.nodeType === "lore" && lorebookIds.has(entry.lorebookId))
-    .slice(0, CANDIDATE_LIMIT);
+  const activeCards = payload.nodes.filter(
+    (node) => node.nodeType === "character" && chat?.characterIds.includes(node.id),
+  );
+  const stubCardNames = new Map<string, string>();
+  for (const entry of loreEntries) {
+    const ids = representedCardIds(entry.relationships);
+    const names = activeCards.filter((card) => ids.includes(card.id)).map((card) => card.name);
+    if (names.length) stubCardNames.set(entry.ref, names.join(", "));
+  }
+  const enabledBooks = new Set(payload.lorebooks.filter((book) => book.enabled).map((book) => book.id));
+  const stubs = loreEntries
+    .filter((entry) => entry.enabled && enabledBooks.has(entry.lorebookId) && stubCardNames.has(entry.ref))
+    .slice(0, 5);
+  const candidates = [
+    ...new Map(
+      [...stubs, ...stage1.activated.map((item) => item.entry).filter((entry) => !stubCardNames.has(entry.ref))].map(
+        (entry) => [entry.ref, entry],
+      ),
+    ).values(),
+  ].slice(0, CANDIDATE_LIMIT);
   const candidateRefs = new Set(candidates.map((entry) => entry.ref));
   const directory = loreEntries.filter((entry) => !candidateRefs.has(entry.ref)).slice(0, DIRECTORY_LIMIT);
   const byShortId = new Map<string, LmEntryNode>([
@@ -680,7 +709,7 @@ export async function runArchivist(
     const completion = await model.chatComplete(
       [
         { role: "system", content: composePrompt("archivist", settings.prompts) },
-        { role: "user", content: archivistUserPrompt(candidates, directory, window, settings.sheets) },
+        { role: "user", content: archivistUserPrompt(candidates, directory, window, settings.sheets, stubCardNames) },
       ],
       {
         ...(archivist.temperature === null ? {} : { temperature: archivist.temperature }),
@@ -752,9 +781,15 @@ export async function runArchivist(
     );
     const fresh = sheetFieldEdits(
       entry.content,
-      sheetFields(entry.inferredFamily ?? entry.family, settings.sheets),
+      representedCardIds(entry.relationships).length
+        ? LM_STUB_FIELDS
+        : sheetFields(entry.inferredFamily ?? entry.family, settings.sheets),
       item.fields,
       Boolean(open),
+    ).filter(
+      (edit) =>
+        !representedCardIds(entry.relationships).length ||
+        LM_STUB_FIELDS.some((field) => field.toLowerCase() === edit.field.toLowerCase()),
     );
     if (fresh.length === 0) {
       skipped.push({ name: entry.name, why: "already known" });
@@ -800,6 +835,22 @@ export async function runArchivist(
     const category: Category = (ARCHIVIST_CATEGORIES as readonly string[]).includes(rawCategory)
       ? (rawCategory as Category)
       : "concept";
+    const card =
+      category === "character" &&
+      activeCards.find((card) =>
+        [card.name, ...(card.nodeType === "character" ? card.aliases : [])].some(
+          (cardName) => comparableFact(name) === comparableFact(cardName),
+        ),
+      );
+    if (card) {
+      skipped.push({
+        name,
+        why: loreEntries.some((entry) => representedCardIds(entry.relationships).includes(card.id))
+          ? "card has a stub"
+          : "card has no stub yet",
+      });
+      continue;
+    }
     const template = sheetFields(category, settings.sheets);
     const content =
       template.length === 0

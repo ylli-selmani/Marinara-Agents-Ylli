@@ -1,4 +1,4 @@
-import { formatEntityRef } from "./entity-ref.js";
+import { formatEntityRef, representedCardIds } from "./entity-ref.js";
 import type {
   EntityFamily,
   LmBookNode,
@@ -507,18 +507,72 @@ export function pinchView(
   return { k, x: to.x - ((from.x - view.x) / view.k) * k, y: to.y - ((from.y - view.y) / view.k) * k };
 }
 
+export function drawnRadius(node: LmGraphNode & { degree: number }, seated = false): number {
+  const base =
+    node.nodeType === "lorebook" ? 16 : node.nodeType === "character" ? 13 : node.nodeType === "persona" ? 12.5 : 10;
+  return (base + Math.min(4, node.degree * 0.5)) * (seated ? 0.6 : 1);
+}
+
+export function seatedStubCards(graph: LmBuiltGraph): Map<string, string> {
+  const cards = new Set(graph.nodes.filter((node) => node.nodeType === "character").map((node) => node.id));
+  const seats = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (node.nodeType !== "lore") continue;
+    const shownCards = representedCardIds(node.relationships).filter((id) => cards.has(id));
+    if (shownCards.length === 1) seats.set(node.ref, `char:${shownCards[0]}`);
+  }
+  return seats;
+}
+
+/** Offsets are screen-sized, just like the node shapes (edgeScale = nodeScreenScale / zoom). */
+export function seatStubPositions(
+  graph: LmBuiltGraph,
+  positions: ReadonlyMap<string, GraphPoint>,
+  edgeScale: number,
+): Map<string, GraphPoint> {
+  const seats = seatedStubCards(graph);
+  const result = new Map([...positions].filter(([ref]) => !seats.has(ref)));
+  const groups = new Map<string, string[]>();
+  for (const [ref, card] of seats) groups.set(card, [...(groups.get(card) ?? []), ref]);
+  for (const [cardRef, refs] of groups) {
+    const card = graph.nodes.find((node) => node.ref === cardRef)!;
+    const point = positions.get(cardRef);
+    if (!point) continue;
+    const radius = drawnRadius(card) + 1;
+    refs.sort().forEach((ref, index) => {
+      const x = refs.length === 1 ? 0 : ((index / (refs.length - 1)) * 2 - 1) * radius * 0.65;
+      result.set(ref, { x: point.x + x * edgeScale, y: point.y + (-radius + Math.abs(x) / Math.sqrt(3)) * edgeScale });
+    });
+  }
+  return new Map([
+    ...[...result].filter(([ref]) => !seats.has(ref)),
+    ...graph.nodes
+      .filter((node) => seats.has(node.ref) && result.has(node.ref))
+      .map((node) => [node.ref, result.get(node.ref)!] as const),
+  ]);
+}
+
 export function nodeAtPoint(
   positions: ReadonlyMap<string, GraphPoint>,
   radiusOf: (ref: string) => number,
   view: GraphView,
   point: GraphPoint,
   minHit: number,
+  frontRefs?: Pick<ReadonlySet<string>, "has">,
 ): string | null {
   let found: string | null = null;
   let nearest = Infinity;
+  let foregroundHit = false;
   for (const [ref, position] of positions) {
     const distance = Math.hypot(position.x * view.k + view.x - point.x, position.y * view.k + view.y - point.y);
-    if (distance <= Math.max(radiusOf(ref) * view.k, minHit / 2) && distance < nearest) {
+    const radius = radiusOf(ref) * view.k;
+    const foreground = frontRefs?.has(ref) && distance <= radius;
+    // Seated shapes win their physical overlap; other nodes keep nearest-target picking.
+    if (
+      (foreground && (!foregroundHit || distance < nearest)) ||
+      (!foregroundHit && distance <= Math.max(radius, minHit / 2) && distance < nearest)
+    ) {
+      foregroundHit ||= Boolean(foreground);
       nearest = distance;
       found = ref;
     }
@@ -556,6 +610,18 @@ export function layoutGraph(
   iterations = LAYOUT_MAX_ITERATIONS,
   spread = 1,
 ): LayoutResult {
+  const seats = seatedStubCards(graph);
+  if (seats.size)
+    graph = {
+      nodes: graph.nodes.filter((node) => !seats.has(node.ref)),
+      edges: graph.edges
+        .map((edge) => ({
+          ...edge,
+          sourceRef: seats.get(edge.sourceRef) ?? edge.sourceRef,
+          targetRef: seats.get(edge.targetRef) ?? edge.targetRef,
+        }))
+        .filter((edge) => edge.sourceRef !== edge.targetRef),
+    };
   // Repulsion is O(n²) per step on the UI thread; cap the total pair work so a 1,000-node library lays out
   // in well under a second (fewer, coarser steps) instead of freezing the tab. ~220 nodes still get every step.
   const pairBudgetSteps = Math.max(

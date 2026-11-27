@@ -489,6 +489,7 @@ export async function applyProposal(
       {
         name: typeof data.name === "string" ? data.name : "",
         content: typeof data.content === "string" ? data.content : "",
+        relationships: asRecord(data.relationships) as Record<string, string>,
         ...classifyEntryWithFallback(
           typeof data.tag === "string" ? data.tag : "",
           typeof book?.data.category === "string" ? book.data.category : "",

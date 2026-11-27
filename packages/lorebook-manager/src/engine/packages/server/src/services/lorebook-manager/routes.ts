@@ -3,6 +3,7 @@ import {
   formatEntityRef,
   isImpliedMutualLink,
   parseEntityRef,
+  representedCardIds,
 } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
   classifyEntryWithFallback,
@@ -22,6 +23,7 @@ import {
   createCompendium,
   deleteCompendium,
   getChatCompendiumBinding,
+  getCompendium,
   listCompendiums,
   setChatCompendiumBinding,
   updateCompendium,
@@ -400,6 +402,8 @@ export function setLiveRetrievalRegistered(value: boolean): void {
   liveRetrievalRegistered = value;
 }
 
+const creatingStubs = new Set<string>();
+
 export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.get("/graph", async (request) => {
     const query = request.query as { lorebookIds?: unknown; characterIds?: unknown; personaIds?: unknown } | undefined;
@@ -408,6 +412,71 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
       characterIds: parseLorebookIdsQuery(query?.characterIds),
       personaIds: parseLorebookIdsQuery(query?.personaIds),
     });
+  });
+
+  app.post("/stubs", async (request, reply) => {
+    try {
+      const body = asRecord(request.body);
+      const compendiumId = asString(body.compendiumId).trim();
+      const characterId = asString(body.characterId).trim();
+      const lorebookId = asString(body.lorebookId).trim();
+      if (!compendiumId || !characterId || !lorebookId)
+        throw new CompendiumStoreError("compendiumId, characterId and lorebookId are required", 400);
+      const key = JSON.stringify([compendiumId, characterId]);
+      if (creatingStubs.has(key)) throw new CompendiumStoreError("A stub for this card is being created", 409);
+      creatingStubs.add(key);
+      try {
+        const runtime = getLorebookManagerRuntime();
+        const compendium = await getCompendium(runtime.persistence.documents, compendiumId);
+        if (!compendium) throw new CompendiumStoreError("Compendium not found", 404);
+        if (!compendium.lorebookIds.includes(lorebookId))
+          throw new CompendiumStoreError("The book is not in this Compendium", 400);
+        const payload = await buildLorebookManagerGraphPayload(
+          {
+            lorebookIds: new Set(compendium.lorebookIds),
+            characterIds: new Set([characterId]),
+            onlyRequested: true,
+            skipMentions: true,
+          },
+          runtime,
+        );
+        const card = payload.nodes.find((node) => node.nodeType === "character" && node.id === characterId);
+        if (!payload.lorebooks.some((book) => book.id === lorebookId))
+          throw new CompendiumStoreError("Lorebook not found", 404);
+        if (!card || card.nodeType !== "character") throw new CompendiumStoreError("Character Card not found", 404);
+        if (
+          payload.nodes.some(
+            (node) => node.nodeType === "lore" && representedCardIds(node.relationships).includes(characterId),
+          )
+        )
+          throw new CompendiumStoreError("This card already has a stub in the Compendium", 409);
+        if (!runtime.resources.createLorebookEntry)
+          throw new CompendiumStoreError("Creating stubs needs a newer Marinara Engine (Capability API 1.839)", 501);
+        try {
+          const entry = await runtime.resources.createLorebookEntry(lorebookId, {
+            name: card.name,
+            keys: [...new Set([card.name, ...card.aliases])].slice(0, 4),
+            tag: "character",
+            description: `Stub for the ${card.name} card`,
+            content: "",
+            matchWholeWords: true,
+            relationships: { [card.ref]: "represents" },
+            characterFilterMode: "exclude",
+            characterFilterIds: [characterId],
+          });
+          return { entry };
+        } catch (error) {
+          throw new CompendiumStoreError(
+            `The Engine refused to create the stub: ${error instanceof Error ? error.message : String(error)}`,
+            502,
+          );
+        }
+      } finally {
+        creatingStubs.delete(key);
+      }
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
   });
 
   app.get("/status", async () => {

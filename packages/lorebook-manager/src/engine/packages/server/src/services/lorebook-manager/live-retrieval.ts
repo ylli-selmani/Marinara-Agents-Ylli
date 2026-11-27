@@ -291,7 +291,9 @@ export function formatLiveLore(
     wrapFormat?: LivePromptContextRequest["wrapFormat"];
   },
 ): string | null {
-  const parts = result.activated.map((item) => item.entry.content.trim()).filter((part) => part.length > 0);
+  const parts = result.activated
+    .map((item) => (item.injectedContent ?? item.entry.content).trim())
+    .filter((part) => part.length > 0);
   if (parts.length === 0) return null;
   const nameOf = (nodeType: "character" | "persona", id: string | null | undefined) =>
     id ? (payload.nodes.find((node) => node.nodeType === nodeType && node.id === id)?.name ?? null) : null;
@@ -332,6 +334,7 @@ export function toLiveRunRecord(
       name: item.entry.name,
       lorebookName: item.entry.lorebookName,
       tier: item.tier,
+      ...(item.injectedContent === undefined ? {} : { injectedContent: item.injectedContent }),
       tokens: item.tokens,
       reasons: item.reasons.map((reason) => ({ kind: reason.kind, detail: reason.detail.slice(0, 120) })),
     })),

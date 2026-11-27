@@ -627,6 +627,27 @@ async function main() {
       !(await untidiedEntryIds(["sheets"])).includes("complete"),
       "finishing a sheet advances its hash from version 5 to 4",
     );
+    await saveSettings(documents, { sheets: { character: ["Role", "Age"] } });
+    sheetEntries.push({
+      id: "stub",
+      name: "Stub",
+      tag: "character",
+      description: "Already summarized.",
+      keys: ["Stub"],
+      matchWholeWords: true,
+      content: "A scout is healing.\nRole: scout\nAffiliation: camp\nRelationships: friends\nCurrently: resting",
+      relationships: { "char:scout": "represents" },
+    });
+    fills.Stub = [{ field: "Status", value: "healing" }];
+    await runCrawler(sheetCompendium.id, { entryIds: ["stub"] });
+    const stubFill = (await sheetPending()).find((proposal) => proposal.targetEntryId === "stub")!;
+    assert.deepEqual(stubFill.patch.fieldEdits, [{ field: "Status", from: null, to: "healing" }]);
+    await applyProposal(runtime, stubFill.id);
+    assert.match(String(sheetEntry("stub").content), /Status: healing$/);
+    assert.ok(
+      !(await untidiedEntryIds(["sheets"])).includes("stub"),
+      "a Crawler fill on a stub stays tidied after Apply",
+    );
   } finally {
     resetLiveClaims();
     release();

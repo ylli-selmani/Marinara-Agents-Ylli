@@ -33,6 +33,9 @@ import {
 import {
   buildLorebookGraph,
   defaultFocus,
+  drawnRadius,
+  seatedStubCards,
+  seatStubPositions,
   LAYOUT_MAX_ITERATIONS,
   layoutGraph,
   neighbourhood,
@@ -45,6 +48,7 @@ import {
   ENTITY_FAMILIES,
   type EntityFamily,
   type LmEntryNode,
+  type LmCompendium,
   type LmGraphEdge,
   type LmGraphNode,
   type LmGraphPayload,
@@ -144,12 +148,6 @@ function hexPoints(radius: number): string {
     points.push(`${(radius * Math.cos(angle)).toFixed(2)},${(radius * Math.sin(angle)).toFixed(2)}`);
   }
   return points.join(" ");
-}
-
-function nodeRadius(node: LmGraphNode & { degree: number }): number {
-  const base =
-    node.nodeType === "lorebook" ? 16 : node.nodeType === "character" ? 13 : node.nodeType === "persona" ? 12.5 : 10;
-  return base + Math.min(4, node.degree * 0.5);
 }
 
 function nodeIcon(node: LmGraphNode): LucideIcon {
@@ -359,6 +357,7 @@ type GraphNodeViewProps = {
   lit: boolean;
   selected: boolean;
   pinned: boolean;
+  seated: boolean;
   simRole?: "direct" | "1hop" | "suppressed" | "seed";
   dimmedBySim?: boolean;
   /** Picked by the toolbar's Mark select (Not tidied, No ID links). */
@@ -374,13 +373,14 @@ const GraphNodeView = memo(function GraphNodeView({
   lit,
   selected,
   pinned,
+  seated,
   simRole,
   dimmedBySim,
   marked,
   showLabel,
   actions,
 }: GraphNodeViewProps) {
-  const radius = nodeRadius(node);
+  const radius = drawnRadius(node, seated);
   const Icon = nodeIcon(node);
   const colour = nodeColour(node);
   const isBook = node.nodeType === "lorebook";
@@ -568,6 +568,8 @@ const GraphNodeView = memo(function GraphNodeView({
 type GraphMark = "none" | "untidied" | "unlinked";
 
 export interface LorebookGraphProps {
+  compendium?: LmCompendium | null;
+  onLorebooksChanged?: () => Promise<void>;
   payload: LmGraphPayload;
   selectedLorebookIds: ReadonlySet<string>;
   collapsedLorebookIds: ReadonlySet<string>;
@@ -590,6 +592,8 @@ export interface LorebookGraphProps {
 }
 
 export function LorebookGraph({
+  compendium,
+  onLorebooksChanged,
   payload,
   selectedLorebookIds,
   collapsedLorebookIds,
@@ -682,6 +686,7 @@ export function LorebookGraph({
   const lastNodeTapRef = useRef<{ ref: string; time: number } | null>(null);
   const dragNode = useRef<{
     ref: string;
+    pickRef: string;
     pointerId: number;
     startScreen: GraphPoint;
     startGraph: GraphPoint;
@@ -732,7 +737,7 @@ export function LorebookGraph({
   useEffect(() => {
     if (!readerState && !showLegend && !expanded) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || document.querySelector("[data-lm-stub-modal]")) return;
       if (readerState) {
         event.preventDefault();
         setReaderState(null);
@@ -809,6 +814,9 @@ export function LorebookGraph({
     };
   }, [graph, whole, focusRef, focusHops]);
 
+  const seats = useMemo(() => seatedStubCards(shown), [shown]);
+  const edgeScale = nodeScale(view.k);
+
   const relationFilter = useMemo(() => filterGraphRelations(shown.edges, relation), [shown.edges, relation]);
   useEffect(() => {
     if (relation !== relationFilter.relation) setRelation(relationFilter.relation);
@@ -830,8 +838,12 @@ export function LorebookGraph({
         edge.sourceRef < edge.targetRef ? `${edge.sourceRef}~${edge.targetRef}` : `${edge.targetRef}~${edge.sourceRef}`,
       );
     }
-    return `${sortedNodeRefsKey}::${[...edgePairs].sort().join("|")}`;
-  }, [sortedNodeRefsKey, shown.edges]);
+    const seatKey = [...seats]
+      .map(([stub, card]) => `${stub}>${card}`)
+      .sort()
+      .join("|");
+    return `${sortedNodeRefsKey}::${[...edgePairs].sort().join("|")}::${seatKey}`;
+  }, [sortedNodeRefsKey, shown.edges, seats]);
 
   const computedPositions = useMemo(() => {
     if (layoutCacheRef.current?.key === topologyKey) {
@@ -875,8 +887,8 @@ export function LorebookGraph({
     for (const [ref, point] of Object.entries(pinnedPositions)) {
       if (merged.has(ref)) merged.set(ref, point);
     }
-    return merged;
-  }, [scaledPositions, pinnedPositions]);
+    return seatStubPositions(shown, merged, edgeScale);
+  }, [scaledPositions, pinnedPositions, shown, edgeScale]);
 
   const adjacency = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -964,11 +976,12 @@ export function LorebookGraph({
       effectivePositions,
       (ref) => {
         const node = nodesByRef.get(ref);
-        return node ? nodeRadius(node) * nodeScale(view.k) : 0;
+        return node ? drawnRadius(node, seats.has(node.ref)) * nodeScale(view.k) : 0;
       },
       view,
       screenPoint(event),
       TAP_TARGET,
+      seats,
     );
 
   const effectivePositionsRef = useRef(effectivePositions);
@@ -1008,10 +1021,12 @@ export function LorebookGraph({
           svgRef.current?.setPointerCapture(event.pointerId);
           return;
         }
-        const startGraph = effectivePositionsRef.current.get(ref);
+        const dragRef = seats.get(ref) ?? ref;
+        const startGraph = effectivePositionsRef.current.get(dragRef);
         if (!startGraph) return;
         dragNode.current = {
-          ref,
+          ref: dragRef,
+          pickRef: ref,
           pointerId: event.pointerId,
           startScreen: point,
           startGraph,
@@ -1019,7 +1034,7 @@ export function LorebookGraph({
         };
       },
     }),
-    [navigateTo, onToggleCollapseLorebook],
+    [navigateTo, onToggleCollapseLorebook, seats],
   );
 
   const activeNode = selectedNodeRef
@@ -1051,12 +1066,17 @@ export function LorebookGraph({
     return familyCounts;
   }, [payload.nodes, selectedLorebookIds, showCharacters, showPersonas]);
 
-  const edgeScale = nodeScale(view.k);
   const labelEveryNode = shown.nodes.length <= LABEL_ALL_LIMIT || view.k >= LABEL_ZOOM;
 
   const edgeLayer = useMemo(
     () =>
       relationFilter.edges.map((edge, index) => {
+        if (
+          edge.kind === "explicit" &&
+          edge.relation.trim().toLowerCase() === "represents" &&
+          seats.get(edge.sourceRef) === edge.targetRef
+        )
+          return null;
         const from = effectivePositions.get(edge.sourceRef);
         const to = effectivePositions.get(edge.targetRef);
         const fromNode = nodesByRef.get(edge.sourceRef);
@@ -1066,8 +1086,8 @@ export function LorebookGraph({
         const dx = to.x - from.x;
         const dy = to.y - from.y;
         const length = Math.hypot(dx, dy) || 1;
-        const gapFrom = (nodeRadius(fromNode) + 2) * edgeScale;
-        const gapTo = (nodeRadius(toNode) + 2) * edgeScale;
+        const gapFrom = (drawnRadius(fromNode, seats.has(fromNode.ref)) + 2) * edgeScale;
+        const gapTo = (drawnRadius(toNode, seats.has(toNode.ref)) + 2) * edgeScale;
         const hasRoom = length > gapFrom + gapTo;
         const inSim =
           simHighlight &&
@@ -1199,51 +1219,61 @@ export function LorebookGraph({
           </line>
         );
       }),
-    [relationFilter.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale, simHighlight],
+    [relationFilter.edges, effectivePositions, nodesByRef, activeId, hoverRef, edgeScale, simHighlight, seats],
   );
 
   const nodeLayer = useMemo(
     () =>
-      shown.nodes.map((node) => {
-        if (!effectivePositions.has(node.ref)) return null;
-        const lit = activeNear?.has(node.ref) ?? false;
-        const selected = node.ref === selectedNodeRef;
-        const simRole: GraphNodeViewProps["simRole"] = simHighlight
-          ? simHighlight.directRefs.has(node.ref)
-            ? "direct"
-            : simHighlight.oneHopRefs.has(node.ref)
-              ? "1hop"
-              : simHighlight.suppressedRefs.has(node.ref)
-                ? "suppressed"
-                : simHighlight.seedRefs.has(node.ref)
-                  ? "seed"
-                  : undefined
-          : undefined;
-        const marked = markedRefs?.has(node.ref) ?? false;
-        // The Mark select dims the other entries; books, cards and personas stay as they are.
-        const dimmedBySim =
-          Boolean(simHighlight && !hoverRef && !simRole) ||
-          Boolean(markedRefs && !simHighlight && !hoverRef && node.nodeType === "lore" && !marked) ||
-          Boolean(relationFilter.refs && !relationFilter.refs.has(node.ref));
-        return (
-          <GraphNodeView
-            key={node.ref}
-            node={node}
-            title={node.name.length > LABEL_LIMIT ? `${node.name.slice(0, LABEL_LIMIT - 1)}…` : node.name}
-            near={pointNear?.has(node.ref) ?? false}
-            lit={lit}
-            selected={selected}
-            pinned={node.ref in pinnedPositions}
-            simRole={simRole}
-            dimmedBySim={dimmedBySim}
-            marked={marked}
-            showLabel={
-              labelEveryNode || Boolean(simRole) || node.ref === focusRef || selected || lit || node.nodeType !== "lore"
-            }
-            actions={nodeActions}
-          />
-        );
-      }),
+      [...shown.nodes]
+        .sort((a, b) => Number(seats.has(a.ref)) - Number(seats.has(b.ref)))
+        .map((node) => {
+          if (!effectivePositions.has(node.ref)) return null;
+          const lit = activeNear?.has(node.ref) ?? false;
+          const selected = node.ref === selectedNodeRef;
+          const simRole: GraphNodeViewProps["simRole"] = simHighlight
+            ? simHighlight.directRefs.has(node.ref)
+              ? "direct"
+              : simHighlight.oneHopRefs.has(node.ref)
+                ? "1hop"
+                : simHighlight.suppressedRefs.has(node.ref)
+                  ? "suppressed"
+                  : simHighlight.seedRefs.has(node.ref)
+                    ? "seed"
+                    : undefined
+            : undefined;
+          const marked = markedRefs?.has(node.ref) ?? false;
+          // The Mark select dims the other entries; books, cards and personas stay as they are.
+          const dimmedBySim =
+            Boolean(simHighlight && !hoverRef && !simRole) ||
+            Boolean(markedRefs && !simHighlight && !hoverRef && node.nodeType === "lore" && !marked) ||
+            Boolean(relationFilter.refs && !relationFilter.refs.has(node.ref));
+          return (
+            <GraphNodeView
+              key={node.ref}
+              node={node}
+              title={node.name.length > LABEL_LIMIT ? `${node.name.slice(0, LABEL_LIMIT - 1)}…` : node.name}
+              near={pointNear?.has(node.ref) ?? false}
+              lit={lit}
+              selected={selected}
+              seated={seats.has(node.ref)}
+              pinned={!seats.has(node.ref) && node.ref in pinnedPositions}
+              simRole={simRole}
+              dimmedBySim={dimmedBySim}
+              marked={marked}
+              showLabel={
+                seats.has(node.ref)
+                  ? selected || hoverRef === node.ref
+                  : labelEveryNode ||
+                    Boolean(simRole) ||
+                    node.ref === focusRef ||
+                    selected ||
+                    lit ||
+                    node.nodeType !== "lore"
+              }
+              actions={nodeActions}
+            />
+          );
+        }),
     [
       shown.nodes,
       effectivePositions,
@@ -1258,6 +1288,7 @@ export function LorebookGraph({
       nodeActions,
       markedRefs,
       relationFilter.refs,
+      seats,
     ],
   );
 
@@ -1272,9 +1303,9 @@ export function LorebookGraph({
       if (!point || !node) continue;
       write(element, `translate(${point.x} ${point.y}) scale(${edgeScale})`);
       const label = element.querySelector("[data-lm-graph-label]");
-      if (label) write(label, `translate(0 ${nodeRadius(node)}) scale(${labelScale})`);
+      if (label) write(label, `translate(0 ${drawnRadius(node, seats.has(node.ref))}) scale(${labelScale})`);
     }
-  }, [nodeLayer, effectivePositions, nodesByRef, edgeScale, labelScale, expanded]);
+  }, [nodeLayer, effectivePositions, nodesByRef, edgeScale, labelScale, expanded, seats]);
 
   const toggleFamily = (family: EntityFamily) =>
     setHiddenFamilies((current) => {
@@ -1286,7 +1317,7 @@ export function LorebookGraph({
   const canGoBack = navIndex > 0;
   const canGoForward = navIndex >= 0 && navIndex < navHistory.length - 1;
   const focusNodeName = focusRef ? allNodesByRef.get(focusRef)?.name : null;
-  const pinnedCount = Object.keys(pinnedPositions).length;
+  const pinnedCount = Object.keys(pinnedPositions).filter((ref) => !seats.has(ref)).length;
   const readerNode = readerState ? (allNodesByRef.get(readerState.ref) ?? null) : null;
   const edgeCounts = useMemo(() => {
     let explicit = 0;
@@ -1301,6 +1332,8 @@ export function LorebookGraph({
   const inspectorCard = activeNode ? (
     <GraphInspector
       activeNode={activeNode}
+      compendium={compendium}
+      onLorebooksChanged={onLorebooksChanged}
       nodeColour={nodeColour(activeNode)}
       familyLabel={FAMILY_META[activeNode.family].label}
       payload={payload}
@@ -1595,13 +1628,13 @@ export function LorebookGraph({
                   if (!finished.moved) {
                     const now = Date.now();
                     const prevTap = lastNodeTapRef.current;
-                    if (prevTap && prevTap.ref === finished.ref && now - prevTap.time < 350) {
+                    if (prevTap && prevTap.ref === finished.pickRef && now - prevTap.time < 350) {
                       lastNodeTapRef.current = null;
-                      const node = nodesByRef.get(finished.ref);
+                      const node = nodesByRef.get(finished.pickRef);
                       if (node) nodeActions.doubleClick(node);
                     } else {
-                      lastNodeTapRef.current = { ref: finished.ref, time: now };
-                      navigateTo(finished.ref);
+                      lastNodeTapRef.current = { ref: finished.pickRef, time: now };
+                      navigateTo(finished.pickRef);
                     }
                   } else {
                     lastNodeTapRef.current = null;

@@ -126,7 +126,7 @@ export interface LmBuiltGraph {
 }
 
 export type LmRetrievalReasonKind =
-  "constant" | "keyword" | "bm25" | "semantic" | "location" | "graph_1hop" | "card_inherited";
+  "constant" | "keyword" | "bm25" | "semantic" | "location" | "graph_1hop" | "card_inherited" | "card_sheet";
 
 export interface LmRetrievalReason {
   kind: LmRetrievalReasonKind;
@@ -141,7 +141,8 @@ export interface LmRetrievalActivatedItem {
   entry: LmEntryNode;
   tokens: number;
   score: number;
-  tier: "constant" | "location" | "direct" | "graph_1hop";
+  tier: "constant" | "location" | "card" | "direct" | "graph_1hop";
+  injectedContent?: string;
   reasons: LmRetrievalReason[];
   viaRefs: string[];
 }
@@ -369,6 +370,7 @@ export interface LmLiveRunRecord {
     name: string;
     lorebookName: string;
     tier: LmRetrievalActivatedItem["tier"];
+    injectedContent?: string;
     tokens: number;
     reasons: Array<{ kind: LmRetrievalReasonKind; detail: string }>;
   }>;

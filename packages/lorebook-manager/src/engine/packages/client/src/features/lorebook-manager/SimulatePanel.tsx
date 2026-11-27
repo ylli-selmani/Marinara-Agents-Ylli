@@ -54,6 +54,7 @@ const SIM_STYLE = `
 export const TIER_LABEL: Record<LmRetrievalActivatedItem["tier"], string> = {
   constant: "Constant",
   location: "Location",
+  card: "Card state",
   direct: "Direct",
   graph_1hop: "1-hop",
 };
@@ -65,6 +66,7 @@ export const REASON_BADGE_STYLE: Record<string, { border: string; text: string }
   bm25: { border: "#3b82f6", text: "#60a5fa" },
   semantic: { border: "#f59e0b", text: "#fbbf24" },
   graph_1hop: { border: "#a855f7", text: "#c084fc" },
+  card_sheet: { border: "#06b6d4", text: "#22d3ee" },
   card_inherited: { border: "#06b6d4", text: "#22d3ee" },
 };
 
@@ -289,8 +291,8 @@ export function SimulatePanel({
               ))}
             </div>
             <p className="text-[0.65rem] text-[var(--muted-foreground)]">
-              Active cards suppress entries set to Exclude them and inherit 1-hop links from any <code>represents</code>{" "}
-              entry.
+              Active cards send only the populated sheet lines of their excluded <code>represents</code> stubs and
+              inherit their 1-hop links. Other excluded entries stay suppressed.
             </p>
           </div>
         ) : null}
@@ -478,6 +480,9 @@ export function SimulatePanel({
                     </button>
                   </div>
                 </div>
+                {item.injectedContent !== undefined ? (
+                  <p className="whitespace-pre-wrap">Sends only: {item.injectedContent ?? item.entry.content}</p>
+                ) : null}
                 <div className="flex flex-wrap gap-1">
                   {item.reasons.map((reason, idx) => {
                     const palette = REASON_BADGE_STYLE[reason.kind] ?? {

@@ -27,7 +27,7 @@ export const LM_RELATIONS: readonly LmRelationDefinition[] = [
   { value: "rival_of", hint: "Enemies or rivals, both ways", symmetric: true },
   {
     value: "represents",
-    hint: "This entry is that Character Card; hidden while the card is active",
+    hint: "This entry is that Character Card's stub: while the card is active, only its current-state lines are sent",
     symmetric: false,
   },
 ];

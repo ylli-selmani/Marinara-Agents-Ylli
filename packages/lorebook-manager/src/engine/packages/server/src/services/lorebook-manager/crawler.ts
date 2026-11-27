@@ -1,5 +1,6 @@
 import {
   parseEntityRef,
+  representedCardIds,
   toRelationshipKey,
 } from "../../../../shared/src/features/agents/lorebook-manager/entity-ref.js";
 import {
@@ -16,7 +17,8 @@ import type {
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import {
-  missingSheetFields,
+  LM_STUB_FIELDS,
+  parseSheetLines,
   sheetFieldEdits,
   sheetFields,
   type LmSheetOverrides,
@@ -105,14 +107,23 @@ const runDocId = (compendiumId: string) => `crawler_run:${compendiumId}`;
  */
 const CRAWLER_RULES_VERSION = 4;
 
-type CrawlEntry = Pick<LmEntryNode, "name" | "content"> & Partial<Pick<LmEntryNode, "family" | "inferredFamily">>;
+type CrawlEntry = Pick<LmEntryNode, "name" | "content"> &
+  Partial<Pick<LmEntryNode, "family" | "inferredFamily" | "relationships">>;
+
+function crawlerSheetFields(entry: CrawlEntry, sheets?: LmSheetOverrides): readonly string[] {
+  return representedCardIds(entry.relationships ?? {}).length
+    ? LM_STUB_FIELDS
+    : sheetFields(entry.inferredFamily ?? entry.family, sheets);
+}
+function crawlerMissingFields(entry: CrawlEntry, sheets?: LmSheetOverrides): string[] {
+  if (!entry.content.trim()) return [];
+  const present = new Set(parseSheetLines(entry.content).map((line) => line.field.toLowerCase()));
+  return crawlerSheetFields(entry, sheets).filter((field) => !present.has(field.toLowerCase()));
+}
 
 /** What the model read of an entry: its name and content, under these rules. A change to either untidies it again. */
 export function crawlHash(entry: CrawlEntry, sheets?: LmSheetOverrides): string {
-  const version =
-    missingSheetFields(entry.content, entry.inferredFamily ?? entry.family, sheets).length > 0
-      ? 5
-      : CRAWLER_RULES_VERSION;
+  const version = crawlerMissingFields(entry, sheets).length > 0 ? 5 : CRAWLER_RULES_VERSION;
   const text = `${version}\n${entry.name}\n${entry.content}`;
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index++) {
@@ -409,7 +420,7 @@ export function crawlerUserPrompt(
   sheets?: LmSheetOverrides,
 ): string {
   const blocks = batch.map((entry, index) => {
-    const missing = missingSheetFields(entry.content, entry.inferredFamily ?? entry.family, sheets);
+    const missing = crawlerMissingFields(entry, sheets);
     const content = entry.content.length > CONTENT_CHARS ? `${entry.content.slice(0, CONTENT_CHARS)}…` : entry.content;
     const keys = entry.keys.map((key) => {
       const others = (keyUse.get(comparableFact(key)) ?? 1) - 1;
@@ -762,9 +773,8 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
     if (description && !entry.description.trim()) patch.description = description;
     const tag = cleanText(item.tag, TAG_CHARS).toLowerCase();
     if (tag && !entry.tag.trim()) patch.tag = tag;
-    const family = entry.inferredFamily ?? entry.family;
-    if (missingSheetFields(entry.content, family, settings.sheets).length > 0) {
-      const fieldEdits = sheetFieldEdits(entry.content, sheetFields(family, settings.sheets), item.fields)
+    if (crawlerMissingFields(entry, settings.sheets).length > 0) {
+      const fieldEdits = sheetFieldEdits(entry.content, crawlerSheetFields(entry, settings.sheets), item.fields)
         .filter((edit) => edit.from === null)
         .filter((edit) => {
           if (groundedSheetValue(edit.to, entry.content)) return true;

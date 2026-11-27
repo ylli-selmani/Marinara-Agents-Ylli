@@ -607,7 +607,14 @@ export function LorebookGraph({
     }
     return new Set(
       payload.nodes
-        .filter((node) => node.nodeType === "lore" && selectedLorebookIds.has(node.lorebookId) && !linked.has(node.ref))
+        // A stored link counts too, also one to an entry in a book the Graph doesn't show.
+        .filter(
+          (node) =>
+            node.nodeType === "lore" &&
+            selectedLorebookIds.has(node.lorebookId) &&
+            !linked.has(node.ref) &&
+            Object.keys(node.relationships).length === 0,
+        )
         .map((node) => node.ref),
     );
   }, [payload.explicitEdges, payload.nodes, selectedLorebookIds]);

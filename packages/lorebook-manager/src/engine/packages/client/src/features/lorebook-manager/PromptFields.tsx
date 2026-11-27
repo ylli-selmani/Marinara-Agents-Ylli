@@ -88,7 +88,7 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
           <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
             {definition.variables.map((variable) => (
               <span key={variable.name} className="block">
-                <code>{`{{${variable.name}}}`}</code> becomes {variable.description.toLowerCase()}.
+                <code>{`{{${variable.name}}}`}</code> becomes {variable.description}.
               </span>
             ))}
           </p>
@@ -96,7 +96,7 @@ export function PromptFields({ value, onChange, disabled }: PromptFieldsProps) {
         {missing.length > 0 ? (
           <p role="status" className="text-[0.6875rem] text-[var(--destructive)]">
             {missing.map((variable) => `{{${variable.name}}}`).join(", ")} is missing, so the model won&apos;t see{" "}
-            {missing.map((variable) => variable.description.toLowerCase()).join(" or ")}.
+            {missing.map((variable) => variable.description).join(" or ")}.
           </p>
         ) : null}
       </div>

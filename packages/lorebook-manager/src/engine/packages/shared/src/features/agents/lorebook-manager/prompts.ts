@@ -91,7 +91,9 @@ const LINKS_INSTRUCTIONS = [
   "is (located_in), what it leads or owns, a lasting ally or rival. An entry with none of these gets no links.",
   "",
   "Link only when the relation is plainly true from the entry's text and the target's summary. Naming, mentioning or",
-  "comparing a target is not a link: an encounter prompt that names three teams links to none of them. Link to the",
+  "comparing a target is not a link: an encounter prompt that names three teams links to none of them. Mind the",
+  "direction: the entry itself must be what the relation says. A team is not a member_of its members' clans; a",
+  "member's own entry is member_of the team. Link to the",
   "closest kind, group or place only: an entry that is_a Ninjutsu gets no is_a Jutsu as well. Something that belongs",
   "to someone (a bloodline, a weapon) gets no link to its owner; the owner's own entry links to it with owns. At most",
   "3 links per entry. The entry's existing links are listed; don't repeat them. When no relation above fits exactly,",
@@ -154,7 +156,7 @@ export const LM_PROMPTS: readonly LmPromptDefinition[] = [
       "The Crawler's second call per batch: links from each entry to the targets listed under it, each with its summary.",
     instructions: LINKS_INSTRUCTIONS,
     format: LINKS_FORMAT,
-    variables: [{ name: "relations", description: "The relations the Crawler may write, one per line with its hint" }],
+    variables: [{ name: "relations", description: "the relations the Crawler may write, one per line with its hint" }],
   },
   {
     key: "archivist",
@@ -162,7 +164,7 @@ export const LM_PROMPTS: readonly LmPromptDefinition[] = [
     description: "Reads settled messages every few turns and suggests new facts for entries and new entries.",
     instructions: ARCHIVIST_INSTRUCTIONS,
     format: ARCHIVIST_FORMAT,
-    variables: [{ name: "categories", description: "The categories a new entry may have" }],
+    variables: [{ name: "categories", description: "the categories a new entry may have" }],
   },
   {
     key: "librarian",

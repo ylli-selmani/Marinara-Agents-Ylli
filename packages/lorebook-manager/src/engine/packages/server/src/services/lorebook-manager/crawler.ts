@@ -767,11 +767,13 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
   const similar = await similarEntries(
     vectorSources.filter((source) => ownBooks.has(source.lorebookId)),
     linkBatch.map((entry) => entry.id),
-    { limit: MAX_SIMILAR_TARGETS, minSimilarity: SIMILAR_MIN },
+    // More than offered: the ones already linked or mentioned drop out below, and the cap there decides.
+    { limit: MAX_SIMILAR_TARGETS + MAX_LINK_TARGETS, minSimilarity: SIMILAR_MIN },
   );
   const shortIds = new Map<string, string>();
   const byShortId = new Map<string, LmEntryNode | LmEntityNode>();
   const linkTargets = new Map<string, CrawlerLinkTarget[]>();
+  const linksAnswered = new Set<string>();
   const targetFor = (node: LmEntryNode | LmEntityNode): CrawlerLinkTarget | null => {
     let shortId = shortIds.get(node.ref);
     if (!shortId) {
@@ -816,10 +818,21 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
       collectLinks(linksAnswer.parsed.entries as unknown[]);
     } else if (linksAnswer.aborted) {
       return { status: "failed", run: null };
+    } else if (trigger === "redo") {
+      // Redo replaces suggestions that may carry links: without new ones it keeps the old (nothing saved or dismissed).
+      return failed(`Links: ${linksAnswer.detail}`);
     } else {
       // The summaries and keys stand on their own; Redo last batch asks for the links again.
       skipped.push({ name: "Links", why: `not checked: ${linksAnswer.detail}` });
     }
+  }
+  // An entry offered targets but not answered in call 2 isn't tidied: it counts a try and its links are asked again.
+  for (const entry of linkBatch) {
+    if ((linkTargets.get(entry.ref)?.length ?? 0) === 0 || linksAnswered.has(entry.id)) continue;
+    const index = tidied.indexOf(entry);
+    if (index < 0) continue;
+    tidied.splice(index, 1);
+    tried.push(entry);
   }
 
   function collectLinks(items: unknown[]) {
@@ -845,12 +858,11 @@ export async function runCrawler(compendiumId: string, options: CrawlerRunOption
       }
       return false;
     };
-    const done = new Set<string>();
     for (const raw of items) {
       const item = asRecord(raw);
       const entry = byEntryId.get(cleanText(item.id, 12));
-      if (!entry || done.has(entry.id) || !patches.has(entry.id)) continue;
-      done.add(entry.id);
+      if (!entry || linksAnswered.has(entry.id) || !patches.has(entry.id)) continue;
+      linksAnswered.add(entry.id);
       const allowed = new Map((linkTargets.get(entry.ref) ?? []).map((target) => [target.shortId, target.node]));
       const addLinks: Array<CrawlerLink & { ref: string }> = [];
       for (const rawLink of Array.isArray(item.links) ? item.links : []) {

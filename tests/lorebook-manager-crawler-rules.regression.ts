@@ -443,6 +443,22 @@ async function main() {
     notTidied = await untidiedEntryIds(["ninja"]);
     assert.ok(notTidied.includes("sharingan"), "an edit untidies it");
     assert.deepEqual(await untidiedEntryIds([]), []);
+
+    // ── A Redo whose links call fails keeps the suggestions it would replace (they may carry links). ──
+    const kept = (await listProposals(documents, "pending")).find((proposal) => proposal.targetEntryId === "clone")!;
+    entry("clone").content = "Copies of the user; the Sharingan can copy it.";
+    answer = (p) =>
+      isLinks(p)
+        ? "not json"
+        : JSON.stringify({ entries: [{ id: shortId(p, "Shadow Clone Technique"), description: "Fourth." }] });
+    const failedRedo = await redoLastCrawl(compendium.id);
+    assert.equal(failedRedo.status, "failed");
+    assert.match(failedRedo.run!.detail ?? "", /^Links: /);
+    assert.equal(
+      (await listProposals(documents)).find((proposal) => proposal.id === kept.id)!.status,
+      "pending",
+      "the old suggestion stays",
+    );
   } finally {
     resetLiveClaims();
     release();

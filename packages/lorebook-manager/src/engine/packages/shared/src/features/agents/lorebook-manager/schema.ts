@@ -395,7 +395,7 @@ export interface LmChatRuns {
   runs: LmLiveRunRecord[];
 }
 
-export type LmProposalStatus = "pending" | "applied" | "dismissed";
+export type LmProposalStatus = "pending" | "applied" | "dismissed" | "undone";
 
 /** What an Archivist run came to. Only Run now records the quiet ones (off, not due, …). */
 export type LmArchivistRunStatus =
@@ -480,6 +480,9 @@ export interface LmProposal extends Required<Omit<LmProposalInput, "reason">> {
   reason: string;
   /** For an applied update: the changed fields' values before, for Undo. */
   before: Record<string, unknown> | null;
+  /** Values returned by the Engine after applying; Undo refuses to overwrite later edits. */
+  after: Record<string, unknown> | null;
+  appliedBy: "manual" | "automatic" | null;
   appliedEntryId: string | null;
   createdAt: string;
   decidedAt: string | null;

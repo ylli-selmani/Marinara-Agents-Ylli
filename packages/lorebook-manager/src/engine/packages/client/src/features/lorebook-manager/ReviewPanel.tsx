@@ -34,6 +34,7 @@ const STATUS_LABEL: Record<LmProposalStatus, string> = {
   pending: "Pending",
   applied: "Applied",
   dismissed: "Dismissed",
+  undone: "Undone",
 };
 
 const FIELD_LABEL: Record<string, string> = {
@@ -509,7 +510,9 @@ export function ReviewPanel({ payload, compendium, onInspectNode }: ReviewPanelP
             ? "Nothing to review. The Archivist's suggestions from your chats and the Crawler's from Tidy entries wait here until you apply or dismiss them."
             : status === "applied"
               ? "No applied suggestions yet."
-              : "No dismissed suggestions."}
+              : status === "undone"
+                ? "No undone suggestions yet."
+                : "No dismissed suggestions."}
         </div>
       ) : (
         <div className="space-y-1.5">

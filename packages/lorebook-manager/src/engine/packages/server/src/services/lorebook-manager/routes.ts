@@ -39,7 +39,7 @@ import {
 } from "./crawler.js";
 import { refreshLiveClaimsSafely } from "./live-claims.js";
 import { clearLiveRuns, listLiveRuns } from "./live-retrieval.js";
-import { applyProposal, dismissProposal, listProposals } from "./proposals-store.js";
+import { applyProposal, dismissProposal, listProposals, undoProposal } from "./proposals-store.js";
 import { getLorebookManagerRuntime } from "./package-runtime.js";
 import { getSettings, resetSettings, saveSettings, type SaveSettingsInput } from "./settings-store.js";
 import { entryVectorSource, indexLorebooks, semanticScoresFor, type EntryVectorSource } from "./semantic-index.js";
@@ -591,7 +591,10 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
   app.get("/proposals", async (request, reply) => {
     try {
       const status = (request.query as { status?: unknown } | undefined)?.status;
-      const filter = status === "pending" || status === "applied" || status === "dismissed" ? status : undefined;
+      const filter =
+        status === "pending" || status === "applied" || status === "dismissed" || status === "undone"
+          ? status
+          : undefined;
       return { proposals: await listProposals(getLorebookManagerRuntime().persistence.documents, filter) };
     } catch (error) {
       return sendRouteError(reply, error);
@@ -616,6 +619,15 @@ export const lorebookManagerRoutes: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       return { proposal: await dismissProposal(getLorebookManagerRuntime().persistence.documents, id) };
+    } catch (error) {
+      return sendRouteError(reply, error);
+    }
+  });
+
+  app.post("/proposals/:id/undo", async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      return { proposal: await undoProposal(getLorebookManagerRuntime(), id) };
     } catch (error) {
       return sendRouteError(reply, error);
     }

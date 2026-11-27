@@ -131,6 +131,7 @@ export interface LorebookManagerRuntimeHost {
       entryId: string,
       patch: Record<string, unknown>,
     ): Promise<{ id: string; lorebookId: string; data: Record<string, unknown> } | null>;
+    removeLorebookEntry?(entryId: string): Promise<void>;
   };
   persistence: {
     documents: LorebookManagerDocumentStore;

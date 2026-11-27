@@ -9,6 +9,7 @@ import type {
   LmProposal,
 } from "../../../../shared/src/features/agents/lorebook-manager/schema.js";
 import { LOREBOOK_MANAGER_PACKAGE_ID } from "./compendiums-store.js";
+import { crawlAfterArchivist } from "./crawler.js";
 import { agentAddedToChat, compendiumForChat } from "./live-claims.js";
 import { parseExtra } from "./live-retrieval.js";
 import {
@@ -16,7 +17,14 @@ import {
   type LorebookManagerDocumentStore,
   type LorebookManagerMessageRecord,
 } from "./package-runtime.js";
-import { appendProposalFacts, comparableFact, createProposal, listProposals, novelFacts } from "./proposals-store.js";
+import {
+  appendProposalFacts,
+  applyProposal,
+  comparableFact,
+  createProposal,
+  listProposals,
+  novelFacts,
+} from "./proposals-store.js";
 import { buildLorebookManagerGraphPayload } from "./routes.js";
 import { getSettings } from "./settings-store.js";
 import {
@@ -27,7 +35,7 @@ import {
 // ── The Archivist: Lookup-then-Diff after the turn, in the background (Long-Term Memory's auto-import pattern). ──
 // The contributor arms a job per chat; after a quiet period the job reads the settled messages past its watermark,
 // looks up the entries they touch (Stage 1 over the window), and asks one model for new facts and new entries.
-// Everything goes to Review until B1c (Automatic mode with Undo).
+// Automatic follows the chat's Review Agent Outputs switch; other changes wait in Review.
 
 /** A job waits this long after the last turn in its chat... */
 export const ARCHIVIST_QUIET_MS = 4_000;
@@ -584,6 +592,23 @@ export async function runArchivist(
   ]);
   const archivistPending = pendingProposals.filter((proposal) => proposal.source === "archivist");
   const archivistDismissed = dismissedProposals.filter((proposal) => proposal.source === "archivist");
+  // Re-read after the model call: approval may have been enabled while it was thinking.
+  const currentChat = typeof persistence.getChat === "function" ? await persistence.getChat(chatId) : null;
+  const automatic =
+    archivist.mode === "automatic" &&
+    currentChat !== null &&
+    parseExtra(currentChat.metadata).agentWriteApprovalRequired !== true;
+  const handleProposal = async (proposal: LmProposal) => {
+    proposalIds.push(proposal.id);
+    if (!automatic || proposal.duplicateOfEntryId) return;
+    try {
+      const applied = await applyProposal(runtime, proposal.id, undefined, undefined, "automatic");
+      void crawlAfterArchivist(applied);
+    } catch (error) {
+      // A refused write stays pending so Review can explain and retry it.
+      skipped.push({ name: proposal.entryName, why: error instanceof Error ? error.message : "Could not apply" });
+    }
+  };
 
   for (const raw of (Array.isArray(parsed.updates) ? parsed.updates : []).slice(0, MAX_UPDATES)) {
     const item = asRecord(raw);
@@ -612,7 +637,7 @@ export async function runArchivist(
     if (open) {
       const folded = await appendProposalFacts(documents, open, fresh, sourceMessageRefs);
       if (folded) {
-        proposalIds.push(folded.id);
+        await handleProposal(folded);
         updates += 1;
         continue;
       }
@@ -629,7 +654,7 @@ export async function runArchivist(
       sourceMessageRefs,
     });
     archivistPending.push(proposal);
-    proposalIds.push(proposal.id);
+    await handleProposal(proposal);
     updates += 1;
   }
 
@@ -687,7 +712,7 @@ export async function runArchivist(
       duplicateOfEntryId: duplicate?.id ?? null,
     });
     archivistPending.push(proposal);
-    proposalIds.push(proposal.id);
+    await handleProposal(proposal);
     creates += 1;
   }
 

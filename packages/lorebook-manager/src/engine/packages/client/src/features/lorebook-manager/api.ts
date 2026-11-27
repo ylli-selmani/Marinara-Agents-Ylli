@@ -378,15 +378,15 @@ export async function fetchSemanticScores(
   return (await response.json()) as { scores: Record<string, number>; info: LmSemanticRunInfo };
 }
 
-export async function fetchProposals(status: LmProposalStatus): Promise<LmProposal[]> {
-  const payload = await readJson<{ proposals?: LmProposal[] }>(`/proposals?status=${status}`);
+export async function fetchProposals(status?: LmProposalStatus): Promise<LmProposal[]> {
+  const payload = await readJson<{ proposals?: LmProposal[] }>(`/proposals${status ? `?status=${status}` : ""}`);
   return Array.isArray(payload.proposals) ? payload.proposals : [];
 }
 
 /** `patch`: the suggestion as trimmed in Review (Apply only); the server takes only less of it. */
 export async function decideProposalApi(
   id: string,
-  decision: "apply" | "dismiss",
+  decision: "apply" | "dismiss" | "undo",
   patch?: Record<string, unknown>,
   /** The revision `patch` was edited on. */
   revision?: number,

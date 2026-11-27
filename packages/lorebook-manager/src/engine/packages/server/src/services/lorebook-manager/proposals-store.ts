@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { LM_RELATION_VALUES } from "../../../../shared/src/features/agents/lorebook-manager/relations.js";
 import type {
   LmProposal,
@@ -13,7 +14,7 @@ import type { LorebookManagerDocumentStore, LorebookManagerRuntimeHost } from ".
  * refuses locked entries.
  */
 export const PROPOSAL_DOC_KIND = "proposal";
-const PROPOSAL_STATUSES: readonly LmProposalStatus[] = ["pending", "applied", "dismissed"];
+const PROPOSAL_STATUSES: readonly LmProposalStatus[] = ["pending", "applied", "dismissed", "undone"];
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -43,6 +44,8 @@ function toProposal(id: string, revision: number, raw: unknown): LmProposal | nu
       : [],
     duplicateOfEntryId: typeof data.duplicateOfEntryId === "string" ? data.duplicateOfEntryId : null,
     before: data.before && typeof data.before === "object" ? asRecord(data.before) : null,
+    after: data.after && typeof data.after === "object" ? asRecord(data.after) : null,
+    appliedBy: data.appliedBy === "automatic" ? "automatic" : data.appliedBy === "manual" ? "manual" : null,
     appliedEntryId: typeof data.appliedEntryId === "string" ? data.appliedEntryId : null,
     createdAt: typeof data.createdAt === "string" ? data.createdAt : "",
     decidedAt: typeof data.decidedAt === "string" ? data.decidedAt : null,
@@ -269,6 +272,8 @@ export async function createProposal(
     sourceMessageRefs: input.sourceMessageRefs ?? [],
     duplicateOfEntryId: input.duplicateOfEntryId ?? null,
     before: null,
+    after: null,
+    appliedBy: null,
     appliedEntryId: null,
     createdAt: now,
     decidedAt: null,
@@ -313,7 +318,7 @@ async function saveDecision(documents: LorebookManagerDocumentStore, next: LmPro
     name: next.entryName || "Lorebook change",
     description: "",
     data: proposalData(next),
-    updatedAt: next.decidedAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   });
   if (!updated) throw new CompendiumStoreError("Suggestion changed meanwhile; reload and try again", 409);
   return { ...next, revision: updated.revision };
@@ -336,6 +341,7 @@ export async function applyProposal(
   edits?: unknown,
   /** The revision the edits were made on: a suggestion that grew meanwhile (more facts) is refused, not cut. */
   editedRevision?: number,
+  appliedBy: "manual" | "automatic" = "manual",
 ): Promise<LmProposal> {
   const documents = runtime.persistence.documents;
   const { createLorebookEntry, updateLorebookEntry, listLorebooks } = runtime.resources;
@@ -354,10 +360,22 @@ export async function applyProposal(
     throw new CompendiumStoreError("A new entry needs its content", 400);
   }
   const decidedAt = new Date().toISOString();
+  const appliedDecision = async (next: LmProposal): Promise<LmProposal> => {
+    return saveDecision(documents, { ...next, appliedBy });
+  };
 
   if (proposal.kind === "create_entry") {
     const created = await createLorebookEntry(proposal.lorebookId, { name: proposal.entryName, ...proposal.patch });
-    return saveDecision(documents, { ...proposal, status: "applied", appliedEntryId: created.id, decidedAt });
+    return appliedDecision({
+      ...proposal,
+      status: "applied",
+      // Only what this create wrote: the Engine may rewrite other fields (embedding, updatedAt) in the background.
+      after: structuredClone(
+        Object.fromEntries(["name", ...Object.keys(proposal.patch)].map((key) => [key, created.data[key] ?? null])),
+      ),
+      appliedEntryId: created.id,
+      decidedAt,
+    });
   }
 
   if (proposal.kind === "update_book") {
@@ -378,11 +396,12 @@ export async function applyProposal(
     const kept = new Set(listed.map((item) => item.id));
     const original = Array.isArray(loaded.patch.wholeWords) ? loaded.patch.wholeWords.map(asRecord) : [];
     const leftOut = original.filter((item) => typeof item.id === "string" && !kept.has(item.id));
-    return saveDecision(documents, {
+    return appliedDecision({
       ...proposal,
       patch: { wholeWords: applied, ...(leftOut.length > 0 ? { leftOut } : {}) },
       status: "applied",
       before: Object.fromEntries(applied.map((item) => [item.id as string, { matchWholeWords: false }])),
+      after: Object.fromEntries(applied.map((item) => [item.id as string, { matchWholeWords: true }])),
       decidedAt,
     });
   }
@@ -399,20 +418,72 @@ export async function applyProposal(
     facts.length > 0
       ? { ...fields, content: mergeNewFacts(typeof current.content === "string" ? current.content : "", facts) }
       : fields;
-  const before = Object.fromEntries(Object.keys(patch).map((key) => [key, current[key] ?? null]));
+  const before = structuredClone(Object.fromEntries(Object.keys(patch).map((key) => [key, current[key] ?? null])));
+  let after: Record<string, unknown>;
   try {
     const updated = await updateLorebookEntry(proposal.targetEntryId!, patch);
     if (!updated) throw new CompendiumStoreError("The entry this suggestion changes no longer exists", 404);
+    after = structuredClone(Object.fromEntries(Object.keys(patch).map((key) => [key, updated.data[key] ?? null])));
   } catch (error) {
     if (error instanceof CompendiumStoreError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     throw new CompendiumStoreError(message || "The Engine refused this change", 409);
   }
-  return saveDecision(documents, {
+  return appliedDecision({
     ...proposal,
     status: "applied",
     before,
+    after,
     appliedEntryId: proposal.targetEntryId,
     decidedAt,
   });
+}
+
+// Refuse overlapping Undo requests for the same suggestion while its entry write is in flight.
+const undoing = new Set<string>();
+
+export async function undoProposal(runtime: LorebookManagerRuntimeHost, id: string): Promise<LmProposal> {
+  if (undoing.has(id)) throw new CompendiumStoreError("Undo is already in progress", 409);
+  undoing.add(id);
+  try {
+    const documents = runtime.persistence.documents;
+    const doc = await documents.getById(LOREBOOK_MANAGER_PACKAGE_ID, id);
+    const proposal = doc && doc.kind === PROPOSAL_DOC_KIND ? toProposal(doc.id, doc.revision, doc.data) : null;
+    if (!proposal) throw new CompendiumStoreError("Suggestion not found", 404);
+    if (proposal.status !== "applied") throw new CompendiumStoreError("This suggestion cannot be undone again", 409);
+    if (!proposal.after || proposal.kind === "update_book") {
+      throw new CompendiumStoreError("Undo is unavailable for this suggestion", 409);
+    }
+    const [book] = await runtime.resources.listLorebooks([proposal.lorebookId]);
+    const current = (book?.entries ?? []).map(asRecord).find((entry) => entry.id === proposal.appliedEntryId);
+    if (
+      !current ||
+      !Object.entries(proposal.after).every(([key, value]) => isDeepStrictEqual(current[key] ?? null, value))
+    ) {
+      throw new CompendiumStoreError("Changed since: Undo would overwrite newer edits", 409);
+    }
+    if (current.locked === true) throw new CompendiumStoreError("This entry is locked", 409);
+    try {
+      if (proposal.kind === "create_entry") {
+        if (!runtime.resources.removeLorebookEntry) {
+          throw new CompendiumStoreError("Undo needs an Engine with resources.removeLorebookEntry", 501);
+        }
+        await runtime.resources.removeLorebookEntry(proposal.appliedEntryId!);
+      } else {
+        if (!proposal.before || !runtime.resources.updateLorebookEntry) {
+          throw new CompendiumStoreError("Undo is unavailable for this suggestion", 409);
+        }
+        if (!(await runtime.resources.updateLorebookEntry(proposal.appliedEntryId!, proposal.before))) {
+          throw new CompendiumStoreError("Changed since: Undo would overwrite newer edits", 409);
+        }
+      }
+    } catch (error) {
+      if (error instanceof CompendiumStoreError) throw error;
+      throw new CompendiumStoreError(error instanceof Error ? error.message : "The Engine refused Undo", 409);
+    }
+    // Keep the apply time so Undo doesn't move an old change to the top of Activity.
+    return await saveDecision(documents, { ...proposal, status: "undone" });
+  } finally {
+    undoing.delete(id);
+  }
 }

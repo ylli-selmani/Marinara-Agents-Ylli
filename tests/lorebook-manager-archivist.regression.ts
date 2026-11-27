@@ -25,11 +25,18 @@ import {
 import { contributeLiveLore } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/live-retrieval.js";
 import {
   applyProposal,
+  createProposal,
   dismissProposal,
   listProposals,
   mergeNewFacts,
   novelFacts,
+  undoProposal,
 } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/proposals-store.js";
+import {
+  crawlAfterArchivist,
+  listCrawlerRuns,
+} from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/crawler.js";
+import { lorebookManagerRoutes } from "../packages/lorebook-manager/src/engine/packages/server/src/services/lorebook-manager/routes.js";
 import {
   configureLorebookManagerRuntime,
   type LorebookManagerDocumentRecord,
@@ -173,6 +180,9 @@ async function main() {
         if (entry.locked === true) throw new Error("This entry is locked");
         Object.assign(entry, patch);
         return { id: entryId, lorebookId: "court", data: entry };
+      },
+      async removeLorebookEntry(entryId) {
+        for (const book of books) book.entries = book.entries.filter((entry) => entry.id !== entryId);
       },
     },
   };
@@ -385,6 +395,179 @@ async function main() {
     assert.equal(thirdLong.more, false);
     assert.ok(modelCalls.at(-1)!.prompt.includes("Line 53.") && modelCalls.at(-1)!.prompt.includes("Line 68."));
     answer = () => '{"updates": [], "creates": []}';
+
+    // Automatic uses the same write and Crawler paths, while approval and duplicate creates stay in Review.
+    await saveSettings(documents, { archivist: { mode: "automatic", everyNTurns: 1, readBehind: 0 } });
+    await setChatCompendiumBinding(documents, "chat-auto", compendium.id);
+    await refreshLiveClaims();
+    const autoEntry = () => books[0]!.entries.find((entry) => entry.id === "syliveera")!;
+    const beforeAuto = String(autoEntry().content);
+    metadata = { ...JSON.parse(ADDED), agentWriteApprovalRequired: false };
+    messages = [message("auto-1", "assistant", "Syliveera keeps a gold ring. The Thorn Gate is sealed.")];
+    answer = (prompt) =>
+      JSON.stringify({
+        updates: [
+          { id: shortId(prompt, "Syliveera"), facts: ["Syliveera keeps a gold ring."] },
+          { id: shortId(prompt, "Thorn Gate"), facts: ["A new locked fact."] },
+        ],
+        creates: [],
+      });
+    const realSetTimeout = globalThis.setTimeout;
+    let scheduledCrawls = 0;
+    // Shorten only the Crawler's production debounce, proving Automatic schedules it without a test calling it.
+    globalThis.setTimeout = ((callback: () => void, delay?: number, ...args: unknown[]) => {
+      if (delay === 20_000) scheduledCrawls += 1;
+      return realSetTimeout(callback, delay === 20_000 ? 0 : delay, ...args);
+    }) as typeof setTimeout;
+    let autoRun: Awaited<ReturnType<typeof runArchivist>>;
+    try {
+      autoRun = await runArchivist("chat-auto");
+      answer = () => JSON.stringify({ entries: [] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    assert.equal(scheduledCrawls, 1, "Automatic invoked the after-Archivist Crawler hook");
+    const automatic = (await listProposals(documents)).find((proposal) => proposal.id === autoRun.run!.proposalIds[0])!;
+    assert.equal(automatic.status, "applied");
+    assert.equal(automatic.appliedBy, "automatic");
+    assert.deepEqual(automatic.before, { content: beforeAuto });
+    assert.deepEqual(automatic.after, { content: `${beforeAuto}\n\nSyliveera keeps a gold ring.` });
+    assert.ok(!(await listProposals(documents, "pending")).some((proposal) => proposal.id === automatic.id));
+    assert.ok(autoRun.run!.skipped.some((item) => item.why === "locked"));
+
+    for (let attempt = 0; attempt < 20 && (await listCrawlerRuns()).length === 0; attempt++) {
+      await new Promise((resolve) => realSetTimeout(resolve, 10));
+    }
+    const tidied = (await listCrawlerRuns())[0];
+    assert.equal(tidied?.trigger, "after_archivist");
+    assert.deepEqual(tidied?.entryIds, ["syliveera"]);
+    assert.equal((await listCrawlerRuns()).filter((run) => run.trigger === "after_archivist").length, 1);
+    assert.equal((await undoProposal(runtime, automatic.id)).status, "undone");
+    assert.equal(autoEntry().content, beforeAuto);
+    await assert.rejects(
+      () => undoProposal(runtime, automatic.id),
+      (error: unknown) => error instanceof Error && "statusCode" in error && error.statusCode === 409,
+    );
+    assert.equal((await listProposals(documents, "undone")).length, 1);
+
+    // Both host metadata shapes require approval; switching it on during a model call also prevents auto-apply.
+    for (const shape of ["string", "object", "during-call"]) {
+      metadata =
+        shape === "during-call"
+          ? ADDED
+          : shape === "string"
+            ? JSON.stringify({ ...JSON.parse(ADDED), agentWriteApprovalRequired: true })
+            : { ...JSON.parse(ADDED), agentWriteApprovalRequired: true };
+      messages = [...messages, message(`approval-${shape}`, "assistant", "Syliveera carries a lantern.")];
+      answer = (prompt) => {
+        if (shape === "during-call") metadata = { ...JSON.parse(ADDED), agentWriteApprovalRequired: true };
+        return JSON.stringify({
+          updates: [{ id: shortId(prompt, "Syliveera"), facts: [`Syliveera carries a ${shape} lantern.`] }],
+          creates: [],
+        });
+      };
+      const approval = await runArchivist("chat-auto");
+      const waiting = (await listProposals(documents, "pending")).find((proposal) =>
+        approval.run!.proposalIds.includes(proposal.id),
+      )!;
+      assert.equal(waiting.status, "pending");
+      assert.equal(autoEntry().content, beforeAuto);
+      await dismissProposal(documents, waiting.id);
+    }
+
+    metadata = ADDED; // absent approval switch means off, including a JSON-string host record.
+    messages = [...messages, message("auto-create", "assistant", "Neris lives at the Unseelie Court.")];
+    answer = () =>
+      JSON.stringify({
+        updates: [],
+        creates: [
+          { name: "Syliveera Envoy", category: "character", content: "Syliveera serves the court." },
+          { name: "Neris", category: "character", content: "Neris is a fae scout." },
+        ],
+      });
+    const creations = await runArchivist("chat-auto");
+    const createdProposals = (await listProposals(documents)).filter((proposal) =>
+      creations.run!.proposalIds.includes(proposal.id),
+    );
+    const duplicate = createdProposals.find((proposal) => proposal.duplicateOfEntryId)!;
+    const createdAuto = createdProposals.find((proposal) => proposal.entryName === "Neris")!;
+    assert.equal(duplicate.status, "pending");
+    assert.equal(createdAuto.status, "applied");
+    assert.equal(createdAuto.before, null);
+    assert.equal(createdAuto.after!.content, "Neris is a fae scout.");
+    answer = () => JSON.stringify({ entries: [] });
+    await crawlAfterArchivist(createdAuto, { waitMs: 0 });
+    const neris = books[1]!.entries.find((entry) => entry.id === createdAuto.appliedEntryId)!;
+    neris.keys = ["Neris", "Scout"];
+    await assert.rejects(
+      () => undoProposal(runtime, createdAuto.id),
+      /Changed since: Undo would overwrite newer edits/,
+    );
+    assert.ok(books[1]!.entries.includes(neris), "an edited create is not deleted");
+    neris.keys = structuredClone(createdAuto.after!.keys);
+    // The Engine rewrites fields the create never set (vectorization, timestamps): Undo still works.
+    Object.assign(neris, { embedding: [0.1, 0.2], updatedAt: "2099-01-01T00:00:00.000Z" });
+    assert.equal((await undoProposal(runtime, createdAuto.id)).status, "undone");
+    assert.ok(!books[1]!.entries.some((entry) => entry.id === createdAuto.appliedEntryId));
+
+    // Manual changes use the same snapshots, preserving unrelated edits while reverting only changed fields.
+    const manual = await createProposal(documents, {
+      kind: "update_entry",
+      lorebookId: "court",
+      targetEntryId: "syliveera",
+      entryName: "Syliveera",
+      patch: { content: "Manual content.", keys: ["Syliveera", "Queen"], relationships: { unseelie: "member_of" } },
+      source: "archivist",
+    });
+    const oldKeys = structuredClone(autoEntry().keys);
+    const manuallyApplied = await applyProposal(runtime, manual.id);
+    assert.equal(manuallyApplied.appliedBy, "manual");
+    autoEntry().tag = "character";
+    autoEntry().relationships = { unseelie: "member_of" }; // equal objects compare by value, not identity.
+    await undoProposal(runtime, manual.id);
+    assert.equal(autoEntry().content, beforeAuto);
+    assert.deepEqual(autoEntry().keys, oldKeys);
+    assert.equal(autoEntry().tag, "character");
+    const newer = await createProposal(documents, {
+      kind: "update_entry",
+      lorebookId: "court",
+      targetEntryId: "syliveera",
+      entryName: "Syliveera",
+      patch: { newFacts: ["Syliveera owns a boat."] },
+      source: "archivist",
+    });
+    await applyProposal(runtime, newer.id);
+    autoEntry().content = "A newer edit must survive.";
+    const editedEntry = structuredClone(autoEntry());
+    // Exercise the actual route's status and error body without a server or network listener.
+    type Handler = (request: { params: { id: string } }, reply: unknown) => Promise<unknown>;
+    const posts = new Map<string, Handler>();
+    const app = {
+      get() {},
+      put() {},
+      patch() {},
+      delete() {},
+      post(path: string, handler: Handler) {
+        posts.set(path, handler);
+      },
+    };
+    await lorebookManagerRoutes(app as never, {});
+    let statusCode = 200;
+    const reply = {
+      code(status: number) {
+        statusCode = status;
+        return this;
+      },
+      send(body: unknown) {
+        return body;
+      },
+    };
+    const conflict = await posts.get("/proposals/:id/undo")!({ params: { id: newer.id } }, reply);
+    assert.equal(statusCode, 409);
+    assert.deepEqual(conflict, { error: "Changed since: Undo would overwrite newer edits" });
+    assert.deepEqual(autoEntry(), editedEntry);
+    autoEntry().content = beforeAuto;
 
     // ── The contributor arms the job on a real turn, never on a preview; stopping clears it. ──
     await saveSettings(documents, { archivist: { mode: "suggest" } });
